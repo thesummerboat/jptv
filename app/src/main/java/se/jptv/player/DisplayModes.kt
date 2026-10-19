@@ -8,6 +8,9 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Display
 import androidx.annotation.OptIn
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.media3.common.Format
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
@@ -67,12 +70,28 @@ object DisplayModes {
     /** true om ett byte behövs för den här bildfrekvensen. */
     fun needsSwitch(fps: Float): Boolean = target(fps) != null
 
+    /** Läget vi bytt till (null = TV:ns vanliga läge). */
+    private var switchedTo: Int? = null
+
+    /**
+     * Helsvart skärm medan TV:n byter tillbaka till menyernas läge, så att menyn inte syns
+     * först och sedan blinkar svart. Fjärren är pausad så länge.
+     */
+    var blackout by mutableStateOf(false)
+        private set
+
+    /** Lägger svart över allt direkt (anropas när man går ut ur spelaren, innan menyn ritas). */
+    fun beginBlackout() {
+        if (switchedTo != null && enabled) blackout = true
+    }
+
     /**
      * Byter skärmläge och väntar tills TV:n har bytt (bilden är svart en kort stund).
      * Returnerar true om läget byttes.
      */
     suspend fun switchTo(fps: Float): Boolean {
         restoreJob?.cancel()
+        blackout = false
         val (activity, mode) = target(fps) ?: return false
         val d = display(activity) ?: return false
         val window = activity.window
@@ -91,6 +110,7 @@ object DisplayModes {
             val attrs = window.attributes
             attrs.preferredDisplayModeId = mode.id
             window.attributes = attrs
+            switchedTo = mode.id
             withTimeoutOrNull(5_000) { changed.await() }
         } finally {
             manager.unregisterDisplayListener(listener)
@@ -101,25 +121,67 @@ object DisplayModes {
     }
 
     /**
-     * Spelaren stängs. Läget behålls i menyerna: att byta tillbaka ger en sekunds svart bild,
-     * och nästa film eller kanal har ofta samma bildfrekvens. Byts bara när något annat behövs.
+     * Spelaren stängs. restore = man går tillbaka till menyerna: byt till TV:ns vanliga läge
+     * (hög frekvens i menyerna) bakom svart skärm. Vid nästa avsnitt (restore = false) behålls läget.
      */
-    fun release() {
+    fun release(restore: Boolean) {
         restoreJob?.cancel()
+        if (!restore || switchedTo == null) {
+            blackout = false
+            return
+        }
+        blackout = true
+        restoreJob = scope.launch {
+            try {
+                restoreAndWait()
+            } finally {
+                blackout = false
+            }
+        }
+    }
+
+    private suspend fun restoreAndWait() {
+        val original = originalModeId ?: return
+        val activity = activityRef?.get() ?: return
+        val d = display(activity) ?: return
+        val from = switchedTo
+        val manager = activity.getSystemService(DisplayManager::class.java)
+        val changed = CompletableDeferred<Unit>()
+        val listener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) = Unit
+            override fun onDisplayRemoved(displayId: Int) = Unit
+            override fun onDisplayChanged(displayId: Int) {
+                if (displayId == d.displayId && d.mode.modeId != from) changed.complete(Unit)
+            }
+        }
+        manager.registerDisplayListener(listener, Handler(Looper.getMainLooper()))
+        try {
+            val attrs = activity.window.attributes
+            attrs.preferredDisplayModeId = original
+            activity.window.attributes = attrs
+            switchedTo = null
+            originalModeId = null
+            withTimeoutOrNull(4_000) { changed.await() }
+        } finally {
+            manager.unregisterDisplayListener(listener)
+        }
+        delay(1_200)
     }
 
     /**
-     * Tillbaka till TV:ns vanliga läge direkt. Används när appen lämnas (då syns inget byte i
-     * JPTV, och menyerna är i vanligt läge nästa gång) och när automatisk bildfrekvens stängs av.
+     * Tillbaka till TV:ns vanliga läge direkt, utan att vänta. Används när appen lämnas och när
+     * automatisk bildfrekvens stängs av.
      */
     fun resetNow() {
         restoreJob?.cancel()
+        blackout = false
         val original = originalModeId ?: return
         val activity = activityRef?.get() ?: return
         val attrs = activity.window.attributes
         attrs.preferredDisplayModeId = original
         activity.window.attributes = attrs
         originalModeId = null
+        switchedTo = null
     }
 }
 

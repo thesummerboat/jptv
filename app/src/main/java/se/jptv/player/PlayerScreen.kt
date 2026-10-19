@@ -530,7 +530,8 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         onDispose {
             exo.removeListener(listener)
             exo.clearVideoFrameMetadataListener(fpsMeter)
-            DisplayModes.release()
+            // Tillbaka till menyerna: byt till vanligt läge bakom svart skärm. Nästa avsnitt: behåll.
+            DisplayModes.release(restore = vm.current !is Screen.Player)
             val pos = exo.currentPosition
             val dur = if (exo.duration > 0) exo.duration else item.durationMs
             val transcodeSession = if (transcoding) session else null
@@ -1804,7 +1805,8 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
         onDispose {
             exo.removeListener(listener)
             exo.clearVideoFrameMetadataListener(liveFpsMeter)
-            DisplayModes.release()
+            // Tillbaka till menyerna: byt till vanligt läge bakom svart skärm. Nästa avsnitt: behåll.
+            DisplayModes.release(restore = vm.current !is Screen.Player)
             exo.release()
         }
     }
