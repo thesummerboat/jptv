@@ -14,6 +14,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
+import se.jptv.player.PipWindow
 import se.jptv.player.PlayerScreen
 import se.jptv.ui.DetailsScreen
 import se.jptv.ui.EpisodesScreen
@@ -33,6 +34,7 @@ class MainActivity : ComponentActivity() {
         super.onStop()
         // Appen lämnas: släpp filmens bildfrekvens, så att menyerna startar i TV:ns vanliga läge nästa gång.
         se.jptv.player.DisplayModes.resetNow()
+        se.jptv.ui.ThemePlayer.stop(fade = false)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -68,20 +70,43 @@ private fun navSound(ev: androidx.compose.ui.input.key.KeyEvent): Boolean {
     return false
 }
 
+/** Bild-i-bild: ▶‖ tar kanalen till helskärm, Stopp stänger den. */
+private fun pipKey(vm: AppViewModel, ev: androidx.compose.ui.input.key.KeyEvent): Boolean {
+    if (vm.pip == null || vm.current is Screen.Player) return false
+    val native = ev.nativeKeyEvent
+    val down = native.action == android.view.KeyEvent.ACTION_DOWN && native.repeatCount == 0
+    return when (native.keyCode) {
+        android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, android.view.KeyEvent.KEYCODE_MEDIA_PLAY -> {
+            if (down) vm.resumePip()
+            true
+        }
+        android.view.KeyEvent.KEYCODE_MEDIA_STOP -> {
+            if (down) vm.closePip()
+            true
+        }
+        else -> false
+    }
+}
+
 @Composable
 fun JptvApp(vm: AppViewModel = viewModel()) {
-    // Tillbaka-knappen på fjärren går ett steg bakåt; på första skärmen stängs appen som vanligt.
-    BackHandler(enabled = vm.stack.size > 1) { vm.back() }
+    // Tillbaka-knappen på fjärren går ett steg bakåt; på första skärmen stängs först bild-i-bild,
+    // sedan appen som vanligt.
+    BackHandler(enabled = vm.stack.size > 1 || vm.pip != null) {
+        if (!vm.back()) vm.closePip()
+    }
 
     // TV:n låter appen leva i dagar i bakgrunden: uppdatera spellista, guide och hemskärm vid återkomst.
     LifecycleEventEffect(Lifecycle.Event.ON_START) { vm.refreshIfStale() }
+    // Appen lämnas: bild-i-bild stängs, så att strömmen inte tar en anslutning i onödan.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { vm.closePip() }
 
     Box(
         Modifier
             .fillMaxSize()
             .background(JptvColors.Background)
             // Medan TV:n byter frekvens är skärmen svart; fjärren väntar så länge.
-            .onPreviewKeyEvent { se.jptv.player.DisplayModes.blackout },
+            .onPreviewKeyEvent { ev -> se.jptv.player.DisplayModes.blackout || pipKey(vm, ev) },
     ) {
         val screen = vm.current
         // key() ger varje skärm färskt tillstånd när den öppnas.
@@ -109,6 +134,8 @@ fun JptvApp(vm: AppViewModel = viewModel()) {
             }
             }
         }
+        val pip = vm.pip
+        if (pip != null && screen !is Screen.Player) PipWindow(vm, pip)
         if (se.jptv.player.DisplayModes.blackout) {
             Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black))
         }

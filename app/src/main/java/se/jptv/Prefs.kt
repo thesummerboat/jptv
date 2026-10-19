@@ -88,6 +88,21 @@ class Prefs(context: Context) {
         get() = sp.getInt("tunneling", 0)
         set(value) { sp.edit().putInt("tunneling", value).apply() }
 
+    /** Ljudlös trailer bakom hemskärmens stora ruta. */
+    var heroTrailers: Boolean
+        get() = sp.getBoolean("hero_trailers", true)
+        set(value) { sp.edit().putBoolean("hero_trailers", value).apply() }
+
+    /** Seriens ledmotiv på seriesidan. */
+    var themeMusic: Boolean
+        get() = sp.getBoolean("theme_music", true)
+        set(value) { sp.edit().putBoolean("theme_music", value).apply() }
+
+    /** Live-kanalen spelar vidare i ett hörn när man går ur spelaren. */
+    var pip: Boolean
+        get() = sp.getBoolean("pip", true)
+        set(value) { sp.edit().putBoolean("pip", value).apply() }
+
     /** Byt TV:ns bildfrekvens efter filmen/kanalen. */
     var autoFrameRate: Boolean
         get() = sp.getBoolean("auto_frame_rate", true)

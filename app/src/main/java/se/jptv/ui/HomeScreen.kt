@@ -14,12 +14,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -73,8 +76,20 @@ fun HomeScreen(vm: AppViewModel) {
     // Fokus sätts en gång när skärmen öppnas; senare omladdningar ska inte rycka fokus.
     var initialFocusDone by remember { mutableStateOf(false) }
 
+    // Trailer i bakgrunden: bilden tonas bort när trailern har börjat visas.
+    val trailer = remember { TrailerState() }
+    val imageAlpha by animateFloatAsState(
+        targetValue = if (trailer.showing) 0f else 1f,
+        animationSpec = tween(if (trailer.showing) 900 else 300),
+        label = "trailer",
+    )
+
     Box(Modifier.fillMaxSize()) {
-        Backdrop(vm.plex.imageUrl(focusedItem?.art, 1280, 720))
+        Backdrop(
+            url = vm.plex.imageUrl(focusedItem?.art, 1280, 720),
+            imageAlpha = imageAlpha,
+            video = { HeroTrailer(vm, focusedItem, enabled = menuFor == null, state = trailer) },
+        )
         Column(
             Modifier
                 .fillMaxSize()
@@ -113,7 +128,14 @@ fun HomeScreen(vm: AppViewModel) {
                 Spacer(Modifier.height(16.dp))
             }
 
-            FocusedInfo(vm, focusedItem, focusedChannel)
+            Row {
+                Box(Modifier.weight(1f)) { FocusedInfo(vm, focusedItem, focusedChannel) }
+                // Bild-i-bild: kanalen i den stora rutans högra hörn.
+                if (vm.pip != null) {
+                    Spacer(Modifier.width(16.dp))
+                    se.jptv.player.PipSlot(vm, Modifier.padding(top = 8.dp, end = 48.dp).size(256.dp, 144.dp))
+                }
+            }
 
             val error = vm.homeError
             when {
