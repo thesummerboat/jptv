@@ -193,6 +193,22 @@ fun SettingsScreen(vm: AppViewModel) {
                 )
             }
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(onClick = { vm.cycleTunneling() }) {
+                Text(
+                    "Tunnlad uppspelning: " + when (vm.tunnelingMode) {
+                        1 -> "PÅ"
+                        2 -> "AV"
+                        else -> if (vm.useTunneling()) "Auto (på)" else "Auto (av)"
+                    },
+                )
+            }
+            Text(
+                "TV:ns videochip sköter bildtakten. Ger jämnare film på TV med inbyggd app (t.ex. TCL).",
+                color = JptvColors.TextDim,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedButton(onClick = { vm.refreshImdb(force = true) }) { Text("Uppdatera IMDb-betyg") }
             if (vm.notInterested.isNotEmpty()) {

@@ -74,6 +74,16 @@ object DisplayModes {
         return if (chosen == null) null else activity to chosen
     }
 
+    /**
+     * true på TV-apparater med inbyggd app som bara erbjuder ett skärmläge (t.ex. TCL:
+     * 1080p @ 60 Hz för menyerna, medan filmen går i ett eget videolager i 4K).
+     */
+    fun singleMode(): Boolean {
+        val activity = activityRef?.get() ?: return false
+        val d = display(activity) ?: return false
+        return d.supportedModes.map { Math.round(it.refreshRate) }.distinct().size <= 1
+    }
+
     /** Alla lägen TV:n erbjuder, t.ex. "3840×2160: 60/50/23,976 Hz · 1920×1080: 60 Hz". */
     fun modesSummary(): String? {
         val activity = activityRef?.get() ?: return null

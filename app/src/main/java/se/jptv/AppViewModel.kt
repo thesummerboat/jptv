@@ -213,6 +213,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var navSound by mutableStateOf(prefs.navSound)
         private set
 
+    var tunnelingMode by mutableStateOf(prefs.tunneling)
+        private set
+
+    /** Om spelaren ska använda tunnlad uppspelning just nu. */
+    fun useTunneling(): Boolean = when (tunnelingMode) {
+        1 -> true
+        2 -> false
+        else -> se.jptv.player.DisplayModes.singleMode()
+    }
+
+    fun cycleTunneling() {
+        val next = (tunnelingMode + 1) % 3
+        tunnelingMode = next
+        prefs.tunneling = next
+    }
+
     fun cycleNavSound() {
         val next = (navSound + 1) % 3
         navSound = next
