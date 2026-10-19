@@ -60,7 +60,8 @@ fun JptvApp(vm: AppViewModel = viewModel()) {
             when (screen) {
                 Screen.Login -> LoginScreen(vm)
                 Screen.Home -> HomeScreen(vm)
-                is Screen.Section -> SectionScreen(vm, screen.section)
+                is Screen.Section -> SectionScreen(vm, screen.section, screen.genre)
+                is Screen.Collection -> se.jptv.ui.CollectionScreen(vm, screen.collection)
                 is Screen.Episodes -> EpisodesScreen(vm, screen.container)
                 is Screen.Details -> DetailsScreen(vm, screen.item)
                 Screen.LiveTv -> LiveTvScreen(vm)

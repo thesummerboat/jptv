@@ -35,7 +35,7 @@ data class PlexStream(
 }
 
 /** Betyg från t.ex. IMDb eller Rotten Tomatoes, som Plex har hämtat. */
-data class PlexRating(val source: String, val text: String)
+data class PlexRating(val source: String, val text: String, val value: Double = 0.0)
 
 /** En träff från Plex undertextsökning (OpenSubtitles m.fl.). */
 data class SubtitleResult(
@@ -50,12 +50,16 @@ data class SubtitleResult(
 
 data class PlexSearchHub(val title: String, val items: List<PlexItem>)
 
+/** Sortering. IMDB sorteras i appen efter IMDb-betyget, de andra av servern. */
 enum class LibrarySort(val label: String, val param: String) {
     TITLE("A–Ö", "titleSort"),
-    ADDED("Nyligen tillagt", "addedAt:desc"),
+    ADDED("Nytt", "addedAt:desc"),
     YEAR("År", "year:desc"),
-    RATING("Betyg", "audienceRating:desc"),
+    IMDB("IMDb", "titleSort"),
 }
+
+/** En genre (eller annat filter) i ett bibliotek. id används i adressen: all?genre=id. */
+data class PlexFilterOption(val id: String, val title: String)
 
 /** Intro- och eftertextsmarkörer som Plex-servern har hittat. */
 data class PlexMarker(val type: String, val startMs: Long, val endMs: Long, val final: Boolean = false)
@@ -97,6 +101,12 @@ data class PlexItem(
     val hasPreviews: Boolean = false,
     /** IMDb-id, t.ex. "tt0111161". */
     val imdbId: String? = null,
+    /** Biblioteket titeln ligger i (för att kunna dölja bibliotek). */
+    val sectionKey: String? = null,
+    /** Huvudtrailern, t.ex. "/library/metadata/12345". */
+    val primaryExtraKey: String? = null,
+    /** Extramaterialets typ (1 = trailer) för klipp. */
+    val extraType: Int? = null,
 ) {
     /** Märken som 4K, Dolby Vision, Atmos och 5.1, från filens spår (eller grovt från listdata). */
     val badges: List<String>
@@ -145,6 +155,8 @@ data class PlexItem(
     val isPlayable: Boolean get() = type == "movie" || type == "episode"
 
     val isContainer: Boolean get() = type == "show" || type == "season"
+
+    val isCollection: Boolean get() = type == "collection"
 
     /** Det som visas stort: serienamnet för avsnitt, annars titeln. */
     val displayTitle: String get() = if (type == "episode") showTitle ?: title else title

@@ -83,8 +83,10 @@ fun HomeScreen(vm: AppViewModel) {
                 Button(onClick = { vm.open(Screen.LiveTv) }, modifier = Modifier.focusRequester(topFocus)) {
                     Text("Live-TV")
                 }
-                vm.sections.forEach { section ->
-                    OutlinedButton(onClick = { vm.open(Screen.Section(section)) }) { Text(section.title) }
+                vm.visibleSections.forEach { section ->
+                    OutlinedButton(onClick = { vm.open(Screen.Section(section)) }) {
+                        Text(if (section.key in vm.favoriteSections) "★ ${section.title}" else section.title)
+                    }
                 }
                 OutlinedButton(onClick = { vm.open(Screen.Search) }) { Text("Sök") }
                 OutlinedButton(onClick = { vm.open(Screen.Settings) }) { Text("Inställningar") }
@@ -249,7 +251,47 @@ private fun HomeRows(
                 }
             }
         }
-        itemsIndexed(rows, key = { r, row -> rowKey(rows, r) }) { r, row ->
+        // Bläddra efter genre: efter Fortsätt titta och Nytt, före resten av raderna.
+        val lead = vm.homeLeadRows.coerceAtMost(rows.size)
+        itemsIndexed(rows.take(lead), key = { r, _ -> rowKey(rows, r) }) { r, row ->
+            HomeRow(vm, rows, r, row, focusKey, focusRequester, onFocused, onLongPress)
+        }
+        vm.genreShortcuts.forEach { (section, genres) ->
+            item(key = "genres_${section.key}") {
+                Column {
+                    Text("Bläddra i ${section.title}", style = MaterialTheme.typography.titleLarge)
+                    Spacer(Modifier.height(12.dp))
+                    LazyRow(
+                        state = vm.rememberListState("home_genres_${section.key}"),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        contentPadding = PaddingValues(end = 48.dp, top = 6.dp, bottom = 6.dp),
+                    ) {
+                        itemsIndexed(genres, key = { _, g -> g.id }) { _, g ->
+                            OutlinedButton(onClick = { vm.open(Screen.Section(section, g)) }) { Text(g.title) }
+                        }
+                    }
+                }
+            }
+        }
+        itemsIndexed(rows.drop(lead), key = { r, _ -> rowKey(rows, r + lead) }) { r, row ->
+            HomeRow(vm, rows, r + lead, row, focusKey, focusRequester, onFocused, onLongPress)
+        }
+    }
+}
+
+/** En rad med affischer på hemskärmen. */
+@Composable
+private fun HomeRow(
+    vm: AppViewModel,
+    rows: List<PlexHomeRow>,
+    r: Int,
+    row: PlexHomeRow,
+    focusKey: String?,
+    focusRequester: FocusRequester,
+    onFocused: (String, PlexItem?) -> Unit,
+    onLongPress: (PlexItem, Boolean) -> Unit,
+) {
+    run {
             Column {
                 Text(row.title, style = MaterialTheme.typography.titleLarge)
                 Spacer(Modifier.height(12.dp))
@@ -277,7 +319,6 @@ private fun HomeRows(
                     }
                 }
             }
-        }
     }
 }
 

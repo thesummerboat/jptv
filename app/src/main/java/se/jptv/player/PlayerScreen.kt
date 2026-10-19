@@ -245,6 +245,8 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     val focus = remember { FocusRequester() }
 
     var item by remember { mutableStateOf(request.item) }
+    /** Trailer: rör inte position, sett-status eller språkval. */
+    val isTrailer = request.trailer
     var startAt by remember { mutableLongStateOf(if (request.fromStart) 0L else request.item.viewOffsetMs) }
     var started by remember { mutableStateOf(false) }
     var transcoding by remember { mutableStateOf(false) }
@@ -350,6 +352,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
      * så att nästa avsnitt startar med samma språk. off = undertexter av.
      */
     suspend fun saveSelection(type: Int, stream: PlexStream?, language: String?, off: Boolean) {
+        if (isTrailer) return
         val current = item
         val plexType = if (type == C.TRACK_TYPE_AUDIO) 2 else 3
         if (stream != null || off) {
@@ -529,7 +532,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
             val pos = exo.currentPosition
             val dur = if (exo.duration > 0) exo.duration else item.durationMs
             val transcodeSession = if (transcoding) session else null
-            if (everReady) {
+            if (everReady && !isTrailer) {
                 vm.reportStopped(item, pos, dur, transcodeSession, finished)
             } else {
                 // Inget hann spelas: skriv inte över positionen i Plex med 0.
@@ -552,7 +555,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         }
         var meta = fresh ?: request.item
         // Språk som valts tidigare i samma serie gäller även det här avsnittet.
-        val pref = meta.showKey?.let { vm.prefs.trackPreference(it) }
+        val pref = if (isTrailer) null else meta.showKey?.let { vm.prefs.trackPreference(it) }
         val (audioId, subId) = selectionFromPreference(meta, pref)
         if (audioId != null || subId != null) {
             try {
@@ -612,7 +615,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
             }
             val credits = item.credits
             if (credits != null && position >= credits.startMs && exo.isPlaying) offerNext(15)
-            if (everReady && ticks % 20 == 0 && exo.playbackState == Player.STATE_READY) {
+            if (!isTrailer && everReady && ticks % 20 == 0 && exo.playbackState == Player.STATE_READY) {
                 vm.reportProgress(
                     item, if (exo.isPlaying) "playing" else "paused", position, duration,
                     if (transcoding) session else null,
@@ -694,7 +697,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     // Hem-knappen eller skärmsläckare: pausa, så att ljudet inte fortsätter i bakgrunden.
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
         exo.pause()
-        if (everReady) {
+        if (everReady && !isTrailer) {
             vm.reportProgress(item, "paused", exo.currentPosition, duration, if (transcoding) session else null)
         }
     }

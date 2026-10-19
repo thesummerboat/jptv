@@ -49,6 +49,8 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
         header("X-Plex-Platform-Version", ascii(Build.VERSION.RELEASE ?: ""))
         header("X-Plex-Device", deviceModel)
         header("X-Plex-Device-Name", "JPTV ($deviceModel)")
+        // Svenska namn på Plex egna rader där servern har översättning.
+        header("X-Plex-Language", "sv")
         if (token != null) header("X-Plex-Token", token)
         return this
     }
@@ -242,12 +244,80 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
     suspend fun recentlyAdded(sectionKey: String): List<PlexItem> =
         items("/library/sections/$sectionKey/recentlyAdded?X-Plex-Container-Start=0&X-Plex-Container-Size=30")
 
-    suspend fun all(sectionKey: String, sort: LibrarySort = LibrarySort.TITLE, unwatchedOnly: Boolean = false): List<PlexItem> {
-        val filter = if (unwatchedOnly) "&unwatched=1" else ""
+    suspend fun all(
+        sectionKey: String,
+        sort: LibrarySort = LibrarySort.TITLE,
+        unwatchedOnly: Boolean = false,
+        genreId: String? = null,
+    ): List<PlexItem> {
+        val filter = buildString {
+            if (unwatchedOnly) append("&unwatched=1")
+            if (genreId != null) append("&genre=").append(URLEncoder.encode(genreId, "UTF-8"))
+        }
         return items(
             "/library/sections/$sectionKey/all?sort=${sort.param}$filter" +
                 "&X-Plex-Container-Start=0&X-Plex-Container-Size=2000",
         )
+    }
+
+    // ---------- Kategorier, samlingar och Plex egna rader ----------
+
+    /** Genrerna i ett bibliotek. */
+    suspend fun genres(sectionKey: String): List<PlexFilterOption> {
+        val s = srv()
+        val mc = getJson("${s.uri}/library/sections/$sectionKey/genre", s.token).getJSONObject("MediaContainer")
+        val dirs = mc.optJSONArray("Directory") ?: return emptyList()
+        return (0 until dirs.length()).mapNotNull { i ->
+            val d = dirs.optJSONObject(i) ?: return@mapNotNull null
+            val title = d.optStringOrNull("title") ?: return@mapNotNull null
+            val key = d.optStringOrNull("key") ?: return@mapNotNull null
+            // Äldre servrar: key är en adress ".../all?genre=28", nyare: bara id:t.
+            val id = Regex("""genre=([^&]+)""").find(key)?.groupValues?.get(1)
+                ?: d.optStringOrNull("fastKey")?.let { Regex("""genre=([^&]+)""").find(it)?.groupValues?.get(1) }
+                ?: key
+            PlexFilterOption(id, title)
+        }
+    }
+
+    /** Samlingarna i ett bibliotek. */
+    suspend fun collections(sectionKey: String): List<PlexItem> =
+        items("/library/sections/$sectionKey/collections")
+
+    /** Titlarna i en samling. */
+    suspend fun collectionItems(collectionKey: String): List<PlexItem> =
+        items("/library/collections/$collectionKey/children")
+
+    /** Plex egna rader för ett bibliotek: högst betyg, nyligen släppta, återupptäck, mer i genre … */
+    suspend fun sectionHubs(sectionKey: String): List<PlexHomeRow> {
+        val s = srv()
+        val mc = getJson(
+            "${s.uri}/hubs/sections/$sectionKey?count=20&includeGuids=1&excludeContinueWatching=1",
+            s.token,
+        ).getJSONObject("MediaContainer")
+        val hubs = mc.optJSONArray("Hub") ?: return emptyList()
+        return withContext(Dispatchers.Default) {
+            (0 until hubs.length()).mapNotNull { i ->
+                val hub = hubs.optJSONObject(i) ?: return@mapNotNull null
+                val id = hub.optString("hubIdentifier").lowercase()
+                // Fortsätt titta och Nytt visar vi redan själva.
+                if ("recentlyadded" in id || "continuewatching" in id || "ondeck" in id || "inprogress" in id) {
+                    return@mapNotNull null
+                }
+                val items = metadataArray(hub).filter { it.type in setOf("movie", "show", "season", "episode") }
+                if (items.size < 3) null else PlexHomeRow(hub.optStringOrNull("title") ?: "Mer", items)
+            }
+        }
+    }
+
+    /** Trailers och annat extramaterial för en titel; trailers först. */
+    suspend fun trailers(item: PlexItem): List<PlexItem> {
+        val extras = runCatching { items("/library/metadata/${item.ratingKey}/extras") }.getOrDefault(emptyList())
+        val trailers = extras.filter { it.extraType == 1 || it.type == "clip" && it.title.contains("trailer", ignoreCase = true) }
+        val primary = item.primaryExtraKey?.let { key ->
+            trailers.firstOrNull { "/library/metadata/${it.ratingKey}" == key }
+                ?: runCatching { items(key).firstOrNull() }.getOrNull()
+        }
+        return (listOfNotNull(primary) + trailers).distinctBy { it.ratingKey }
     }
 
     /** Säsongerna i en serie. */
@@ -436,6 +506,9 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
             audioChannels = media?.optIntOrNull("audioChannels"),
             hasPreviews = part?.optStringOrNull("indexes") == "sd",
             imdbId = imdbId,
+            sectionKey = o.optStringOrNull("librarySectionID"),
+            primaryExtraKey = o.optStringOrNull("primaryExtraKey"),
+            extraType = o.optIntOrNull("extraType"),
         )
     }
 
@@ -552,6 +625,8 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
     fun directPlayUrl(item: PlexItem): String? {
         val s = server ?: return null
         val key = item.partKey ?: return null
+        // Plex egna trailers kan ligga hos Plex, inte på din server.
+        if (key.startsWith("http")) return key
         return "${s.uri}$key?X-Plex-Token=${s.token}"
     }
 

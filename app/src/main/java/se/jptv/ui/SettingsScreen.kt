@@ -20,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -144,6 +145,32 @@ fun SettingsScreen(vm: AppViewModel) {
         }
         vm.scanStatus?.let {
             Text(it, color = if (vm.scanning) JptvColors.Accent else JptvColors.TextDim)
+        }
+
+        if (vm.sections.isNotEmpty()) {
+            Spacer(Modifier.height(16.dp))
+            Text("Bibliotek", style = MaterialTheme.typography.titleLarge)
+            Text(
+                "★ Favoriter visas först och får flest rader på hemskärmen. Dolda bibliotek syns inte någonstans i appen.",
+                color = JptvColors.TextDim,
+            )
+            vm.sections.forEach { section ->
+                val hidden = section.key in vm.hiddenSections
+                val favorite = section.key in vm.favoriteSections
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        section.title,
+                        color = if (hidden) JptvColors.TextDim else JptvColors.Text,
+                        modifier = Modifier.width(260.dp),
+                    )
+                    OutlinedButton(onClick = { vm.toggleSectionFavorite(section) }, enabled = !hidden) {
+                        Text(if (favorite) "★ Favorit" else "☆ Gör till favorit")
+                    }
+                    OutlinedButton(onClick = { vm.toggleSectionHidden(section) }) {
+                        Text(if (hidden) "Dold – visa igen" else "Dölj")
+                    }
+                }
+            }
         }
 
         Spacer(Modifier.height(16.dp))

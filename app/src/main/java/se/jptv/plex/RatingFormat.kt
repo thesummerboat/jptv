@@ -10,12 +10,12 @@ object RatingFormat {
             if (value <= 0.0) continue
             val img = image.lowercase()
             val rating = when {
-                img.startsWith("imdb://") -> PlexRating("IMDb", "IMDb ${decimal(value)}")
+                img.startsWith("imdb://") -> PlexRating("IMDb", "IMDb ${decimal(value)}", value)
                 img.startsWith("rottentomatoes://") && (img.endsWith(".ripe") || img.endsWith(".rotten")) ->
-                    PlexRating("RT", "RT ${percent(value)}")
+                    PlexRating("RT", "RT ${percent(value)}", value)
                 img.startsWith("rottentomatoes://") && (img.endsWith(".upright") || img.endsWith(".spilled")) ->
-                    PlexRating("RT publik", "RT publik ${percent(value)}")
-                img.startsWith("themoviedb://") -> PlexRating("TMDB", "TMDB ${decimal(value)}")
+                    PlexRating("RT publik", "RT publik ${percent(value)}", value)
+                img.startsWith("themoviedb://") -> PlexRating("TMDB", "TMDB ${decimal(value)}", value)
                 else -> null
             } ?: continue
             out.putIfAbsent(rating.source, rating)

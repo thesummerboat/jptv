@@ -42,6 +42,7 @@ fun DetailsScreen(vm: AppViewModel, initial: PlexItem) {
     val playFocus = remember { FocusRequester() }
 
     var logo by remember { mutableStateOf(initial.logo) }
+    var trailer by remember { mutableStateOf<PlexItem?>(null) }
 
     LaunchedEffect(initial.ratingKey) {
         runCatching { vm.plex.metadata(initial.ratingKey) }.getOrNull()?.let {
@@ -50,6 +51,7 @@ fun DetailsScreen(vm: AppViewModel, initial: PlexItem) {
         }
         // Avsnitt har ingen egen logotyp; använd seriens.
         logo = vm.showLogo(item)
+        trailer = runCatching { vm.plex.trailers(item) }.getOrNull()?.firstOrNull()
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -128,6 +130,7 @@ fun DetailsScreen(vm: AppViewModel, initial: PlexItem) {
                 if (resume) {
                     OutlinedButton(onClick = { vm.play(item, fromStart = true) }) { Text("Börja om") }
                 }
+                trailer?.let { t -> OutlinedButton(onClick = { vm.playTrailer(t) }) { Text("▶ Trailer") } }
                 OutlinedButton(onClick = {
                     val target = !watched
                     watched = target
