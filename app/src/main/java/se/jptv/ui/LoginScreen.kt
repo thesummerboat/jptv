@@ -40,7 +40,7 @@ fun LoginScreen(vm: AppViewModel) {
                     Button(onClick = { vm.beginLogin() }, modifier = Modifier.focusRequester(retryFocus)) {
                         Text("Hämta ny kod")
                     }
-                    LaunchedEffect(Unit) { runCatching { retryFocus.requestFocus() } }
+                    LaunchedEffect(Unit) { retryFocus.requestWhenReady() }
                 }
                 code == null -> Text("Hämtar kod…", color = JptvColors.TextDim)
                 else -> {

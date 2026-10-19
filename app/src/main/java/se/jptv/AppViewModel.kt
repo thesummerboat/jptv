@@ -1,6 +1,8 @@
 package se.jptv
 
 import android.app.Application
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -16,7 +18,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import se.jptv.iptv.Channel
+import se.jptv.iptv.Epg
+import se.jptv.iptv.EpgRepository
 import se.jptv.iptv.IptvRepository
+import se.jptv.iptv.IptvUrls
 import se.jptv.iptv.Playlist
 import se.jptv.plex.PlexClient
 import se.jptv.plex.PlexHomeRow
@@ -33,7 +38,9 @@ sealed interface Screen {
     data object Home : Screen
     data class Section(val section: PlexSection) : Screen
     data class Episodes(val container: PlexItem) : Screen
+    data class Details(val item: PlexItem) : Screen
     data object LiveTv : Screen
+    data class Guide(val group: String) : Screen
     data object Settings : Screen
     data class Player(val request: PlayRequest) : Screen
 }
@@ -54,7 +61,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     val plex = PlexClient(prefs.clientId, http)
     private val iptv = IptvRepository(app, http)
+    private val epgRepo = EpgRepository(app, http)
     private val updater = Updater(app, http)
+
+    // ---------- Minne för listor, så att fokus och scroll är kvar när man går tillbaka ----------
+
+    private val listStates = HashMap<String, LazyListState>()
+    private val gridStates = HashMap<String, LazyGridState>()
+
+    /** Senast fokuserade element per skärm, t.ex. "home" -> "1_12345". */
+    val focusKeys = HashMap<String, String>()
+
+    fun listState(key: String): LazyListState = listStates.getOrPut(key) { LazyListState() }
+
+    fun gridState(key: String): LazyGridState = gridStates.getOrPut(key) { LazyGridState() }
 
     // ---------- Navigering: en enkel stapel av skärmar, Tillbaka plockar bort den översta ----------
 
@@ -69,6 +89,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (stack.size <= 1) return false
         stack.removeAt(stack.lastIndex)
         return true
+    }
+
+    /** Byter ut översta skärmen, t.ex. när nästa avsnitt tar över efter det förra. */
+    fun replaceTop(screen: Screen) {
+        if (stack.isEmpty()) stack.add(screen) else stack[stack.lastIndex] = screen
     }
 
     // ---------- Tillstånd som skärmarna visar ----------
@@ -96,6 +121,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var iptvLoading by mutableStateOf(false)
         private set
 
+    var epg by mutableStateOf<Epg?>(null)
+        private set
+    var epgStatus by mutableStateOf<String?>(null)
+        private set
+    var epgLoading by mutableStateOf(false)
+        private set
+
+    var favorites by mutableStateOf(prefs.favorites)
+        private set
+    var recents by mutableStateOf(prefs.recents)
+        private set
+
     var availableUpdate by mutableStateOf<AppRelease?>(null)
         private set
     var updateBusy by mutableStateOf(false)
@@ -115,7 +152,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             connectAndLoad(rediscover = false)
         }
         viewModelScope.launch {
-            playlist = runCatching { iptv.cached() }.getOrNull()
+            val cachedPlaylist = runCatching { iptv.cached() }.getOrNull()
+            playlist = cachedPlaylist
+            epg = runCatching { epgRepo.cached() }.getOrNull()
+            // Spellistan uppdateras i bakgrunden en gång per dygn, guiden var tolfte timme.
+            val url = prefs.m3uUrl
+            if (url != null && System.currentTimeMillis() - prefs.playlistLoadedAt > 24 * HOUR) {
+                loadPlaylist(url, quiet = true)
+            } else {
+                refreshEpg(force = false)
+            }
         }
         viewModelScope.launch {
             delay(3_000)
@@ -294,10 +340,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         homeRows = rows
     }
 
+    /** Filmer och avsnitt öppnar detaljsidan, serier och säsonger avsnittslistan. */
     fun select(item: PlexItem) {
         when {
-            item.isPlayable -> open(Screen.Player(PlayRequest.Vod(item)))
+            item.isPlayable -> open(Screen.Details(item))
             item.isContainer -> open(Screen.Episodes(item))
+        }
+    }
+
+    fun play(item: PlexItem, fromStart: Boolean = false) {
+        open(Screen.Player(PlayRequest.Vod(item, fromStart)))
+    }
+
+    fun setWatched(item: PlexItem, watched: Boolean, onDone: () -> Unit = {}) {
+        viewModelScope.launch {
+            if (watched) plex.markWatched(item) else plex.markUnwatched(item)
+            sectionCache.clear()
+            runCatching { loadHome() }
+            onDone()
         }
     }
 
@@ -317,23 +377,37 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Skickas från spelaren; körs i ViewModel så att anropet hinner klart även när skärmen stängs. */
-    fun reportProgress(item: PlexItem, state: String, positionMs: Long, durationMs: Long) {
-        viewModelScope.launch { plex.reportTimeline(item, state, positionMs, durationMs) }
+    fun reportProgress(item: PlexItem, state: String, positionMs: Long, durationMs: Long, transcodeSession: String? = null) {
+        viewModelScope.launch { plex.reportTimeline(item, state, positionMs, durationMs, transcodeSession) }
     }
 
     fun reportStopped(item: PlexItem, positionMs: Long, durationMs: Long, transcodeSession: String?, ended: Boolean) {
         viewModelScope.launch {
-            plex.reportTimeline(item, "stopped", positionMs, durationMs)
+            plex.reportTimeline(item, "stopped", positionMs, durationMs, transcodeSession)
             if (ended) plex.markWatched(item)
             if (transcodeSession != null) plex.stopTranscode(transcodeSession)
-            // Uppdatera "Fortsätt titta" i bakgrunden.
+            // Uppdatera "Fortsätt titta" och biblioteken i bakgrunden.
+            sectionCache.clear()
             runCatching { loadHome() }
         }
     }
 
-    // ---------- IPTV ----------
+    /** Spelaren stängdes innan något hann spelas: rör inte positionen i Plex, stäng bara omkodningen. */
+    fun abandonPlayback(transcodeSession: String?) {
+        if (transcodeSession == null) return
+        viewModelScope.launch { plex.stopTranscode(transcodeSession) }
+    }
 
-    fun loadPlaylist(url: String) {
+    // ---------- Bibliotek: cache så att Tillbaka inte laddar om hela biblioteket ----------
+
+    private val sectionCache = HashMap<String, List<PlexItem>>()
+
+    suspend fun sectionItems(sectionKey: String): List<PlexItem> =
+        sectionCache[sectionKey] ?: plex.all(sectionKey).also { sectionCache[sectionKey] = it }
+
+    // ---------- IPTV: spellista ----------
+
+    fun loadPlaylist(url: String, quiet: Boolean = false) {
         val u = url.trim()
         if (u.isEmpty()) {
             iptvStatus = "Skriv in adressen till din M3U-lista först."
@@ -342,11 +416,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         prefs.m3uUrl = u
         viewModelScope.launch {
             iptvLoading = true
-            iptvStatus = "Laddar spellistan…"
+            if (!quiet) iptvStatus = "Laddar spellistan…"
             try {
                 val p = iptv.download(u)
                 playlist = p
+                prefs.playlistLoadedAt = System.currentTimeMillis()
                 iptvStatus = "${p.channels.size} kanaler i ${p.groups.size} grupper"
+                refreshEpg(force = !quiet)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -359,12 +435,113 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun removePlaylist() {
         prefs.m3uUrl = null
+        prefs.playlistLoadedAt = 0L
         iptv.clearCache()
+        epgRepo.clearCache()
         playlist = null
+        epg = null
         iptvStatus = "Spellistan är borttagen."
+        epgStatus = null
+    }
+
+    // ---------- IPTV: guide ----------
+
+    /** Guidens adress: den du skrivit in, annars gissad från spellistan. */
+    fun effectiveEpgUrl(): String? =
+        prefs.epgUrl?.takeIf { it.isNotBlank() } ?: IptvUrls.guessEpgUrl(prefs.m3uUrl, playlist)
+
+    fun setEpgUrl(url: String) {
+        prefs.epgUrl = url.trim().ifEmpty { null }
+        refreshEpg(force = true)
+    }
+
+    fun refreshEpg(force: Boolean) {
+        val pl = playlist ?: return
+        val url = effectiveEpgUrl()
+        if (url == null) {
+            if (force) epgStatus = "Ingen guide-adress hittades. Skriv in XMLTV-adressen."
+            return
+        }
+        val age = System.currentTimeMillis() - (epg?.loadedAt ?: 0L)
+        if (!force && epg != null && age < 12 * HOUR) return
+        if (epgLoading) return
+        viewModelScope.launch {
+            epgLoading = true
+            epgStatus = "Hämtar TV-guiden…"
+            try {
+                val e = epgRepo.download(url, pl)
+                epg = e
+                epgStatus = "Guide för ${e.channelCount} kanaler"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                epgStatus = "Guiden kunde inte hämtas: ${e.message}"
+            } finally {
+                epgLoading = false
+            }
+        }
+    }
+
+    // ---------- IPTV: favoriter, senaste och grupper ----------
+
+    fun isFavorite(channel: Channel): Boolean = channel.key in favorites
+
+    fun toggleFavorite(channel: Channel) {
+        val updated = if (channel.key in favorites) favorites - channel.key else favorites + channel.key
+        favorites = updated
+        prefs.favorites = updated
+    }
+
+    fun onChannelTuned(channel: Channel) {
+        prefs.lastChannelUrl = channel.url
+        val updated = (listOf(channel.key) + recents.filter { it != channel.key }).take(15)
+        recents = updated
+        prefs.recents = updated
+    }
+
+    val lastChannel: Channel?
+        get() = recents.firstOrNull()?.let { playlist?.byKey?.get(it) }
+
+    /** Grupper att visa: Favoriter och Senaste först (om de finns), sedan leverantörens grupper. */
+    fun groupsForUi(): List<String> {
+        val pl = playlist ?: return emptyList()
+        return buildList {
+            if (favorites.any { pl.byKey.containsKey(it) }) add(GROUP_FAVORITES)
+            if (recents.any { pl.byKey.containsKey(it) }) add(GROUP_RECENTS)
+            add(GROUP_SEARCH)
+            addAll(pl.groups)
+        }
+    }
+
+    fun channelsForGroup(group: String, query: String = ""): List<Channel> {
+        val pl = playlist ?: return emptyList()
+        return when (group) {
+            GROUP_FAVORITES -> pl.channels.filter { it.key in favorites }
+            GROUP_RECENTS -> recents.mapNotNull { pl.byKey[it] }
+            GROUP_SEARCH -> {
+                val q = query.trim().lowercase()
+                if (q.isEmpty()) emptyList() else pl.channels.filter { it.name.lowercase().contains(q) }.take(300)
+            }
+            else -> pl.channels.filter { it.group == group }
+        }
     }
 
     fun playChannel(channels: List<Channel>, index: Int) {
         open(Screen.Player(PlayRequest.Live(channels, index)))
+    }
+
+    /** Spela senaste kanalen, i sin grupp så att ▲▼ fungerar som vanligt. */
+    fun playLastChannel() {
+        val ch = lastChannel ?: return
+        val inGroup = channelsForGroup(ch.group)
+        val index = inGroup.indexOfFirst { it.key == ch.key }.coerceAtLeast(0)
+        playChannel(inGroup.ifEmpty { listOf(ch) }, index)
+    }
+
+    companion object {
+        const val HOUR = 60 * 60 * 1000L
+        const val GROUP_FAVORITES = "★ Favoriter"
+        const val GROUP_RECENTS = "Senaste"
+        const val GROUP_SEARCH = "Sök kanal"
     }
 }

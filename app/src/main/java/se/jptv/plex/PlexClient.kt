@@ -64,10 +64,21 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
         }
     }
 
-    private suspend fun fire(url: String, token: String) {
+    private suspend fun fire(url: String, token: String, extraHeaders: Map<String, String> = emptyMap()) {
         withContext(Dispatchers.IO) {
             runCatching {
-                val req = Request.Builder().url(url).plexHeaders(token).get().build()
+                val builder = Request.Builder().url(url).plexHeaders(token).get()
+                for ((k, v) in extraHeaders) builder.header(k, v)
+                http.newCall(builder.build()).execute().close()
+            }
+        }
+    }
+
+    /** Anrop utan våra vanliga X-Plex-headers, så att parametrarna i adressen gäller fullt ut. */
+    private suspend fun fireBare(url: String) {
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val req = Request.Builder().url(url).header("Accept", "application/json").get().build()
                 http.newCall(req).execute().close()
             }
         }
@@ -201,6 +212,32 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
             "season" -> o.optStringOrNull("thumb") ?: o.optStringOrNull("parentThumb")
             else -> o.optStringOrNull("thumb")
         }
+        val streamArr = part?.optJSONArray("Stream")
+        val streams = if (streamArr == null) emptyList() else (0 until streamArr.length()).mapNotNull { i ->
+            val s = streamArr.optJSONObject(i) ?: return@mapNotNull null
+            PlexStream(
+                id = s.optLongOrNull("id") ?: 0L,
+                type = s.optIntOrNull("streamType") ?: 0,
+                codec = s.optStringOrNull("codec"),
+                languageCode = s.optStringOrNull("languageCode") ?: s.optStringOrNull("languageTag"),
+                title = s.optStringOrNull("extendedDisplayTitle") ?: s.optStringOrNull("displayTitle") ?: "Spår ${i + 1}",
+                selected = s.optBoolean("selected"),
+                key = s.optStringOrNull("key"),
+            )
+        }
+        val markerArr = o.optJSONArray("Marker")
+        val markers = if (markerArr == null) emptyList() else (0 until markerArr.length()).mapNotNull { i ->
+            val m = markerArr.optJSONObject(i) ?: return@mapNotNull null
+            val start = m.optLongOrNull("startTimeOffset") ?: return@mapNotNull null
+            val end = m.optLongOrNull("endTimeOffset") ?: return@mapNotNull null
+            PlexMarker(m.optString("type"), start, end)
+        }
+        val genreArr = o.optJSONArray("Genre")
+        val genres = if (genreArr == null) emptyList() else (0 until genreArr.length()).mapNotNull { i ->
+            genreArr.optJSONObject(i)?.optStringOrNull("tag")
+        }
+        val showKey = o.optStringOrNull("grandparentRatingKey")
+            ?: if (type == "season") o.optStringOrNull("parentRatingKey") else null
         return PlexItem(
             ratingKey = o.optString("ratingKey"),
             type = type,
@@ -219,7 +256,33 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
             videoCodec = media?.optStringOrNull("videoCodec"),
             audioCodec = media?.optStringOrNull("audioCodec"),
             resolution = media?.optStringOrNull("videoResolution"),
+            showKey = showKey,
+            streams = streams,
+            markers = markers,
+            contentRating = o.optStringOrNull("contentRating"),
+            genres = genres,
+            childCount = o.optIntOrNull("leafCount") ?: o.optIntOrNull("childCount"),
         )
+    }
+
+    /** Full information om en titel: spår, markörer för intro/eftertexter och aktuell position. */
+    suspend fun metadata(ratingKey: String): PlexItem? =
+        items("/library/metadata/$ratingKey?includeMarkers=1").firstOrNull()
+
+    /** Nästa avsnitt i serien, eller null om det här är sista. */
+    suspend fun nextEpisode(episode: PlexItem): PlexItem? {
+        if (episode.type != "episode") return null
+        val show = episode.showKey ?: return null
+        val all = items("/library/metadata/$show/allLeaves")
+        val index = all.indexOfFirst { it.ratingKey == episode.ratingKey }
+        return if (index >= 0) all.getOrNull(index + 1) else null
+    }
+
+    /** URL till en extern undertext (t.ex. en .srt som ligger bredvid filen). */
+    fun subtitleUrl(stream: PlexStream): String? {
+        val s = server ?: return null
+        val key = stream.key ?: return null
+        return "${s.uri}$key?X-Plex-Token=${s.token}"
     }
 
     // ---------- Bilder och uppspelning ----------
@@ -273,7 +336,8 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
     suspend fun prepareTranscode(item: PlexItem, session: String): String {
         val s = srv()
         val q = transcodeQuery(item, session)
-        fire("${s.uri}/video/:/transcode/universal/decision?$q", s.token)
+        // Samma profil (Chrome) för beslut och start: skickas bara i adressen, inte som header.
+        fireBare("${s.uri}/video/:/transcode/universal/decision?$q")
         return "${s.uri}/video/:/transcode/universal/start.m3u8?$q"
     }
 
@@ -283,19 +347,33 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
     }
 
     /** Talar om för Plex var vi är, så att "Fortsätt titta" fungerar även i mobilen. */
-    suspend fun reportTimeline(item: PlexItem, state: String, positionMs: Long, durationMs: Long) {
+    suspend fun reportTimeline(
+        item: PlexItem,
+        state: String,
+        positionMs: Long,
+        durationMs: Long,
+        transcodeSession: String? = null,
+    ) {
         val s = server ?: return
         val key = URLEncoder.encode("/library/metadata/${item.ratingKey}", "UTF-8")
+        // Med sessionens ID vet Plex att omkodningen fortfarande används, även under en lång paus.
+        val extra = if (transcodeSession != null) mapOf("X-Plex-Session-Identifier" to transcodeSession) else emptyMap()
         fire(
             "${s.uri}/:/timeline?ratingKey=${item.ratingKey}&key=$key&state=$state" +
                 "&time=$positionMs&duration=$durationMs&playbackTime=$positionMs",
             s.token,
+            extra,
         )
     }
 
     suspend fun markWatched(item: PlexItem) {
         val s = server ?: return
         fire("${s.uri}/:/scrobble?key=${item.ratingKey}&identifier=com.plexapp.plugins.library", s.token)
+    }
+
+    suspend fun markUnwatched(item: PlexItem) {
+        val s = server ?: return
+        fire("${s.uri}/:/unscrobble?key=${item.ratingKey}&identifier=com.plexapp.plugins.library", s.token)
     }
 
     companion object {

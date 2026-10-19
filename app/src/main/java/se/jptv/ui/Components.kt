@@ -163,3 +163,14 @@ fun formatTime(ms: Long): String {
     val s = total % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
 }
+
+/**
+ * Sätter fokus när elementet faktiskt finns på skärmen. Listor bygger sina rader först vid
+ * layout, så ett direkt anrop kan missa; vi försöker därför över några bildrutor.
+ */
+suspend fun androidx.compose.ui.focus.FocusRequester.requestWhenReady(attempts: Int = 6) {
+    repeat(attempts) {
+        androidx.compose.runtime.withFrameNanos { }
+        if (runCatching { requestFocus() }.isSuccess) return
+    }
+}
