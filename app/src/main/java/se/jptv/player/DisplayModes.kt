@@ -56,6 +56,14 @@ object DisplayModes {
         return activity to chosen
     }
 
+    /** TV:ns läge just nu, t.ex. "3840×2160 @ 23,976 Hz" (för teknisk info). */
+    fun currentModeText(): String? {
+        val activity = activityRef?.get() ?: return null
+        val mode = display(activity)?.mode ?: return null
+        val hz = String.format(java.util.Locale("sv", "SE"), "%.3f", mode.refreshRate).trimEnd('0').trimEnd(',')
+        return "${mode.physicalWidth}×${mode.physicalHeight} @ $hz Hz" + if (enabled) "" else " (automatiskt byte av)"
+    }
+
     /** true om ett byte behövs för den här bildfrekvensen. */
     fun needsSwitch(fps: Float): Boolean = target(fps) != null
 
