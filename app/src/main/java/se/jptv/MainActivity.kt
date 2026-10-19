@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -31,12 +32,25 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         se.jptv.player.DisplayModes.attach(this)
+        se.jptv.ui.NavSounds.init(this)
         setContent {
             JptvTheme {
                 JptvApp()
             }
         }
     }
+}
+
+private fun navSound(ev: androidx.compose.ui.input.key.KeyEvent): Boolean {
+    val native = ev.nativeKeyEvent
+    when (native.keyCode) {
+        android.view.KeyEvent.KEYCODE_DPAD_UP, android.view.KeyEvent.KEYCODE_DPAD_DOWN,
+        android.view.KeyEvent.KEYCODE_DPAD_LEFT, android.view.KeyEvent.KEYCODE_DPAD_RIGHT ->
+            if (native.action == android.view.KeyEvent.ACTION_DOWN) se.jptv.ui.NavSounds.move()
+        android.view.KeyEvent.KEYCODE_DPAD_CENTER, android.view.KeyEvent.KEYCODE_ENTER ->
+            if (native.action == android.view.KeyEvent.ACTION_UP) se.jptv.ui.NavSounds.select()
+    }
+    return false
 }
 
 @Composable
@@ -56,7 +70,13 @@ fun JptvApp(vm: AppViewModel = viewModel()) {
         // key() ger varje skärm färskt tillstånd när den öppnas.
         key(vm.stack.size, screen) {
             // Ett OK som trycktes ner på förra skärmen ska inte klicka på något här när det släpps.
-            Box(Modifier.fillMaxSize().ignoreUnpairedOk()) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .ignoreUnpairedOk()
+                    // Diskret klick när man bläddrar; aldrig i spelaren.
+                    .then(if (screen is Screen.Player) Modifier else Modifier.onPreviewKeyEvent { ev -> navSound(ev) }),
+            ) {
             when (screen) {
                 Screen.Login -> LoginScreen(vm)
                 Screen.Home -> HomeScreen(vm)

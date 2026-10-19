@@ -205,6 +205,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         se.jptv.player.DisplayModes.enabled = prefs.autoFrameRate
+        se.jptv.ui.NavSounds.level = prefs.navSound
+    }
+
+    var navSound by mutableStateOf(prefs.navSound)
+        private set
+
+    fun cycleNavSound() {
+        val next = (navSound + 1) % 3
+        navSound = next
+        prefs.navSound = next
+        se.jptv.ui.NavSounds.level = next
+        se.jptv.ui.NavSounds.select()
     }
     private var homeLoadedAt = 0L
     private var epgRefreshAgain = false

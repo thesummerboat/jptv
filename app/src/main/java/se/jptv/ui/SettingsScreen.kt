@@ -174,7 +174,7 @@ fun SettingsScreen(vm: AppViewModel) {
         }
 
         Spacer(Modifier.height(16.dp))
-        Text("Bild och betyg", style = MaterialTheme.typography.titleLarge)
+        Text("Bild, ljud och betyg", style = MaterialTheme.typography.titleLarge)
         Text(
             "Automatisk bildfrekvens byter TV:ns läge efter filmen (t.ex. 23,976 Hz) och kanalen (50 Hz), så att bilden inte rycker.",
             color = JptvColors.TextDim,
@@ -183,6 +183,17 @@ fun SettingsScreen(vm: AppViewModel) {
             OutlinedButton(onClick = { vm.changeAutoFrameRate(!vm.autoFrameRate) }) {
                 Text(if (vm.autoFrameRate) "Automatisk bildfrekvens: PÅ" else "Automatisk bildfrekvens: AV")
             }
+            OutlinedButton(onClick = { vm.cycleNavSound() }) {
+                Text(
+                    "Ljud när du bläddrar: " + when (vm.navSound) {
+                        1 -> "Lågt"
+                        2 -> "Mellan"
+                        else -> "Av"
+                    },
+                )
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedButton(onClick = { vm.refreshImdb(force = true) }) { Text("Uppdatera IMDb-betyg") }
             if (vm.notInterested.isNotEmpty()) {
                 OutlinedButton(onClick = { vm.clearNotInterested() }) {
