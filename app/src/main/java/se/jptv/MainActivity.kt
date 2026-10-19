@@ -20,6 +20,7 @@ import se.jptv.ui.JptvColors
 import se.jptv.ui.JptvTheme
 import se.jptv.ui.LiveTvScreen
 import se.jptv.ui.LoginScreen
+import se.jptv.ui.SearchScreen
 import se.jptv.ui.SectionScreen
 import se.jptv.ui.SettingsScreen
 
@@ -55,6 +56,7 @@ fun JptvApp(vm: AppViewModel = viewModel()) {
                 is Screen.Details -> DetailsScreen(vm, screen.item)
                 Screen.LiveTv -> LiveTvScreen(vm)
                 is Screen.Guide -> GuideScreen(vm, screen.group)
+                Screen.Search -> SearchScreen(vm)
                 Screen.Settings -> SettingsScreen(vm)
                 is Screen.Player -> PlayerScreen(vm, screen.request)
             }

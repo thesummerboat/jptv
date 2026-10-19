@@ -1,5 +1,6 @@
 package se.jptv.player
 
+import android.content.Context
 import android.net.Uri
 import android.view.KeyEvent
 import androidx.activity.compose.BackHandler
@@ -27,9 +28,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,12 +59,14 @@ import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import androidx.tv.material3.Button
 import androidx.tv.material3.ListItem
@@ -69,8 +74,12 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.OutlinedButton
 import androidx.tv.material3.Text
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import se.jptv.AppViewModel
 import se.jptv.PlayRequest
@@ -79,6 +88,7 @@ import se.jptv.iptv.Channel
 import se.jptv.iptv.IptvRepository
 import se.jptv.plex.PlexItem
 import se.jptv.plex.PlexStream
+import se.jptv.plex.SubtitleResult
 import se.jptv.ui.ChannelLogo
 import se.jptv.ui.ChannelRow
 import se.jptv.ui.JptvColors
@@ -87,6 +97,7 @@ import se.jptv.ui.ProgressBar
 import se.jptv.ui.clock
 import se.jptv.ui.formatTime
 import se.jptv.ui.requestWhenReady
+import java.io.File
 import java.util.Locale
 import java.util.UUID
 
@@ -123,9 +134,10 @@ private fun rememberExoPlayer(): ExoPlayer {
     }
 }
 
+/** scale: 0 = anpassa, 1 = fyll (sträck), 2 = zooma (beskär). */
 @OptIn(UnstableApi::class)
 @Composable
-private fun VideoSurface(exo: ExoPlayer) {
+private fun VideoSurface(exo: ExoPlayer, scale: Int) {
     AndroidView(
         factory = { ctx ->
             PlayerView(ctx).apply {
@@ -134,6 +146,13 @@ private fun VideoSurface(exo: ExoPlayer) {
                 isFocusableInTouchMode = false
                 setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
                 player = exo
+            }
+        },
+        update = { view ->
+            view.resizeMode = when (scale) {
+                1 -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+                2 -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
             }
         },
         modifier = Modifier.fillMaxSize(),
@@ -148,8 +167,11 @@ private fun subtitleMime(codec: String?): String? = when (codec?.lowercase()) {
     else -> null
 }
 
+private fun isSrt(codec: String?): Boolean = codec?.lowercase().let { it == "srt" || it == "subrip" }
+
 @OptIn(UnstableApi::class)
 private fun plexSource(
+    context: Context,
     url: String,
     headers: Map<String, String>,
     hls: Boolean,
@@ -158,14 +180,16 @@ private fun plexSource(
     val http = DefaultHttpDataSource.Factory()
         .setAllowCrossProtocolRedirects(true)
         .setDefaultRequestProperties(headers)
+    // DefaultDataSource klarar även lokala filer (synkade undertexter i cachen).
+    val data = DefaultDataSource.Factory(context, http)
     val item = MediaItem.Builder().setUri(url).apply {
         if (hls) setMimeType(MimeTypes.APPLICATION_M3U8)
         if (subtitles.isNotEmpty()) setSubtitleConfigurations(subtitles)
     }.build()
     return if (hls) {
-        HlsMediaSource.Factory(http).createMediaSource(item)
+        HlsMediaSource.Factory(data).createMediaSource(item)
     } else {
-        DefaultMediaSourceFactory(http).createMediaSource(item)
+        DefaultMediaSourceFactory(data).createMediaSource(item)
     }
 }
 
@@ -189,6 +213,18 @@ private fun liveSource(channel: Channel): MediaSource {
 private fun isOk(code: Int) = code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER ||
     code == KeyEvent.KEYCODE_NUMPAD_ENTER
 
+/** Språkkod som tre bokstäver ("sv" och "swe" blir båda "swe"), så att Plex och spelaren kan jämföras. */
+private fun iso3(code: String?): String? {
+    if (code.isNullOrBlank() || code == "und" || code == C.LANGUAGE_UNDETERMINED) return null
+    return try {
+        Locale(code.substringBefore('-')).isO3Language.lowercase().ifEmpty { code.lowercase() }
+    } catch (e: java.util.MissingResourceException) {
+        code.lowercase()
+    }
+}
+
+private enum class VodPanel { NONE, TRACKS, SEARCH, SYNC, OPTIONS }
+
 // ======================================================================
 // Film och avsnitt från Plex
 // ======================================================================
@@ -196,8 +232,9 @@ private fun isOk(code: Int) = code == KeyEvent.KEYCODE_DPAD_CENTER || code == Ke
 @OptIn(UnstableApi::class)
 @Composable
 private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
+    val context = LocalContext.current
     val exo = rememberExoPlayer()
-    val session = remember { UUID.randomUUID().toString() }
+    var session by remember { mutableStateOf(UUID.randomUUID().toString()) }
     val scope = rememberCoroutineScope()
     val focus = remember { FocusRequester() }
 
@@ -210,19 +247,46 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     var lastKeyAt by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var position by remember { mutableLongStateOf(startAt) }
     var duration by remember { mutableLongStateOf(request.item.durationMs) }
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var playing by remember { mutableStateOf(false) }
     var finished by remember { mutableStateOf(false) }
     var nextEpisode by remember { mutableStateOf<PlexItem?>(null) }
     var countdown by remember { mutableIntStateOf(-1) }
     var countdownDismissed by remember { mutableStateOf(false) }
-    var panelOpen by remember { mutableStateOf(false) }
+    var stillWatching by remember { mutableStateOf(false) }
+    var interacted by remember { mutableStateOf(false) }
+    var panel by remember { mutableStateOf(VodPanel.NONE) }
     var tracksVersion by remember { mutableIntStateOf(0) }
     var everReady by remember { mutableStateOf(false) }
     var transcodeAttempts by remember { mutableIntStateOf(0) }
+    /** Efter (om)laddning: välj exakt de spår som Plex har markerat, inte bara rätt språk. */
+    var needsExactSelection by remember { mutableStateOf(false) }
+    var toast by remember { mutableStateOf<String?>(null) }
+
+    // Manuell undertextsynk: förskjutning per undertext och den synkade kopian i cachen.
+    var syncTarget by remember { mutableStateOf<PlexStream?>(null) }
+    val subOffsets = remember { mutableStateMapOf<Long, Long>() }
+    val appliedOffsets = remember { HashMap<Long, Long>() }
+    val syncedFiles = remember { HashMap<Long, Uri>() }
+    val srtCache = remember { HashMap<Long, String>() }
 
     val intro = item.intro
     val introActive = intro != null && position >= intro.startMs && position < intro.endMs - 1_000
     val countdownVisible = countdown >= 0
+    val cardVisible = countdownVisible || stillWatching
+    val panelOpen = panel != VodPanel.NONE
+
+    fun externalSubs(): List<MediaItem.SubtitleConfiguration> =
+        item.streams.filter { it.isExternalSubtitle }.mapNotNull { externalSubtitle(vm, it, syncedFiles[it.id]) }
+
+    /** Startar Direct Play från given position. false om filen saknar adress. */
+    fun loadDirect(atMs: Long): Boolean {
+        val direct = vm.plex.directPlayUrl(item) ?: return false
+        needsExactSelection = true
+        exo.setMediaSource(plexSource(context, direct, vm.plex.streamHeaders(), hls = false, subtitles = externalSubs()), atMs)
+        exo.prepare()
+        return true
+    }
 
     fun switchToTranscode(atMs: Long) {
         if (transcodeAttempts >= 2) return
@@ -232,7 +296,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         scope.launch {
             try {
                 val url = vm.plex.prepareTranscode(item, session)
-                exo.setMediaSource(plexSource(url, vm.plex.streamHeaders(), hls = true), atMs)
+                exo.setMediaSource(plexSource(context, url, vm.plex.streamHeaders(), hls = true), atMs)
                 exo.prepare()
             } catch (e: CancellationException) {
                 throw e
@@ -242,10 +306,133 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         }
     }
 
-    fun playNext() {
+    /** Ny omkodning med de spår som nu är valda i Plex (ljud byts och undertext bränns in). */
+    fun restartTranscode(atMs: Long) {
+        val old = session
+        session = UUID.randomUUID().toString()
+        transcoding = true
+        error = null
+        scope.launch {
+            vm.plex.stopTranscode(old)
+            try {
+                val url = vm.plex.prepareTranscode(item, session)
+                exo.setMediaSource(plexSource(context, url, vm.plex.streamHeaders(), hls = true), atMs)
+                exo.prepare()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                error = "Plex kunde inte koda om filen: ${e.message}"
+            }
+        }
+    }
+
+    /**
+     * Sparar ett spårval: i Plex (så att mobilen och andra appar ser samma sak) och per serie här,
+     * så att nästa avsnitt startar med samma språk. off = undertexter av.
+     */
+    suspend fun saveSelection(type: Int, stream: PlexStream?, language: String?, off: Boolean) {
+        val current = item
+        val plexType = if (type == C.TRACK_TYPE_AUDIO) 2 else 3
+        if (stream != null || off) {
+            item = current.copy(
+                streams = current.streams.map { s ->
+                    if (s.type == plexType) s.copy(selected = !off && s.id == stream?.id) else s
+                },
+            )
+        }
+        current.showKey?.let { show ->
+            if (type == C.TRACK_TYPE_AUDIO) {
+                if (language != null) vm.prefs.setTrackPreference(show, language, null)
+            } else {
+                vm.prefs.setTrackPreference(show, null, if (off) "off" else language)
+            }
+        }
+        try {
+            if (type == C.TRACK_TYPE_AUDIO) {
+                if (stream != null) vm.plex.setSelectedStreams(current, audioStreamId = stream.id)
+            } else {
+                val subId = if (off) 0L else stream?.id
+                if (subId != null) vm.plex.setSelectedStreams(current, subtitleStreamId = subId)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Plex sparade inte valet; uppspelningen fortsätter ändå med det valda spåret.
+        }
+    }
+
+    /** Val i spårpanelen vid Direct Play: byt direkt i spelaren och spara valet. */
+    fun selectExo(type: Int, choice: TrackChoice?) {
+        selectTrack(exo, type, choice)
+        val stream = choice?.let { plexStreamFor(item, it, type) }
+        val language = iso3(choice?.language ?: stream?.languageCode)
+        panel = VodPanel.NONE
+        scope.launch { saveSelection(type, stream, language, off = choice == null) }
+    }
+
+    /** Val i spårpanelen vid omkodning: spara i Plex och starta om omkodningen med det nya spåret. */
+    fun selectPlex(type: Int, stream: PlexStream?) {
+        panel = VodPanel.NONE
+        val pos = exo.currentPosition
+        scope.launch {
+            saveSelection(type, stream, iso3(stream?.languageCode), off = stream == null)
+            restartTranscode(pos)
+        }
+    }
+
+    fun applyExactSelection(tracks: Tracks) {
+        val builder = exo.trackSelectionParameters.buildUpon()
+        var changed = false
+        for ((type, plexType) in listOf(C.TRACK_TYPE_AUDIO to 2, C.TRACK_TYPE_TEXT to 3)) {
+            val want = item.streams.firstOrNull { it.type == plexType && it.selected } ?: continue
+            val choice = trackChoices(tracks, type).firstOrNull { plexStreamFor(item, it, type)?.id == want.id } ?: continue
+            if (!choice.selected) {
+                builder.setTrackTypeDisabled(type, false)
+                builder.setOverrideForType(TrackSelectionOverride(choice.group.mediaTrackGroup, choice.index))
+                changed = true
+            }
+        }
+        if (changed) exo.trackSelectionParameters = builder.build()
+    }
+
+    /** Flyttar en extern .srt i tiden: hämtar den, skriver en förskjuten kopia och laddar om. */
+    fun applySync(stream: PlexStream, offsetMs: Long) {
+        scope.launch {
+            try {
+                val url = vm.plex.subtitleUrl(stream) ?: return@launch
+                val text = srtCache[stream.id] ?: vm.plex.downloadText(url).also { srtCache[stream.id] = it }
+                val shifted = SubtitleSync.shiftSrt(text, offsetMs)
+                val file = withContext(Dispatchers.IO) {
+                    val dir = File(context.cacheDir, "subs").apply { mkdirs() }
+                    dir.listFiles()?.filter { it.name.startsWith("sub_${stream.id}_") }?.forEach { it.delete() }
+                    File(dir, "sub_${stream.id}_${System.currentTimeMillis()}.srt").apply { writeText(shifted) }
+                }
+                syncedFiles[stream.id] = Uri.fromFile(file)
+                loadDirect(exo.currentPosition)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                toast = "Kunde inte synka undertexten: ${e.message}"
+            }
+        }
+    }
+
+    /** auto = startat av nedräkningen. Räknas för "Tittar du fortfarande?". */
+    fun playNext(auto: Boolean) {
         val next = nextEpisode ?: return
         finished = true
-        vm.replaceTop(Screen.Player(PlayRequest.Vod(next)))
+        val count = when {
+            !auto -> 0
+            interacted -> 1
+            else -> request.autoplayCount + 1
+        }
+        vm.replaceTop(Screen.Player(PlayRequest.Vod(next, autoplayCount = count)))
+    }
+
+    /** Erbjud nästa avsnitt, eller fråga först om tre avsnitt har startat av sig själva i rad. */
+    fun offerNext(seconds: Int) {
+        if (nextEpisode == null || countdownDismissed || countdown >= 0 || stillWatching || vm.sleepAtEnd) return
+        if (request.autoplayCount >= 3 && !interacted) stillWatching = true else countdown = seconds
     }
 
     fun dismissCountdown() {
@@ -273,7 +460,14 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                     !tracks.isTypeSupported(C.TRACK_TYPE_AUDIO)
                 val videoUnsupported = tracks.containsType(C.TRACK_TYPE_VIDEO) &&
                     !tracks.isTypeSupported(C.TRACK_TYPE_VIDEO)
-                if (audioUnsupported || videoUnsupported) switchToTranscode(exo.currentPosition)
+                if (audioUnsupported || videoUnsupported) {
+                    switchToTranscode(exo.currentPosition)
+                    return
+                }
+                if (needsExactSelection) {
+                    needsExactSelection = false
+                    applyExactSelection(tracks)
+                }
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -284,10 +478,13 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                 if (playbackState == Player.STATE_READY) everReady = true
                 if (playbackState == Player.STATE_ENDED) {
                     finished = true
-                    if (nextEpisode != null && !countdownDismissed) {
-                        if (countdown < 0) countdown = 10
-                    } else {
-                        vm.back()
+                    when {
+                        vm.sleepAtEnd -> {
+                            vm.sleepAtEnd = false
+                            vm.back()
+                        }
+                        nextEpisode != null && !countdownDismissed -> offerNext(10)
+                        else -> vm.back()
                     }
                 }
             }
@@ -319,18 +516,34 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                 null
             }
         }
-        val meta = fresh ?: request.item
+        var meta = fresh ?: request.item
+        // Språk som valts tidigare i samma serie gäller även det här avsnittet.
+        val pref = meta.showKey?.let { vm.prefs.trackPreference(it) }
+        val (audioId, subId) = selectionFromPreference(meta, pref)
+        if (audioId != null || subId != null) {
+            try {
+                withTimeout(3_000) { vm.plex.setSelectedStreams(meta, audioId, subId) }
+            } catch (e: TimeoutCancellationException) {
+                // Plex svarade inte i tid; valet gäller ändå i spelaren.
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Samma sak.
+            }
+            meta = meta.copy(
+                streams = meta.streams.map { s ->
+                    when {
+                        s.type == 2 && audioId != null -> s.copy(selected = s.id == audioId)
+                        s.type == 3 && subId != null -> s.copy(selected = s.id == subId)
+                        else -> s
+                    }
+                },
+            )
+        }
         item = meta
         startAt = if (request.fromStart) 0L else meta.viewOffsetMs
-        applyPlexTrackPreferences(exo, meta)
-        val direct = vm.plex.directPlayUrl(meta)
-        if (direct != null) {
-            val subs = meta.streams.filter { it.isExternalSubtitle }.mapNotNull { externalSubtitle(vm, it) }
-            exo.setMediaSource(plexSource(direct, vm.plex.streamHeaders(), hls = false, subtitles = subs), startAt)
-            exo.prepare()
-        } else {
-            switchToTranscode(startAt)
-        }
+        applyTrackPreferences(exo, meta)
+        if (!loadDirect(startAt)) switchToTranscode(startAt)
         started = true
         if (meta.type == "episode") {
             nextEpisode = try {
@@ -348,16 +561,13 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         var ticks = 0
         while (true) {
             position = exo.currentPosition
+            now = System.currentTimeMillis()
             if (exo.duration > 0) duration = exo.duration
-            if (overlayVisible && exo.isPlaying && System.currentTimeMillis() - lastKeyAt > 5_000) {
+            if (overlayVisible && exo.isPlaying && now - lastKeyAt > 5_000) {
                 overlayVisible = false
             }
             val credits = item.credits
-            if (nextEpisode != null && !countdownDismissed && countdown < 0 && credits != null &&
-                position >= credits.startMs && exo.isPlaying
-            ) {
-                countdown = 15
-            }
+            if (credits != null && position >= credits.startMs && exo.isPlaying) offerNext(15)
             if (everReady && ticks % 20 == 0 && exo.playbackState == Player.STATE_READY) {
                 vm.reportProgress(
                     item, if (exo.isPlaying) "playing" else "paused", position, duration,
@@ -375,7 +585,25 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
             delay(1_000)
             countdown -= 1
         } else if (countdown == 0) {
-            playNext()
+            playNext(auto = true)
+        }
+    }
+
+    // Undertextsynk: vänta tills knapptrycken har slutat innan vi laddar om.
+    val syncId = syncTarget?.id
+    val wantedOffset = syncId?.let { subOffsets[it] } ?: 0L
+    LaunchedEffect(syncId, wantedOffset) {
+        val target = syncTarget ?: return@LaunchedEffect
+        if ((appliedOffsets[target.id] ?: 0L) == wantedOffset) return@LaunchedEffect
+        delay(800)
+        appliedOffsets[target.id] = wantedOffset
+        applySync(target, wantedOffset)
+    }
+
+    LaunchedEffect(toast) {
+        if (toast != null) {
+            delay(3_500)
+            toast = null
         }
     }
 
@@ -387,8 +615,13 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         }
     }
 
-    BackHandler(enabled = panelOpen || countdownVisible) {
-        if (panelOpen) panelOpen = false else dismissCountdown()
+    BackHandler(enabled = panelOpen || cardVisible) {
+        when {
+            panel == VodPanel.SEARCH || panel == VodPanel.SYNC -> panel = VodPanel.TRACKS
+            panelOpen -> panel = VodPanel.NONE
+            stillWatching -> vm.back()
+            else -> dismissCountdown()
+        }
     }
 
     Box(
@@ -398,8 +631,8 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
             .focusRequester(focus)
             .focusable()
             .onKeyEvent { ev ->
-                // Öppen panel eller nedräkning: låt knapparna styra fokus där istället.
-                if (panelOpen || countdownVisible) return@onKeyEvent false
+                // Öppen panel eller kort: låt knapparna styra fokus där istället.
+                if (panelOpen || cardVisible) return@onKeyEvent false
                 val native = ev.nativeKeyEvent
                 if (native.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
                 val code = native.keyCode
@@ -433,14 +666,17 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                         exo.seekTo(minOf(target, max))
                         true
                     }
-                    code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_MENU ||
-                        code == KeyEvent.KEYCODE_CAPTIONS -> {
-                        panelOpen = true
+                    code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_CAPTIONS -> {
+                        panel = VodPanel.TRACKS
                         true
                     }
-                    code == KeyEvent.KEYCODE_DPAD_DOWN || code == KeyEvent.KEYCODE_INFO -> true
+                    code == KeyEvent.KEYCODE_DPAD_DOWN || code == KeyEvent.KEYCODE_MENU ||
+                        code == KeyEvent.KEYCODE_INFO -> {
+                        panel = VodPanel.OPTIONS
+                        true
+                    }
                     code == KeyEvent.KEYCODE_MEDIA_NEXT && nextEpisode != null -> {
-                        playNext()
+                        playNext(auto = false)
                         true
                     }
                     code == KeyEvent.KEYCODE_MEDIA_STOP -> {
@@ -450,15 +686,16 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                     else -> false
                 }
                 if (handled) {
+                    interacted = true
                     lastKeyAt = System.currentTimeMillis()
                     overlayVisible = true
                 }
                 handled
             },
     ) {
-        VideoSurface(exo)
+        VideoSurface(exo, vm.videoScale)
         if (!started) MessageBox("Startar…")
-        if ((overlayVisible || !playing) && !panelOpen && !countdownVisible) {
+        if ((overlayVisible || !playing) && !panelOpen && !cardVisible) {
             VodOverlay(
                 title = item.displayTitle,
                 subtitle = item.subtitle,
@@ -466,61 +703,216 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                 duration = duration,
                 playing = playing,
                 transcoding = transcoding,
+                sleep = sleepLabel(vm, now),
                 modifier = Modifier.align(Alignment.BottomStart),
             )
         }
-        if (introActive && !panelOpen && !countdownVisible) {
+        if (vm.showStreamInfo && !panelOpen) {
+            StreamInfo(
+                exo = exo,
+                mode = if (transcoding) "Omkodas av Plex (H.264/AAC)" else "Direct Play",
+                modifier = Modifier.align(Alignment.TopStart),
+            )
+        }
+        if (introActive && !panelOpen && !cardVisible) {
             Chip("OK = Hoppa över intro", Modifier.align(Alignment.TopEnd).padding(32.dp))
         }
-        if (panelOpen) {
-            TrackPanel(
-                exo = exo,
-                version = tracksVersion,
-                onClose = { panelOpen = false },
+        SleepTimer(
+            vm = vm,
+            now = now,
+            onSleep = {
+                exo.pause()
+                vm.back()
+            },
+            modifier = Modifier.align(Alignment.TopCenter).padding(32.dp),
+        )
+        toast?.let { Chip(it, Modifier.align(Alignment.TopCenter).padding(top = 96.dp)) }
+
+        when (panel) {
+            VodPanel.NONE -> Unit
+            VodPanel.TRACKS -> {
+                val tracks = remember(tracksVersion) { exo.currentTracks }
+                val searchOption = PanelOption("Sök undertexter…", detail = "Hämta från internet via Plex") {
+                    panel = VodPanel.SEARCH
+                }
+                if (transcoding) {
+                    // Omkodning: spåren väljs i Plex och omkodningen startas om.
+                    val audioStreams = item.streams.filter { it.type == 2 }
+                    val subStreams = item.streams.filter { it.type == 3 }
+                    TrackPanel(
+                        audio = PanelSection(
+                            "Ljud",
+                            audioStreams.map { s -> PanelOption(s.title, selected = s.selected) { selectPlex(C.TRACK_TYPE_AUDIO, s) } },
+                            empty = "Inga ljudspår",
+                        ),
+                        text = PanelSection(
+                            "Undertexter",
+                            listOf(PanelOption("Av", selected = subStreams.none { it.selected }) { selectPlex(C.TRACK_TYPE_TEXT, null) }) +
+                                subStreams.map { s -> PanelOption(s.title, selected = s.selected) { selectPlex(C.TRACK_TYPE_TEXT, s) } } +
+                                searchOption,
+                        ),
+                        modifier = Modifier.align(Alignment.CenterEnd),
+                    )
+                } else {
+                    val audio = trackChoices(tracks, C.TRACK_TYPE_AUDIO)
+                    val text = trackChoices(tracks, C.TRACK_TYPE_TEXT)
+                    val textOff = exo.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT) ||
+                        text.none { it.selected }
+                    val currentText = text.firstOrNull { it.selected }.takeIf { !textOff }
+                    val syncable = currentText?.plexId?.let { id ->
+                        item.streams.firstOrNull { it.id == id && isSrt(it.codec) }
+                    }
+                    val textOptions = buildList {
+                        add(PanelOption("Av", selected = textOff) { selectExo(C.TRACK_TYPE_TEXT, null) })
+                        text.forEach { c -> add(PanelOption(c.label, selected = c.selected && !textOff) { selectExo(C.TRACK_TYPE_TEXT, c) }) }
+                        add(searchOption)
+                        if (syncable != null) {
+                            add(
+                                PanelOption("Synka undertext…", detail = SubtitleSync.label(subOffsets[syncable.id] ?: 0L)) {
+                                    syncTarget = syncable
+                                    panel = VodPanel.SYNC
+                                },
+                            )
+                        }
+                    }
+                    TrackPanel(
+                        audio = PanelSection(
+                            "Ljud",
+                            audio.map { c -> PanelOption(c.label, selected = c.selected) { selectExo(C.TRACK_TYPE_AUDIO, c) } },
+                            empty = "Inga ljudspår",
+                        ),
+                        text = PanelSection("Undertexter", textOptions),
+                        modifier = Modifier.align(Alignment.CenterEnd),
+                    )
+                }
+            }
+            VodPanel.SEARCH -> SubtitleSearchPanel(
+                vm = vm,
+                item = item,
+                onDownloaded = { fresh, stream ->
+                    item = fresh
+                    panel = VodPanel.NONE
+                    val pos = exo.currentPosition
+                    scope.launch {
+                        saveSelection(C.TRACK_TYPE_TEXT, stream, iso3(stream.languageCode), off = false)
+                        if (transcoding) {
+                            restartTranscode(pos)
+                        } else {
+                            exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                                .apply { stream.languageCode?.let { setPreferredTextLanguage(it) } }
+                                .build()
+                            loadDirect(pos)
+                        }
+                        toast = "Undertexten är hämtad och vald"
+                    }
+                },
+                modifier = Modifier.align(Alignment.CenterEnd),
+            )
+            VodPanel.SYNC -> {
+                val target = syncTarget
+                if (target == null) {
+                    panel = VodPanel.TRACKS
+                } else {
+                    SyncPanel(
+                        label = target.title,
+                        offsetMs = subOffsets[target.id] ?: 0L,
+                        onChange = { subOffsets[target.id] = it.coerceIn(-600_000L, 600_000L) },
+                        modifier = Modifier.align(Alignment.CenterEnd),
+                    )
+                }
+            }
+            VodPanel.OPTIONS -> OptionsPanel(
+                title = "Alternativ",
+                sections = listOf(
+                    sleepSection(vm, now, includeEnd = true) { panel = VodPanel.NONE },
+                    scaleSection(vm) { panel = VodPanel.NONE },
+                    infoSection(vm) { panel = VodPanel.NONE },
+                ),
                 modifier = Modifier.align(Alignment.CenterEnd),
             )
         }
+
         val next = nextEpisode
         if (countdownVisible && next != null) {
             NextEpisodeCard(
                 next = next,
                 seconds = countdown,
-                onPlayNow = { playNext() },
+                onPlayNow = { playNext(auto = false) },
                 onCancel = { dismissCountdown() },
+                modifier = Modifier.align(Alignment.BottomEnd),
+            )
+        }
+        if (stillWatching) {
+            StillWatchingCard(
+                onContinue = { playNext(auto = false) },
+                onStop = { vm.back() },
                 modifier = Modifier.align(Alignment.BottomEnd),
             )
         }
         error?.let { MessageBox(it) }
     }
-    LaunchedEffect(panelOpen, countdownVisible) {
-        if (!panelOpen && !countdownVisible) focus.requestWhenReady()
+    LaunchedEffect(panel, cardVisible) {
+        if (panel == VodPanel.NONE && !cardVisible) focus.requestWhenReady()
     }
 }
 
+/** Översätter en sparad serieinställning till spår-id:n i Plex. (ljud, undertext där 0 = av), null = ingen ändring. */
+private fun selectionFromPreference(item: PlexItem, pref: Pair<String?, String?>?): Pair<Long?, Long?> {
+    if (pref == null || item.streams.isEmpty()) return null to null
+    val (audioLang, subLang) = pref
+    val audios = item.streams.filter { it.type == 2 }
+    val selectedAudio = audios.firstOrNull { it.selected }
+    val audioId = if (audioLang != null && iso3(selectedAudio?.languageCode) != audioLang) {
+        audios.firstOrNull { iso3(it.languageCode) == audioLang }?.id
+    } else null
+    val subs = item.streams.filter { it.type == 3 }
+    val selectedSub = subs.firstOrNull { it.selected }
+    val subId = when {
+        subLang == null -> null
+        subLang == "off" -> if (selectedSub != null) 0L else null
+        iso3(selectedSub?.languageCode) == subLang -> null
+        else -> subs.firstOrNull { iso3(it.languageCode) == subLang }?.id
+    }
+    return audioId to subId
+}
+
+/** Startval efter Plex: språk för ljud och undertext, och inga undertexter om Plex säger "av". */
 @OptIn(UnstableApi::class)
-private fun applyPlexTrackPreferences(exo: ExoPlayer, item: PlexItem) {
+private fun applyTrackPreferences(exo: ExoPlayer, item: PlexItem) {
+    if (item.streams.isEmpty()) return
     val audio = item.streams.firstOrNull { it.type == 2 && it.selected }?.languageCode
     val sub = item.streams.firstOrNull { it.type == 3 && it.selected }
     exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon().apply {
         if (audio != null) setPreferredAudioLanguage(audio)
-        val subLang = sub?.languageCode
-        if (subLang != null) {
-            setPreferredTextLanguage(subLang)
+        if (sub == null) {
+            setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+        } else {
             setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+            sub.languageCode?.let { setPreferredTextLanguage(it) }
         }
     }.build()
 }
 
-private fun externalSubtitle(vm: AppViewModel, stream: PlexStream): MediaItem.SubtitleConfiguration? {
-    val url = vm.plex.subtitleUrl(stream) ?: return null
-    val mime = subtitleMime(stream.codec) ?: return null
-    return MediaItem.SubtitleConfiguration.Builder(Uri.parse(url))
+private fun externalSubtitle(vm: AppViewModel, stream: PlexStream, syncedFile: Uri?): MediaItem.SubtitleConfiguration? {
+    val uri = syncedFile ?: vm.plex.subtitleUrl(stream)?.let { Uri.parse(it) } ?: return null
+    val mime = if (syncedFile != null) MimeTypes.APPLICATION_SUBRIP else subtitleMime(stream.codec) ?: return null
+    return MediaItem.SubtitleConfiguration.Builder(uri)
+        .setId("plexsub-${stream.id}")
         .setMimeType(mime)
         .setLanguage(stream.languageCode)
         .setLabel(stream.title)
         .setSelectionFlags(if (stream.selected) C.SELECTION_FLAG_DEFAULT else 0)
         .build()
 }
+
+private val plexSubRegex = Regex("""plexsub-(\d+)""")
+
+/** Plex-id för en extern undertext som vi själva lade till (id:t följer med i spårets format). */
+@OptIn(UnstableApi::class)
+private fun plexSubId(format: Format): Long? =
+    format.id?.let { plexSubRegex.find(it)?.groupValues?.get(1)?.toLongOrNull() }
 
 @Composable
 private fun Chip(text: String, modifier: Modifier = Modifier) {
@@ -541,6 +933,7 @@ private fun VodOverlay(
     duration: Long,
     playing: Boolean,
     transcoding: Boolean,
+    sleep: String?,
     modifier: Modifier = Modifier,
 ) {
     val fraction = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
@@ -577,6 +970,10 @@ private fun VodOverlay(
             }
             Spacer(Modifier.width(24.dp))
             if (!playing) Text("Pausad", color = JptvColors.Accent)
+            if (sleep != null) {
+                Spacer(Modifier.width(24.dp))
+                Text(sleep, color = JptvColors.Accent)
+            }
             Spacer(Modifier.weight(1f))
             Text(
                 if (transcoding) "Omkodas av Plex" else "Direct Play",
@@ -586,31 +983,38 @@ private fun VodOverlay(
         }
         Spacer(Modifier.height(6.dp))
         Text(
-            "OK paus · ◀ −10 s · ▶ +30 s (håll för snabbare) · ▲ ljud & undertext · Tillbaka avsluta",
+            "OK paus · ◀ −10 s · ▶ +30 s (håll för snabbare) · ▲ ljud & undertexter · ▼ sovtimer, bild & info",
             color = JptvColors.TextDim,
             style = MaterialTheme.typography.bodySmall,
         )
     }
 }
 
-private data class TrackChoice(val label: String, val group: Tracks.Group, val index: Int, val selected: Boolean)
+// ---------- Spårval ----------
+
+/**
+ * Ett spår i spelaren. ordinal = plats bland filens egna spår av samma typ (för att hitta motsvarande
+ * spår i Plex), plexId = satt för externa undertexter som vi själva lagt till.
+ */
+private data class TrackChoice(
+    val label: String,
+    val group: Tracks.Group,
+    val index: Int,
+    val selected: Boolean,
+    val language: String?,
+    val plexId: Long?,
+    val ordinal: Int,
+    val embeddedCount: Int,
+)
 
 @OptIn(UnstableApi::class)
 private fun formatLabel(format: Format, fallback: String): String {
     val language = format.language
         ?.takeIf { it != C.LANGUAGE_UNDETERMINED && it != "und" }
         ?.let { code -> Locale(code).getDisplayLanguage(Locale("sv", "SE")).replaceFirstChar { it.uppercase() } }
-    val codec = when (format.sampleMimeType) {
-        MimeTypes.AUDIO_AC3 -> "Dolby Digital"
-        MimeTypes.AUDIO_E_AC3, MimeTypes.AUDIO_E_AC3_JOC -> "Dolby Digital Plus"
-        MimeTypes.AUDIO_TRUEHD -> "Dolby TrueHD"
-        MimeTypes.AUDIO_DTS, MimeTypes.AUDIO_DTS_HD -> "DTS"
-        MimeTypes.AUDIO_AAC -> "AAC"
-        MimeTypes.TEXT_SSA -> "ASS"
-        MimeTypes.APPLICATION_SUBRIP -> "SRT"
-        MimeTypes.APPLICATION_PGS -> "PGS"
-        else -> null
-    }
+    // Undertexter som lästs in i förväg har typen "media3-cues"; ursprungsformatet ligger i codecs.
+    val mime = if (format.sampleMimeType == MimeTypes.APPLICATION_MEDIA3_CUES) format.codecs else format.sampleMimeType
+    val codec = codecName(mime)
     val channels = when (format.channelCount) {
         Format.NO_VALUE -> null
         1 -> "mono"
@@ -624,88 +1028,470 @@ private fun formatLabel(format: Format, fallback: String): String {
         .joinToString(" · ")
 }
 
+@OptIn(UnstableApi::class)
+private fun codecName(mime: String?): String? = when (mime) {
+    MimeTypes.AUDIO_AC3 -> "Dolby Digital"
+    MimeTypes.AUDIO_E_AC3 -> "Dolby Digital Plus"
+    MimeTypes.AUDIO_E_AC3_JOC -> "Dolby Atmos (DD+)"
+    MimeTypes.AUDIO_TRUEHD -> "Dolby TrueHD"
+    MimeTypes.AUDIO_DTS -> "DTS"
+    MimeTypes.AUDIO_DTS_HD -> "DTS-HD"
+    MimeTypes.AUDIO_AAC -> "AAC"
+    MimeTypes.AUDIO_OPUS -> "Opus"
+    MimeTypes.AUDIO_FLAC -> "FLAC"
+    MimeTypes.AUDIO_MPEG -> "MP3"
+    MimeTypes.TEXT_SSA -> "ASS"
+    MimeTypes.APPLICATION_SUBRIP -> "SRT"
+    MimeTypes.TEXT_VTT -> "WebVTT"
+    MimeTypes.APPLICATION_PGS -> "PGS"
+    MimeTypes.APPLICATION_VOBSUB -> "VobSub"
+    MimeTypes.APPLICATION_DVBSUBS -> "DVB"
+    MimeTypes.VIDEO_H264 -> "H.264"
+    MimeTypes.VIDEO_H265 -> "HEVC"
+    MimeTypes.VIDEO_AV1 -> "AV1"
+    MimeTypes.VIDEO_VP9 -> "VP9"
+    MimeTypes.VIDEO_DOLBY_VISION -> "Dolby Vision"
+    MimeTypes.VIDEO_MPEG2 -> "MPEG-2"
+    else -> null
+}
+
+@OptIn(UnstableApi::class)
 private fun trackChoices(tracks: Tracks, type: Int): List<TrackChoice> {
+    var embeddedCount = 0
+    for (group in tracks.groups) {
+        if (group.type != type) continue
+        for (i in 0 until group.length) if (plexSubId(group.getTrackFormat(i)) == null) embeddedCount++
+    }
     val result = mutableListOf<TrackChoice>()
     var n = 1
+    var ordinal = 0
     for (group in tracks.groups) {
         if (group.type != type) continue
         for (i in 0 until group.length) {
+            val format = group.getTrackFormat(i)
+            val plexId = plexSubId(format)
+            val ord = if (plexId == null) ordinal++ else -1
             if (!group.isTrackSupported(i)) continue
-            result += TrackChoice(formatLabel(group.getTrackFormat(i), "Spår $n"), group, i, group.isTrackSelected(i))
+            result += TrackChoice(
+                label = formatLabel(format, "Spår $n"),
+                group = group,
+                index = i,
+                selected = group.isTrackSelected(i),
+                language = format.language,
+                plexId = plexId,
+                ordinal = ord,
+                embeddedCount = embeddedCount,
+            )
             n++
         }
     }
     return result
 }
 
-/** Panel för ljudspår och undertexter. ▲ öppnar, Tillbaka stänger. */
-@OptIn(UnstableApi::class)
+/** Motsvarande spår i Plex: via id för externa undertexter, annars ordning eller språk. */
+private fun plexStreamFor(item: PlexItem, choice: TrackChoice, type: Int): PlexStream? {
+    choice.plexId?.let { id -> return item.streams.firstOrNull { it.id == id } }
+    val plexType = if (type == C.TRACK_TYPE_AUDIO) 2 else 3
+    val embedded = item.streams.filter { it.type == plexType && !it.isExternalSubtitle }
+    if (embedded.size == choice.embeddedCount && choice.ordinal in embedded.indices) return embedded[choice.ordinal]
+    val lang = iso3(choice.language) ?: return null
+    return embedded.firstOrNull { iso3(it.languageCode) == lang }
+}
+
+private fun selectTrack(exo: ExoPlayer, type: Int, choice: TrackChoice?) {
+    val builder = exo.trackSelectionParameters.buildUpon()
+    if (choice == null) {
+        builder.setTrackTypeDisabled(type, true)
+    } else {
+        builder.setTrackTypeDisabled(type, false)
+        builder.setOverrideForType(TrackSelectionOverride(choice.group.mediaTrackGroup, choice.index))
+    }
+    exo.trackSelectionParameters = builder.build()
+}
+
+// ---------- Paneler ----------
+
+private class PanelOption(
+    val label: String,
+    val selected: Boolean = false,
+    val detail: String? = null,
+    val onClick: () -> Unit,
+)
+
+private class PanelSection(
+    val title: String,
+    val options: List<PanelOption>,
+    val subtitle: String? = null,
+    val empty: String? = null,
+)
+
 @Composable
-private fun TrackPanel(exo: ExoPlayer, version: Int, onClose: () -> Unit, modifier: Modifier = Modifier) {
-    val tracks = remember(version) { exo.currentTracks }
-    val audio = remember(tracks) { trackChoices(tracks, C.TRACK_TYPE_AUDIO) }
-    val text = remember(tracks) { trackChoices(tracks, C.TRACK_TYPE_TEXT) }
-    val textOff = exo.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT) || text.none { it.selected }
+private fun OptionItem(option: PanelOption, modifier: Modifier = Modifier) {
+    val detail = option.detail
+    ListItem(
+        selected = option.selected,
+        onClick = option.onClick,
+        headlineContent = { Text(option.label, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        supportingContent = if (detail != null) {
+            { Text(detail, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+        } else null,
+        trailingContent = if (option.selected) {
+            { Text("✓", color = JptvColors.Accent) }
+        } else null,
+        modifier = modifier,
+    )
+}
+
+/** Panel för ljudspår och undertexter. ▲ öppnar, Tillbaka stänger. */
+@Composable
+private fun TrackPanel(audio: PanelSection, text: PanelSection, modifier: Modifier = Modifier) {
+    val firstFocus = remember { FocusRequester() }
+    Row(
+        modifier
+            .fillMaxHeight()
+            .width(760.dp)
+            .background(Color.Black.copy(alpha = 0.88f))
+            .padding(32.dp),
+        horizontalArrangement = Arrangement.spacedBy(24.dp),
+    ) {
+        PanelColumn(audio, if (audio.options.isNotEmpty()) firstFocus else null, Modifier.weight(1f))
+        PanelColumn(text, if (audio.options.isEmpty()) firstFocus else null, Modifier.weight(1f))
+    }
+    LaunchedEffect(Unit) { firstFocus.requestWhenReady() }
+}
+
+@Composable
+private fun PanelColumn(section: PanelSection, focus: FocusRequester?, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Text(section.title, style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(12.dp))
+        if (section.options.isEmpty() && section.empty != null) Text(section.empty, color = JptvColors.TextDim)
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            itemsIndexed(section.options) { i, option ->
+                OptionItem(option, if (i == 0 && focus != null) Modifier.focusRequester(focus) else Modifier)
+            }
+        }
+    }
+}
+
+/** Lista med rubriker och val, t.ex. sovtimer och bildformat. */
+@Composable
+private fun OptionsPanel(title: String, sections: List<PanelSection>, modifier: Modifier = Modifier) {
+    val firstFocus = remember { FocusRequester() }
+    Column(
+        modifier
+            .fillMaxHeight()
+            .width(460.dp)
+            .background(Color.Black.copy(alpha = 0.88f))
+            .padding(start = 28.dp, top = 28.dp, end = 28.dp),
+    ) {
+        Text(title, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.height(8.dp))
+        LazyColumn(
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            contentPadding = PaddingValues(bottom = 32.dp),
+        ) {
+            sections.forEachIndexed { si, section ->
+                item(key = "h_$si") {
+                    Column(Modifier.padding(top = if (si == 0) 0.dp else 16.dp, bottom = 4.dp)) {
+                        Text(section.title, style = MaterialTheme.typography.titleMedium, color = JptvColors.Accent)
+                        section.subtitle?.let {
+                            Text(it, color = JptvColors.TextDim, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+                itemsIndexed(section.options, key = { oi, _ -> "o_${si}_$oi" }) { oi, option ->
+                    OptionItem(option, if (si == 0 && oi == 0) Modifier.focusRequester(firstFocus) else Modifier)
+                }
+            }
+        }
+    }
+    LaunchedEffect(Unit) { firstFocus.requestWhenReady() }
+}
+
+private fun sleepLabel(vm: AppViewModel, now: Long): String? {
+    val at = vm.sleepAt
+    return when {
+        at != null -> "Sovtimer ${((at - now).coerceAtLeast(0) / 60_000) + 1} min"
+        vm.sleepAtEnd -> "Sovtimer: stänger av efter detta"
+        else -> null
+    }
+}
+
+private fun sleepSection(vm: AppViewModel, now: Long, includeEnd: Boolean, done: () -> Unit): PanelSection {
+    val active = vm.sleepAt != null || vm.sleepAtEnd
+    val options = buildList {
+        add(PanelOption("Av", selected = !active) { vm.setSleepTimer(null); done() })
+        for (minutes in listOf(15, 30, 60, 90, 120)) {
+            add(PanelOption("$minutes min") { vm.setSleepTimer(minutes); done() })
+        }
+        if (includeEnd) {
+            add(PanelOption("När det här är slut", selected = vm.sleepAtEnd) { vm.setSleepAtEnd(); done() })
+        }
+    }
+    return PanelSection("Sovtimer", options, subtitle = sleepLabel(vm, now))
+}
+
+private fun scaleSection(vm: AppViewModel, done: () -> Unit): PanelSection = PanelSection(
+    "Bildformat",
+    listOf("Anpassa" to 0, "Fyll skärmen" to 1, "Zooma" to 2).map { (label, value) ->
+        PanelOption(label, selected = vm.videoScale == value) { vm.videoScale = value; done() }
+    },
+)
+
+private fun infoSection(vm: AppViewModel, done: () -> Unit): PanelSection = PanelSection(
+    "Information",
+    listOf(
+        PanelOption(
+            if (vm.showStreamInfo) "Dölj teknisk info" else "Visa teknisk info",
+            detail = "Upplösning, codec, bithastighet, buffert",
+        ) {
+            vm.showStreamInfo = !vm.showStreamInfo
+            done()
+        },
+    ),
+)
+
+/** Stänger av när tiden är ute; varnar den sista minuten. */
+@Composable
+private fun SleepTimer(vm: AppViewModel, now: Long, onSleep: () -> Unit, modifier: Modifier = Modifier) {
+    val at = vm.sleepAt ?: return
+    val left = at - now
+    if (left <= 0) {
+        LaunchedEffect(at) {
+            vm.sleepAt = null
+            onSleep()
+        }
+        return
+    }
+    if (left <= 60_000) Chip("Sovtimern stänger av om ${left / 1000} s", modifier)
+}
+
+private val SUBTITLE_LANGUAGES = listOf(
+    "sv" to "Svenska",
+    "en" to "Engelska",
+    "no" to "Norska",
+    "da" to "Danska",
+    "fi" to "Finska",
+    "de" to "Tyska",
+    "es" to "Spanska",
+    "fr" to "Franska",
+)
+
+/** Sök undertexter via Plex (OpenSubtitles m.fl.), som "Sök" i Plex egna appar. */
+@Composable
+private fun SubtitleSearchPanel(
+    vm: AppViewModel,
+    item: PlexItem,
+    onDownloaded: (PlexItem, PlexStream) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val scope = rememberCoroutineScope()
+    var language by remember { mutableStateOf(vm.focusKeys["subtitle_language"] ?: "sv") }
+    var results by remember { mutableStateOf<List<SubtitleResult>>(emptyList()) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
     val firstFocus = remember { FocusRequester() }
 
-    fun select(type: Int, choice: TrackChoice?) {
-        val builder = exo.trackSelectionParameters.buildUpon()
-        if (choice == null) {
-            builder.setTrackTypeDisabled(type, true)
-        } else {
-            builder.setTrackTypeDisabled(type, false)
-            builder.setOverrideForType(TrackSelectionOverride(choice.group.mediaTrackGroup, choice.index))
+    LaunchedEffect(language) {
+        vm.focusKeys["subtitle_language"] = language
+        results = emptyList()
+        status = "Söker…"
+        status = try {
+            val found = vm.plex.searchSubtitles(item, language)
+            results = found
+            if (found.isEmpty()) "Inga undertexter hittades på det språket." else null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            "Sökningen misslyckades: ${e.message}"
         }
-        exo.trackSelectionParameters = builder.build()
-        onClose()
+    }
+
+    fun download(result: SubtitleResult) {
+        if (busy) return
+        busy = true
+        status = "Plex hämtar undertexten…"
+        scope.launch {
+            try {
+                val before = (vm.plex.metadata(item.ratingKey) ?: item).streams
+                    .filter { it.type == 3 }.map { it.id }.toSet()
+                vm.plex.downloadSubtitle(item, result)
+                // Servern hämtar i bakgrunden; vänta tills den dyker upp som ett nytt spår.
+                var found: Pair<PlexItem, PlexStream>? = null
+                for (attempt in 0 until 20) {
+                    delay(1_000)
+                    val fresh = vm.plex.metadata(item.ratingKey) ?: continue
+                    val stream = fresh.streams.firstOrNull { it.type == 3 && it.isExternalSubtitle && it.id !in before }
+                    if (stream != null) {
+                        found = fresh to stream
+                        break
+                    }
+                }
+                val done = found
+                if (done != null) {
+                    onDownloaded(done.first, done.second)
+                } else {
+                    status = "Plex är inte klar än. Vänta en stund och öppna ▲ igen – den dyker upp i listan."
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                status = "Kunde inte hämta: ${e.message}"
+            } finally {
+                busy = false
+            }
+        }
     }
 
     Row(
         modifier
             .fillMaxHeight()
             .width(760.dp)
-            .background(Color.Black.copy(alpha = 0.85f))
+            .background(Color.Black.copy(alpha = 0.9f))
             .padding(32.dp),
         horizontalArrangement = Arrangement.spacedBy(24.dp),
     ) {
-        Column(Modifier.weight(1f)) {
-            Text("Ljud", style = MaterialTheme.typography.titleLarge)
+        Column(Modifier.width(190.dp)) {
+            Text("Språk", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(12.dp))
-            if (audio.isEmpty()) Text("Inga ljudspår", color = JptvColors.TextDim)
             LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                itemsIndexed(audio) { i, choice ->
+                itemsIndexed(SUBTITLE_LANGUAGES) { _, (code, name) ->
                     ListItem(
-                        selected = choice.selected,
-                        onClick = { select(C.TRACK_TYPE_AUDIO, choice) },
-                        headlineContent = { Text(choice.label, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-                        modifier = if (i == 0) Modifier.focusRequester(firstFocus) else Modifier,
+                        selected = code == language,
+                        onClick = { language = code },
+                        headlineContent = { Text(name) },
+                        modifier = if (code == language) Modifier.focusRequester(firstFocus) else Modifier,
                     )
                 }
             }
         }
         Column(Modifier.weight(1f)) {
-            Text("Undertexter", style = MaterialTheme.typography.titleLarge)
+            Text("Sök undertexter", style = MaterialTheme.typography.titleLarge)
+            Text("Via din Plex-server (OpenSubtitles m.fl.)", color = JptvColors.TextDim, style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(12.dp))
+            status?.let {
+                Text(it, color = if (busy) JptvColors.Accent else JptvColors.TextDim)
+                Spacer(Modifier.height(8.dp))
+            }
             LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                item {
+                itemsIndexed(results, key = { i, r -> "${i}_${r.key}" }) { _, r ->
+                    val detail = listOfNotNull(
+                        r.provider,
+                        r.score?.let { "poäng $it" },
+                        if (r.hearingImpaired) "för hörselskadade" else null,
+                        r.codec?.uppercase(),
+                    ).joinToString(" · ")
                     ListItem(
-                        selected = textOff,
-                        onClick = { select(C.TRACK_TYPE_TEXT, null) },
-                        headlineContent = { Text("Av") },
-                        modifier = if (audio.isEmpty()) Modifier.focusRequester(firstFocus) else Modifier,
-                    )
-                }
-                itemsIndexed(text) { _, choice ->
-                    ListItem(
-                        selected = choice.selected && !textOff,
-                        onClick = { select(C.TRACK_TYPE_TEXT, choice) },
-                        headlineContent = { Text(choice.label, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                        selected = false,
+                        enabled = !busy,
+                        onClick = { download(r) },
+                        headlineContent = { Text(r.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                        supportingContent = { Text(detail, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     )
                 }
             }
         }
     }
     LaunchedEffect(Unit) { firstFocus.requestWhenReady() }
+}
+
+/** Flytta undertexten i tiden, 0,1 eller 1 sekund åt gången. */
+@Composable
+private fun SyncPanel(label: String, offsetMs: Long, onChange: (Long) -> Unit, modifier: Modifier = Modifier) {
+    val focus = remember { FocusRequester() }
+    Column(
+        modifier
+            .fillMaxHeight()
+            .width(460.dp)
+            .background(Color.Black.copy(alpha = 0.88f))
+            .padding(28.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Synka undertext", style = MaterialTheme.typography.titleLarge)
+        Text(label, color = JptvColors.TextDim, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(SubtitleSync.label(offsetMs), fontSize = 44.sp, color = JptvColors.Accent)
+        Text(
+            when {
+                offsetMs > 0 -> "Texten visas senare"
+                offsetMs < 0 -> "Texten visas tidigare"
+                else -> "Ingen förskjutning"
+            },
+            color = JptvColors.TextDim,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { onChange(offsetMs - 1_000) }) { Text("−1 s") }
+            OutlinedButton(onClick = { onChange(offsetMs - 100) }, modifier = Modifier.focusRequester(focus)) { Text("−0,1") }
+            OutlinedButton(onClick = { onChange(offsetMs + 100) }) { Text("+0,1") }
+            OutlinedButton(onClick = { onChange(offsetMs + 1_000) }) { Text("+1 s") }
+        }
+        OutlinedButton(onClick = { onChange(0) }) { Text("Nollställ") }
+        Text(
+            "Kommer texten för tidigt? Tryck +. För sent? Tryck −. Bilden laddar om en kort stund efter ändringen.",
+            color = JptvColors.TextDim,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+    LaunchedEffect(Unit) { focus.requestWhenReady() }
+}
+
+/** Teknisk information om strömmen, uppdateras varje sekund. */
+@OptIn(UnstableApi::class)
+@Composable
+private fun StreamInfo(exo: ExoPlayer, mode: String, modifier: Modifier = Modifier) {
+    val currentMode by rememberUpdatedState(mode)
+    var lines by remember { mutableStateOf(emptyList<String>()) }
+    LaunchedEffect(exo) {
+        while (true) {
+            lines = streamInfoLines(exo, currentMode)
+            delay(1_000)
+        }
+    }
+    Column(
+        modifier
+            .padding(28.dp)
+            .background(Color.Black.copy(alpha = 0.72f), MaterialTheme.shapes.medium)
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        lines.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+    }
+}
+
+@OptIn(UnstableApi::class)
+private fun streamInfoLines(exo: ExoPlayer, mode: String): List<String> = buildList {
+    add(mode)
+    exo.videoFormat?.let { v ->
+        val parts = mutableListOf<String>()
+        if (v.width > 0 && v.height > 0) parts += "${v.width}×${v.height}"
+        if (v.frameRate > 0) parts += String.format(Locale.US, "%.3f fps", v.frameRate).replace(".000", "")
+        (codecName(v.sampleMimeType) ?: v.sampleMimeType)?.let { parts += it }
+        when (v.colorInfo?.colorTransfer) {
+            C.COLOR_TRANSFER_ST2084 -> parts += "HDR10"
+            C.COLOR_TRANSFER_HLG -> parts += "HLG"
+            else -> Unit
+        }
+        val bitrate = listOf(v.averageBitrate, v.bitrate, v.peakBitrate).firstOrNull { it > 0 }
+        if (bitrate != null) parts += String.format(Locale.US, "%.1f Mbit/s", bitrate / 1_000_000f)
+        add("Bild: " + parts.joinToString(" · "))
+    }
+    exo.audioFormat?.let { a ->
+        val parts = mutableListOf<String>()
+        (codecName(a.sampleMimeType) ?: a.sampleMimeType)?.let { parts += it }
+        when (a.channelCount) {
+            Format.NO_VALUE -> Unit
+            1 -> parts += "mono"
+            2 -> parts += "stereo"
+            6 -> parts += "5.1"
+            8 -> parts += "7.1"
+            else -> parts += "${a.channelCount} kanaler"
+        }
+        if (a.sampleRate > 0) parts += "${a.sampleRate / 1000} kHz"
+        a.language?.takeIf { it != C.LANGUAGE_UNDETERMINED }?.let { parts += it }
+        add("Ljud: " + parts.joinToString(" · "))
+    }
+    add(String.format(Locale.US, "Buffert: %.1f s", exo.totalBufferedDuration / 1000f))
+    exo.videoDecoderCounters?.let { add("Tappade bildrutor: ${it.droppedBufferCount}") }
 }
 
 @Composable
@@ -735,6 +1521,30 @@ private fun NextEpisodeCard(
     LaunchedEffect(Unit) { playFocus.requestWhenReady() }
 }
 
+@Composable
+private fun StillWatchingCard(onContinue: () -> Unit, onStop: () -> Unit, modifier: Modifier = Modifier) {
+    val continueFocus = remember { FocusRequester() }
+    Column(
+        modifier
+            .padding(40.dp)
+            .width(460.dp)
+            .background(Color.Black.copy(alpha = 0.88f), MaterialTheme.shapes.medium)
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text("Tittar du fortfarande?", color = JptvColors.Accent, style = MaterialTheme.typography.titleLarge)
+        Text(
+            "Tre avsnitt har startat av sig själva. Nästa startar när du svarar.",
+            color = JptvColors.TextDim,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Button(onClick = onContinue, modifier = Modifier.focusRequester(continueFocus)) { Text("Fortsätt titta") }
+            OutlinedButton(onClick = onStop) { Text("Sluta") }
+        }
+    }
+    LaunchedEffect(Unit) { continueFocus.requestWhenReady() }
+}
+
 // ======================================================================
 // Live-TV från IPTV-listan
 // ======================================================================
@@ -753,7 +1563,12 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var retries by remember { mutableIntStateOf(0) }
     var listOpen by remember { mutableStateOf(false) }
+    var optionsOpen by remember { mutableStateOf(false) }
     var digits by remember { mutableStateOf("") }
+    var tracksVersion by remember { mutableIntStateOf(0) }
+    // OK-knappen: kort tryck = kanallista, håll inne = alternativ. Avgörs när knappen släpps.
+    var okDown by remember { mutableStateOf(false) }
+    var okLong by remember { mutableStateOf(false) }
 
     val channel = channels[index]
 
@@ -794,6 +1609,10 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                     return
                 }
                 error = "Kanalen spelar inte just nu (${e.errorCodeName})"
+            }
+
+            override fun onTracksChanged(tracks: Tracks) {
+                tracksVersion++
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -864,7 +1683,10 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
         if (target != null) jumpTo(target) else showBanner()
     }
 
-    BackHandler(enabled = listOpen) { listOpen = false }
+    BackHandler(enabled = listOpen || optionsOpen) {
+        listOpen = false
+        optionsOpen = false
+    }
 
     Box(
         Modifier
@@ -873,10 +1695,34 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
             .focusRequester(focus)
             .focusable()
             .onKeyEvent { ev ->
-                if (listOpen) return@onKeyEvent false
+                if (listOpen || optionsOpen) return@onKeyEvent false
                 val native = ev.nativeKeyEvent
-                if (native.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
                 val code = native.keyCode
+                if (isOk(code)) {
+                    when (native.action) {
+                        KeyEvent.ACTION_DOWN -> {
+                            if (native.repeatCount == 0) okDown = true
+                            if (native.repeatCount > 0 || native.isLongPress) okLong = true
+                        }
+                        KeyEvent.ACTION_UP -> {
+                            if (okDown) {
+                                when {
+                                    okLong -> optionsOpen = true
+                                    error != null -> {
+                                        retries = 0
+                                        error = null
+                                        exo.prepare()
+                                    }
+                                    else -> listOpen = true
+                                }
+                            }
+                            okDown = false
+                            okLong = false
+                        }
+                    }
+                    return@onKeyEvent true
+                }
+                if (native.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
                 val count = channels.size
                 when {
                     code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_CHANNEL_UP -> {
@@ -885,16 +1731,6 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                     }
                     code == KeyEvent.KEYCODE_DPAD_DOWN || code == KeyEvent.KEYCODE_CHANNEL_DOWN -> {
                         switchTo(channels, (index - 1 + count) % count)
-                        true
-                    }
-                    isOk(code) -> {
-                        if (error != null) {
-                            retries = 0
-                            error = null
-                            exo.prepare()
-                        } else {
-                            listOpen = true
-                        }
                         true
                     }
                     code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_LAST_CHANNEL -> {
@@ -907,7 +1743,11 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                         showBanner()
                         true
                     }
-                    code == KeyEvent.KEYCODE_MENU || code == KeyEvent.KEYCODE_BOOKMARK -> {
+                    code == KeyEvent.KEYCODE_MENU -> {
+                        optionsOpen = true
+                        true
+                    }
+                    code == KeyEvent.KEYCODE_BOOKMARK -> {
                         vm.toggleFavorite(channel)
                         showBanner()
                         true
@@ -924,16 +1764,26 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                 }
             },
     ) {
-        VideoSurface(exo)
-        if ((now < bannerUntil || error != null) && !listOpen) {
+        VideoSurface(exo, vm.videoScale)
+        if ((now < bannerUntil || error != null) && !listOpen && !optionsOpen) {
             ChannelBanner(
                 vm = vm,
                 channel = channel,
                 now = now,
                 error = error,
+                sleep = sleepLabel(vm, now),
                 modifier = Modifier.align(Alignment.BottomStart),
             )
         }
+        if (vm.showStreamInfo && !optionsOpen) {
+            StreamInfo(exo = exo, mode = "Live-TV · ${channel.name}", modifier = Modifier.align(Alignment.TopStart))
+        }
+        SleepTimer(
+            vm = vm,
+            now = now,
+            onSleep = { vm.back() },
+            modifier = Modifier.align(Alignment.TopCenter).padding(32.dp),
+        )
         if (digits.isNotEmpty()) {
             Text(
                 digits,
@@ -959,9 +1809,59 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                 modifier = Modifier.align(Alignment.CenterStart),
             )
         }
+        if (optionsOpen) {
+            val tracks = remember(tracksVersion) { exo.currentTracks }
+            val audio = trackChoices(tracks, C.TRACK_TYPE_AUDIO)
+            val text = trackChoices(tracks, C.TRACK_TYPE_TEXT)
+            val textOff = exo.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT) ||
+                text.none { it.selected }
+            val close = { optionsOpen = false }
+            val favorite = vm.isFavorite(channel)
+            val sections = buildList {
+                add(
+                    PanelSection(
+                        "Kanal",
+                        listOf(
+                            PanelOption(if (favorite) "Ta bort från favoriter" else "Lägg till i favoriter") {
+                                vm.toggleFavorite(channel)
+                                showBanner()
+                                close()
+                            },
+                        ),
+                    ),
+                )
+                if (audio.size > 1) {
+                    add(
+                        PanelSection(
+                            "Ljud",
+                            audio.map { c -> PanelOption(c.label, selected = c.selected) { selectTrack(exo, C.TRACK_TYPE_AUDIO, c); close() } },
+                        ),
+                    )
+                }
+                if (text.isNotEmpty()) {
+                    add(
+                        PanelSection(
+                            "Undertext",
+                            listOf(PanelOption("Av", selected = textOff) { selectTrack(exo, C.TRACK_TYPE_TEXT, null); close() }) +
+                                text.map { c ->
+                                    PanelOption(c.label, selected = c.selected && !textOff) { selectTrack(exo, C.TRACK_TYPE_TEXT, c); close() }
+                                },
+                        ),
+                    )
+                }
+                add(sleepSection(vm, now, includeEnd = false, done = close))
+                add(scaleSection(vm, done = close))
+                add(infoSection(vm, done = close))
+            }
+            OptionsPanel(
+                title = "${channel.number}  ${channel.name}",
+                sections = sections,
+                modifier = Modifier.align(Alignment.CenterEnd),
+            )
+        }
     }
-    LaunchedEffect(listOpen) {
-        if (!listOpen) focus.requestWhenReady()
+    LaunchedEffect(listOpen, optionsOpen) {
+        if (!listOpen && !optionsOpen) focus.requestWhenReady()
     }
 }
 
@@ -1012,7 +1912,14 @@ private fun ChannelListOverlay(
 }
 
 @Composable
-private fun ChannelBanner(vm: AppViewModel, channel: Channel, now: Long, error: String?, modifier: Modifier = Modifier) {
+private fun ChannelBanner(
+    vm: AppViewModel,
+    channel: Channel,
+    now: Long,
+    error: String?,
+    sleep: String?,
+    modifier: Modifier = Modifier,
+) {
     val current = vm.epg?.now(channel, now)
     val next = vm.epg?.next(channel, now)
     Row(
@@ -1025,12 +1932,19 @@ private fun ChannelBanner(vm: AppViewModel, channel: Channel, now: Long, error: 
         ChannelLogo(channel, size = 80)
         Spacer(Modifier.width(24.dp))
         Column(Modifier.weight(1f)) {
-            Text(
-                "${channel.number}  ${channel.name}${if (vm.isFavorite(channel)) "  ★" else ""}",
-                style = MaterialTheme.typography.headlineSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "${channel.number}  ${channel.name}${if (vm.isFavorite(channel)) "  ★" else ""}",
+                    style = MaterialTheme.typography.headlineSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (sleep != null) {
+                    Spacer(Modifier.width(16.dp))
+                    Text(sleep, color = JptvColors.Accent)
+                }
+            }
             Text(channel.group, color = JptvColors.TextDim)
             if (current != null) {
                 Spacer(Modifier.height(8.dp))
@@ -1056,7 +1970,7 @@ private fun ChannelBanner(vm: AppViewModel, channel: Channel, now: Long, error: 
             }
             Spacer(Modifier.height(6.dp))
             Text(
-                "OK kanallista · ▲▼ byt kanal · ◀ förra kanalen · siffror = kanalnummer · ☰ favorit",
+                "OK kanallista · håll OK alternativ · ▲▼ byt kanal · ◀ förra kanalen · siffror = kanalnummer",
                 color = JptvColors.TextDim,
                 style = MaterialTheme.typography.bodySmall,
             )

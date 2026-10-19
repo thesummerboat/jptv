@@ -1,5 +1,6 @@
 package se.jptv.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -8,6 +9,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -25,28 +27,37 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Button
+import androidx.tv.material3.Card
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.OutlinedButton
 import androidx.tv.material3.Text
 import se.jptv.AppViewModel
 import se.jptv.Screen
+import se.jptv.iptv.Channel
 import se.jptv.plex.PlexHomeRow
 import se.jptv.plex.PlexItem
+
+private const val CONTINUE_ROW = "Fortsätt titta"
 
 @Composable
 fun HomeScreen(vm: AppViewModel) {
     val topFocus = remember { FocusRequester() }
     val itemFocus = remember { FocusRequester() }
     var focusedItem by remember { mutableStateOf<PlexItem?>(null) }
+    var menuFor by remember { mutableStateOf<Pair<PlexItem, Boolean>?>(null) }
     // Kom tillbaka till samma kort som sist, om det finns kvar.
     val rememberedKey = remember { vm.focusKeys["home"] }
-    val rememberedExists = remember(vm.homeRows) {
-        rememberedKey != null && vm.homeRows.withIndex().any { (r, row) ->
-            row.items.withIndex().any { (i, item) -> homeKey(r, i, item) == rememberedKey }
-        }
+    val liveNow = remember(vm.playlist, vm.favorites, vm.recents) { vm.liveNowChannels() }
+    val rememberedExists = remember(vm.homeRows, liveNow) {
+        rememberedKey != null && (
+            vm.homeRows.withIndex().any { (r, row) ->
+                row.items.withIndex().any { (i, item) -> homeKey(r, i, item.ratingKey) == rememberedKey }
+            } || liveNow.withIndex().any { (i, ch) -> homeKey(-1, i, ch.key) == rememberedKey }
+            )
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -57,6 +68,9 @@ fun HomeScreen(vm: AppViewModel) {
                 .padding(start = 48.dp, top = 28.dp),
         ) {
             Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(end = 48.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
@@ -65,11 +79,13 @@ fun HomeScreen(vm: AppViewModel) {
                 Button(onClick = { vm.open(Screen.LiveTv) }, modifier = Modifier.focusRequester(topFocus)) {
                     Text("Live-TV")
                 }
-                LastChannelButton(vm)
                 vm.sections.forEach { section ->
                     OutlinedButton(onClick = { vm.open(Screen.Section(section)) }) { Text(section.title) }
                 }
+                OutlinedButton(onClick = { vm.open(Screen.Search) }) { Text("Sök") }
                 OutlinedButton(onClick = { vm.open(Screen.Settings) }) { Text("Inställningar") }
+                Spacer(Modifier.weight(1f))
+                Clock()
             }
             Spacer(Modifier.height(16.dp))
 
@@ -86,13 +102,13 @@ fun HomeScreen(vm: AppViewModel) {
 
             val error = vm.homeError
             when {
-                error != null -> MessageBox(
+                error != null && liveNow.isEmpty() -> MessageBox(
                     message = error,
                     buttonText = "Försök igen",
                     onButton = { vm.connectAndLoad(rediscover = true) },
                 )
-                vm.homeLoading && vm.homeRows.isEmpty() -> MessageBox("Hämtar från ${vm.serverName ?: "Plex"}…")
-                vm.homeRows.isEmpty() -> MessageBox(
+                vm.homeLoading && vm.homeRows.isEmpty() && liveNow.isEmpty() -> MessageBox("Hämtar från ${vm.serverName ?: "Plex"}…")
+                vm.homeRows.isEmpty() && liveNow.isEmpty() -> MessageBox(
                     message = "Inget att visa ännu från Plex.",
                     buttonText = "Uppdatera",
                     onButton = { vm.refreshHome() },
@@ -100,14 +116,25 @@ fun HomeScreen(vm: AppViewModel) {
                 else -> HomeRows(
                     vm = vm,
                     rows = vm.homeRows,
+                    liveNow = liveNow,
                     focusKey = if (rememberedExists) rememberedKey else null,
                     focusRequester = itemFocus,
                     onFocused = { key, item ->
                         focusedItem = item
                         vm.focusKeys["home"] = key
                     },
+                    onLongPress = { item, inContinue -> menuFor = item to inContinue },
                 )
             }
+        }
+
+        menuFor?.let { (item, inContinue) ->
+            ItemMenu(
+                vm = vm,
+                item = item,
+                inContinueWatching = inContinue,
+                onClose = { menuFor = null },
+            )
         }
     }
     LaunchedEffect(rememberedExists) {
@@ -116,7 +143,7 @@ fun HomeScreen(vm: AppViewModel) {
     }
 }
 
-private fun homeKey(row: Int, index: Int, item: PlexItem) = "${row}_${index}_${item.ratingKey}"
+private fun homeKey(row: Int, index: Int, id: String) = "${row}_${index}_$id"
 
 /** Titel och handling för kortet som har fokus, ovanför raderna. */
 @Composable
@@ -155,26 +182,53 @@ private fun UpdateBanner(text: String, busy: Boolean, onUpdate: () -> Unit) {
 private fun HomeRows(
     vm: AppViewModel,
     rows: List<PlexHomeRow>,
+    liveNow: List<Channel>,
     focusKey: String?,
     focusRequester: FocusRequester,
-    onFocused: (String, PlexItem) -> Unit,
+    onFocused: (String, PlexItem?) -> Unit,
+    onLongPress: (PlexItem, Boolean) -> Unit,
 ) {
     LazyColumn(
         state = vm.listState("home"),
         verticalArrangement = Arrangement.spacedBy(28.dp),
         contentPadding = PaddingValues(bottom = 48.dp),
     ) {
+        if (liveNow.isNotEmpty()) {
+            item(key = "live_now") {
+                Column {
+                    Text(if (vm.favorites.isEmpty()) "Senaste kanaler" else "Live nu", style = MaterialTheme.typography.titleLarge)
+                    Spacer(Modifier.height(12.dp))
+                    LazyRow(
+                        state = vm.listState("home_row_live"),
+                        horizontalArrangement = Arrangement.spacedBy(18.dp),
+                        contentPadding = PaddingValues(end = 48.dp, top = 6.dp, bottom = 6.dp),
+                    ) {
+                        itemsIndexed(liveNow, key = { i, ch -> "${i}_${ch.key}" }) { i, ch ->
+                            val key = homeKey(-1, i, ch.key)
+                            LiveTile(
+                                vm = vm,
+                                channel = ch,
+                                onClick = { vm.playChannel(liveNow, i) },
+                                modifier = Modifier
+                                    .onFocusChanged { if (it.hasFocus) onFocused(key, null) }
+                                    .then(if (key == focusKey) Modifier.focusRequester(focusRequester) else Modifier),
+                            )
+                        }
+                    }
+                }
+            }
+        }
         itemsIndexed(rows, key = { r, row -> "${r}_${row.title}" }) { r, row ->
             Column {
                 Text(row.title, style = MaterialTheme.typography.titleLarge)
                 Spacer(Modifier.height(12.dp))
                 LazyRow(
-                    state = vm.listState("home_row_${row.title}"),
+                    state = vm.listState("home_row_${r}_${row.title}"),
                     horizontalArrangement = Arrangement.spacedBy(18.dp),
                     contentPadding = PaddingValues(end = 48.dp, top = 6.dp, bottom = 6.dp),
                 ) {
                     itemsIndexed(row.items, key = { i, item -> "${i}_${item.ratingKey}" }) { i, item ->
-                        val key = homeKey(r, i, item)
+                        val key = homeKey(r, i, item.ratingKey)
                         PosterCard(
                             title = item.displayTitle,
                             subtitle = item.subtitle,
@@ -182,6 +236,7 @@ private fun HomeRows(
                             progress = item.progress,
                             watched = item.watched,
                             onClick = { vm.select(item) },
+                            onLongClick = { onLongPress(item, row.title == CONTINUE_ROW) },
                             modifier = Modifier
                                 .onFocusChanged { if (it.hasFocus) onFocused(key, item) }
                                 .then(if (key == focusKey) Modifier.focusRequester(focusRequester) else Modifier),
@@ -191,4 +246,105 @@ private fun HomeRows(
             }
         }
     }
+}
+
+/** Kanalruta på hemskärmen: logga, namn och vad som går just nu. */
+@Composable
+private fun LiveTile(vm: AppViewModel, channel: Channel, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val now = System.currentTimeMillis()
+    val current = vm.epg?.now(channel, now)
+    Card(onClick = onClick, modifier = modifier.width(300.dp)) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .background(JptvColors.Surface)
+                .padding(14.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ChannelLogo(channel, size = 40)
+                Spacer(Modifier.width(10.dp))
+                Text("${channel.number} ${channel.name}", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleSmall)
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                current?.title ?: "Ingen guide",
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                color = if (current != null) JptvColors.Text else JptvColors.TextDim,
+            )
+            Spacer(Modifier.height(6.dp))
+            if (current != null) {
+                ProgressBar(current.progress(now), Modifier.fillMaxWidth())
+                Spacer(Modifier.height(4.dp))
+                Text("${clock(current.start)}–${clock(current.stop)}", color = JptvColors.TextDim, style = MaterialTheme.typography.labelMedium)
+            }
+        }
+    }
+}
+
+/** Meny när man håller in OK på ett kort. */
+@Composable
+private fun ItemMenu(vm: AppViewModel, item: PlexItem, inContinueWatching: Boolean, onClose: () -> Unit) {
+    val first = remember { FocusRequester() }
+    BackHandler { onClose() }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.7f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier
+                .width(520.dp)
+                .background(JptvColors.Surface, MaterialTheme.shapes.large)
+                .padding(28.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(item.displayTitle, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            item.subtitle?.let { Text(it, color = JptvColors.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            Spacer(Modifier.height(6.dp))
+            Button(
+                onClick = {
+                    onClose()
+                    vm.select(item)
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(first),
+            ) {
+                Text(if (item.isPlayable) "Visa detaljer" else "Öppna")
+            }
+            if (item.isPlayable) {
+                OutlinedButton(onClick = {
+                    onClose()
+                    vm.play(item)
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (item.viewOffsetMs > 0) "Fortsätt spela" else "Spela")
+                }
+                OutlinedButton(onClick = {
+                    onClose()
+                    vm.setWatched(item, !item.watched)
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (item.watched) "Markera som osedd" else "Markera som sedd")
+                }
+            }
+            if (inContinueWatching) {
+                OutlinedButton(onClick = {
+                    onClose()
+                    vm.removeFromContinueWatching(item)
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Ta bort från Fortsätt titta")
+                }
+            }
+            item.showContainer()?.let { show ->
+                OutlinedButton(onClick = {
+                    onClose()
+                    vm.open(Screen.Episodes(show))
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Gå till serien")
+                }
+            }
+        }
+    }
+    LaunchedEffect(Unit) { first.requestWhenReady() }
 }

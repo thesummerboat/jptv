@@ -25,6 +25,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -110,6 +111,23 @@ fun SettingsScreen(vm: AppViewModel) {
             color = JptvColors.TextDim,
         )
 
+        Spacer(Modifier.height(8.dp))
+        PhoneInputSection(vm, onReceived = { m3u, epg ->
+            if (m3u != null) url = m3u
+            if (epg != null) epgUrl = epg
+        })
+
+        Spacer(Modifier.height(8.dp))
+        Text("Live-TV", style = MaterialTheme.typography.titleMedium)
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedButton(onClick = { vm.setStartInLastChannel(!vm.startInLastChannel) }) {
+                Text(if (vm.startInLastChannel) "Starta i senaste kanal: PÅ" else "Starta i senaste kanal: AV")
+            }
+            if (vm.hiddenGroups.isNotEmpty()) {
+                OutlinedButton(onClick = { vm.showAllGroups() }) { Text("Visa ${vm.hiddenGroups.size} dolda grupper igen") }
+            }
+        }
+
         Spacer(Modifier.height(16.dp))
         Text("Plex", style = MaterialTheme.typography.titleLarge)
         val uri = vm.plex.server?.uri
@@ -170,4 +188,59 @@ private fun UrlField(
             )
             .padding(horizontal = 16.dp, vertical = 14.dp),
     )
+}
+
+/** QR-kod som öppnar en sida på mobilen där adresserna kan klistras in. */
+@Composable
+private fun PhoneInputSection(vm: AppViewModel, onReceived: (String?, String?) -> Unit) {
+    var active by remember { mutableStateOf(false) }
+    var address by remember { mutableStateOf<String?>(null) }
+    var status by remember { mutableStateOf<String?>(null) }
+    val server = remember {
+        se.jptv.phone.PhoneInputServer(
+            currentValues = { vm.prefs.m3uUrl to vm.prefs.epgUrl },
+            onSubmit = { m3u, epg ->
+                status = "Mottaget från mobilen!"
+                onReceived(m3u, epg)
+                if (epg != null) vm.prefs.epgUrl = epg.ifBlank { null }
+                if (m3u != null) vm.loadPlaylist(m3u) else vm.refreshEpg(force = true)
+            },
+        )
+    }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { server.stop() }
+    }
+    Text("Mata in från mobilen", style = MaterialTheme.typography.titleMedium)
+    if (!active) {
+        OutlinedButton(onClick = {
+            address = server.start()
+            active = true
+            status = if (address == null) "Hittar inget nätverk på TV:n." else null
+        }) { Text("Visa QR-kod") }
+    } else {
+        val addr = address
+        if (addr != null) {
+            val qr = remember(addr) { se.jptv.phone.PhoneInputServer.qrBitmap(addr).asImageBitmap() }
+            Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                androidx.compose.foundation.Image(
+                    bitmap = qr,
+                    contentDescription = "QR-kod",
+                    modifier = Modifier
+                        .width(220.dp)
+                        .height(220.dp),
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Skanna med mobilen (samma Wi-Fi), eller öppna:", color = JptvColors.TextDim)
+                    Text(addr, style = MaterialTheme.typography.titleLarge, color = JptvColors.Accent)
+                    Text(status ?: "Väntar på mobilen…", color = JptvColors.TextDim)
+                    OutlinedButton(onClick = {
+                        server.stop()
+                        active = false
+                    }) { Text("Stäng") }
+                }
+            }
+        } else {
+            Text(status ?: "", color = JptvColors.Error)
+        }
+    }
 }
