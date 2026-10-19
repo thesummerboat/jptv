@@ -278,6 +278,8 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     /** Efter (om)laddning: välj exakt de spår som Plex har markerat, inte bara rätt språk. */
     var needsExactSelection by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
+    /** När användaren pausade (0 = spelar). Pausskärmen visas efter några sekunders paus. */
+    var pausedSince by remember { mutableLongStateOf(0L) }
 
     // Automatisk bildfrekvens: från Plex före start, annars uppmätt från de första bildrutorna.
     var switchingMode by remember { mutableStateOf(false) }
@@ -458,7 +460,9 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
             interacted -> 1
             else -> request.autoplayCount + 1
         }
-        vm.replaceTop(Screen.Player(PlayRequest.Vod(next, autoplayCount = count)))
+        vm.replaceTop(
+            Screen.Player(PlayRequest.Vod(next, fromStart = request.shuffle, autoplayCount = count, shuffle = request.shuffle)),
+        )
     }
 
     /** Erbjud nästa avsnitt, eller fråga först om tre avsnitt har startat av sig själva i rad. */
@@ -606,7 +610,8 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         started = true
         if (meta.type == "episode") {
             nextEpisode = try {
-                vm.plex.nextEpisode(meta)
+                if (request.shuffle) meta.showContainer()?.let { vm.randomEpisode(it, meta.ratingKey) }
+                else vm.plex.nextEpisode(meta)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -621,6 +626,11 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         while (true) {
             position = exo.currentPosition
             now = System.currentTimeMillis()
+            if (!exo.playWhenReady) {
+                if (pausedSince == 0L) pausedSince = now
+            } else {
+                pausedSince = 0L
+            }
             if (exo.duration > 0) duration = exo.duration
             if (overlayVisible && exo.isPlaying && now - lastKeyAt > 5_000) {
                 overlayVisible = false
@@ -804,7 +814,16 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         VideoSurface(exo, vm.videoScale)
         if (!started) MessageBox("Startar…")
         if (switchingMode) MessageBox("Anpassar bildfrekvensen…")
-        if ((overlayVisible || !playing || scrubTarget != null) && !panelOpen && !cardVisible) {
+        val pauseScreen = started && everReady && pausedSince > 0L && scrubTarget == null &&
+            now - maxOf(pausedSince, lastKeyAt) > 5_000 && !panelOpen && !cardVisible && error == null && !switchingMode
+        androidx.compose.animation.AnimatedVisibility(
+            visible = pauseScreen,
+            enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(600)),
+            exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(250)),
+        ) {
+            PauseScreen(vm, item, position, duration, now)
+        }
+        if ((overlayVisible || !playing || scrubTarget != null) && !panelOpen && !cardVisible && !pauseScreen) {
             VodOverlay(
                 title = item.displayTitle,
                 subtitle = item.subtitle,
@@ -949,6 +968,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         if (countdownVisible && next != null) {
             NextEpisodeCard(
                 next = next,
+                shuffle = request.shuffle,
                 seconds = countdown,
                 onPlayNow = { playNext(auto = false) },
                 onCancel = { dismissCountdown() },
@@ -1024,6 +1044,54 @@ private val plexSubRegex = Regex("""plexsub-(\d+)""")
 @OptIn(UnstableApi::class)
 private fun plexSubId(format: Format): Long? =
     format.id?.let { plexSubRegex.find(it)?.groupValues?.get(1)?.toLongOrNull() }
+
+/** Pausskärm: bilden tonas ner och titel, handling och sluttid visas. Valfri knapp tar bort den. */
+@Composable
+private fun PauseScreen(vm: AppViewModel, item: PlexItem, position: Long, duration: Long, now: Long) {
+    var logo by remember(item.ratingKey) { mutableStateOf(item.logo) }
+    LaunchedEffect(item.ratingKey) { logo = vm.showLogo(item) }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(
+                Brush.horizontalGradient(listOf(Color.Black.copy(alpha = 0.9f), Color.Black.copy(alpha = 0.55f), Color.Black.copy(alpha = 0.25f))),
+            ),
+    ) {
+        Column(
+            Modifier
+                .align(Alignment.CenterStart)
+                .padding(start = 64.dp, end = 64.dp)
+                .width(640.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("Pausad", color = JptvColors.Accent, style = MaterialTheme.typography.titleMedium)
+            se.jptv.ui.TitleLogo(
+                logoUrl = vm.plex.rawImageUrl(logo),
+                title = item.displayTitle,
+                maxHeight = 110.dp,
+                maxWidth = 460.dp,
+                textStyle = MaterialTheme.typography.displaySmall,
+            )
+            if (item.type == "episode") {
+                Text(item.subtitle ?: item.title, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            se.jptv.ui.Badges(listOfNotNull(vm.imdbText(item)) + item.badges)
+            item.summary?.let {
+                Text(it, color = JptvColors.Text.copy(alpha = 0.85f), maxLines = 5, overflow = TextOverflow.Ellipsis)
+            }
+            if (duration > 0) {
+                val left = (duration - position).coerceAtLeast(0)
+                Spacer(Modifier.height(4.dp))
+                ProgressBar((position.toFloat() / duration).coerceIn(0f, 1f), Modifier.width(420.dp))
+                Text(
+                    "${formatTime(position)} av ${formatTime(duration)} · ${formatTime(left)} kvar · slutar ${clock(now + left)} om du fortsätter",
+                    color = JptvColors.TextDim,
+                )
+            }
+            Text("OK fortsätter", color = JptvColors.TextDim, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
 
 @Composable
 private fun Chip(text: String, modifier: Modifier = Modifier) {
@@ -1662,6 +1730,7 @@ private fun streamInfoLines(exo: ExoPlayer, mode: String, contentFps: Float?): L
 @Composable
 private fun NextEpisodeCard(
     next: PlexItem,
+    shuffle: Boolean,
     seconds: Int,
     onPlayNow: () -> Unit,
     onCancel: () -> Unit,
@@ -1676,7 +1745,11 @@ private fun NextEpisodeCard(
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("Nästa avsnitt om $seconds s", color = JptvColors.Accent, style = MaterialTheme.typography.titleMedium)
+        Text(
+            if (shuffle) "Slumpat avsnitt om $seconds s" else "Nästa avsnitt om $seconds s",
+            color = JptvColors.Accent,
+            style = MaterialTheme.typography.titleMedium,
+        )
         Text(next.subtitle ?: next.title, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(onClick = onPlayNow, modifier = Modifier.focusRequester(playFocus)) { Text("Spela nu") }

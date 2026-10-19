@@ -358,6 +358,7 @@ fun EpisodesScreen(vm: AppViewModel, container: PlexItem) {
             ScreenTitle(container.showTitle?.takeIf { container.type == "season" } ?: container.title)
             showMeta?.let { meta -> Badges(listOfNotNull(vm.imdbText(meta)) + meta.ratings.filter { it.source != "IMDb" }.map { it.text }) }
             Spacer(Modifier.weight(1f))
+            OutlinedButton(onClick = { vm.playShuffle(showItem) }) { Text("Spela slumpvis") }
             trailers.firstOrNull()?.let { t -> OutlinedButton(onClick = { vm.playTrailer(t) }) { Text("▶ Trailer") } }
         }
         container.summary?.takeIf { container.type == "show" }?.let {

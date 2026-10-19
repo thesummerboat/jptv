@@ -54,6 +54,8 @@ sealed interface PlayRequest {
         val fromStart: Boolean = false,
         val autoplayCount: Int = 0,
         val trailer: Boolean = false,
+        /** Slumpvis: nästa avsnitt väljs slumpvis i serien. */
+        val shuffle: Boolean = false,
     ) : PlayRequest
     data class Live(val channels: List<Channel>, val index: Int) : PlayRequest
 }
@@ -245,6 +247,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             beginLogin()
         } else {
             stack.add(Screen.Home)
+            // Visa sparad hemskärm direkt; färsk data hämtas strax efter.
+            val savedUri = prefs.serverUri
+            val savedToken = prefs.serverToken
+            if (savedUri != null && savedToken != null) {
+                plex.server = PlexServer(prefs.serverName ?: "Plex", savedUri, savedToken)
+                serverName = prefs.serverName
+                viewModelScope.launch { restoreHomeCache() }
+            }
             connectAndLoad(rediscover = false)
         }
         viewModelScope.launch {
@@ -539,14 +549,100 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             r.awaitAll() to h.awaitAll()
         }
         for ((section, items) in recent) {
-            if (items.isNotEmpty()) lead += PlexHomeRow("Nytt i ${section.title}", items)
+            if (items.isEmpty()) continue
+            lead += if (section.type == "show") groupNewEpisodes("Nytt i ${section.title}", items)
+            else PlexHomeRow("Nytt i ${section.title}", items)
         }
         leadRows = lead
         hubRows = hubs.flatten().map { it.copy(items = visible(it.items)) }.filter { it.items.size >= 3 }
         rebuildHome()
         homeLoadedAt = System.currentTimeMillis()
         loadGenreShortcuts(shown)
+        saveHomeCache()
         refreshLibraryIndex()
+    }
+
+    private val homeCacheFile get() = java.io.File(getApplication<Application>().filesDir, "home_cache.json")
+
+    private suspend fun restoreHomeCache() {
+        val snap = withContext(kotlinx.coroutines.Dispatchers.IO) { runCatching { se.jptv.plex.HomeCache.read(homeCacheFile) }.getOrNull() } ?: return
+        // Färsk data hann före: rör inget.
+        if (homeRows.isNotEmpty()) return
+        if (sections.isEmpty()) sections = snap.sections
+        homeLeadRows = snap.leadRows.coerceAtMost(snap.rows.size)
+        homeRows = snap.rows
+        if (genreShortcuts.isEmpty()) genreShortcuts = snap.genres
+    }
+
+    private suspend fun saveHomeCache() {
+        val snap = se.jptv.plex.HomeCache.Snapshot(sections, homeRows, homeLeadRows, genreShortcuts)
+        withContext(kotlinx.coroutines.Dispatchers.IO) { runCatching { se.jptv.plex.HomeCache.write(homeCacheFile, snap) } }
+    }
+
+    /**
+     * Nytt i serier: ett kort per serie ("3 nya avsnitt") i stället för ett per avsnitt.
+     * Ett enda nytt avsnitt visas som det är (S2E5 · Titel) och öppnar avsnittet direkt.
+     */
+    private fun groupNewEpisodes(title: String, items: List<PlexItem>): PlexHomeRow {
+        val groups = LinkedHashMap<String, MutableList<PlexItem>>()
+        for (item in items) groups.getOrPut(item.showKey ?: item.ratingKey) { mutableListOf() } += item
+        val out = mutableListOf<PlexItem>()
+        val labels = HashMap<String, String>()
+        for (group in groups.values) {
+            val newest = group.first()
+            if (group.size == 1 && newest.type != "season") {
+                out += newest
+                continue
+            }
+            val show = newest.showContainer()
+            if (show == null) {
+                out += group
+                continue
+            }
+            labels[show.ratingKey] = when {
+                group.any { it.type == "season" } && group.size == 1 -> "Nya avsnitt i säsong ${newest.episode ?: ""}".trim()
+                group.any { it.type == "season" } -> "Nya avsnitt"
+                else -> "${group.size} nya avsnitt"
+            }
+            out += show.copy(
+                imdbId = null,
+                ratings = emptyList(),
+                logo = null,
+                watched = false,
+                summary = newest.summary?.let { s -> "Senaste: ${newest.subtitle ?: newest.title}. $s" },
+            )
+        }
+        return PlexHomeRow(title, out, labels)
+    }
+
+    // ---------- Slumpvis ----------
+
+    private val episodeCache = HashMap<String, List<PlexItem>>()
+    private val shuffleSeen = HashMap<String, MutableSet<String>>()
+
+    /** Ett slumpat avsnitt ur serien, helst ett som inte redan spelats i den här slumpomgången. */
+    suspend fun randomEpisode(show: PlexItem, exclude: String?): PlexItem? {
+        val key = show.ratingKey
+        val all = episodeCache[key] ?: runCatching { plex.episodes(show.copy(type = "show")) }.getOrNull()
+            ?.filter { it.type == "episode" }?.also { episodeCache[key] = it } ?: return null
+        if (all.isEmpty()) return null
+        val seen = shuffleSeen.getOrPut(key) { HashSet() }
+        exclude?.let { seen += it }
+        var pool = all.filter { it.ratingKey !in seen }
+        if (pool.isEmpty()) {
+            seen.clear()
+            exclude?.let { seen += it }
+            pool = all.filter { it.ratingKey != exclude }.ifEmpty { all }
+        }
+        return pool.random().also { seen += it.ratingKey }
+    }
+
+    fun playShuffle(show: PlexItem) {
+        viewModelScope.launch {
+            shuffleSeen.remove(show.ratingKey)
+            val episode = randomEpisode(show, null) ?: return@launch
+            open(Screen.Player(PlayRequest.Vod(episode, fromStart = true, shuffle = true)))
+        }
     }
 
     private fun rebuildHome() {
@@ -633,6 +729,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             buildRecommendations(bySection.flatMap { it.second }, history, now)
         }
         rebuildHome()
+        saveHomeCache()
     }
 
     private fun buildRecommendations(
