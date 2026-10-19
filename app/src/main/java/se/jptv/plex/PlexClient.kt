@@ -665,7 +665,9 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
         val key = item.partKey ?: return null
         // Plex egna trailers kan ligga hos Plex, inte på din server.
         if (key.startsWith("http")) return key
-        return "${s.uri}$key?X-Plex-Token=${s.token}"
+        // Plex egna trailers har redan frågeparametrar (t.ex. "…/video.mp4?fmt=4&bitrate=5000").
+        val sep = if (key.contains('?')) '&' else '?'
+        return "${s.uri}$key${sep}X-Plex-Token=${s.token}"
     }
 
     private fun transcodeQuery(item: PlexItem, session: String): String {

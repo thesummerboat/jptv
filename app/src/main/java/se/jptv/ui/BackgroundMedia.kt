@@ -44,7 +44,10 @@ import se.jptv.plex.PlexItem
  * seriesidan. Ett objekt i appen, så att tonen kan klinga av även efter att skärmen är borta.
  */
 object ThemePlayer {
-    private const val VOLUME = 0.3f
+    private const val VOLUME = 0.4f
+
+    /** Vad ledmotivet gjorde senast, för Inställningar (felsökning). */
+    var status by mutableStateOf<String?>(null)
     private val scope = MainScope()
     private var exo: ExoPlayer? = null
     private var url: String? = null
@@ -73,7 +76,10 @@ object ThemePlayer {
                     if (playbackState == Player.STATE_ENDED) this@ThemePlayer.release()
                 }
 
-                override fun onPlayerError(error: PlaybackException) = this@ThemePlayer.release()
+                override fun onPlayerError(error: PlaybackException) {
+                    status = "gick inte att spela (${error.errorCodeName})"
+                    this@ThemePlayer.release()
+                }
             })
             setMediaItem(MediaItem.fromUri(url))
             prepare()
@@ -121,13 +127,25 @@ object ThemePlayer {
     }
 }
 
-/** Spelar seriens ledmotiv när seriesidan öppnas (inte när man kommer tillbaka från ett avsnitt). */
+/**
+ * Spelar seriens ledmotiv när seriesidan öppnas (inte när man kommer tillbaka från ett avsnitt).
+ * show = seriens metadata från Plex (null medan den hämtas).
+ */
 @Composable
-fun ThemeMusic(vm: AppViewModel, url: String?) {
+fun ThemeMusic(vm: AppViewModel, show: PlexItem?) {
     val context = LocalContext.current
     val openedNow = remember { !vm.cameBack }
-    LaunchedEffect(url) {
-        if (url != null && openedNow && vm.themeMusic && vm.pip == null) ThemePlayer.play(context, url)
+    LaunchedEffect(show?.ratingKey) {
+        if (show == null || !openedNow || !vm.themeMusic) return@LaunchedEffect
+        val url = vm.plex.rawImageUrl(show.theme)
+        when {
+            vm.pip != null -> ThemePlayer.status = "av medan bild-i-bild visas («${show.title}»)"
+            url == null -> ThemePlayer.status = "Plex har inget ledmotiv för «${show.title}»"
+            else -> {
+                ThemePlayer.status = "spelar «${show.title}»"
+                ThemePlayer.play(context, url)
+            }
+        }
     }
     DisposableEffect(Unit) {
         // Till spelaren: tyst direkt. Annars tonas det ut.
@@ -156,6 +174,8 @@ fun HeroTrailer(vm: AppViewModel, item: PlexItem?, enabled: Boolean, state: Trai
     /** Videoytan finns bara medan en trailer laddas eller spelar. */
     var mounted by remember { mutableStateOf(false) }
     var ended by remember { mutableStateOf(0) }
+    /** Titeln som spelas, för statusraden i Inställningar. */
+    val playingTitle = remember { arrayOf("") }
 
     fun player(): ExoPlayer = exo ?: ExoPlayer.Builder(context).build().apply {
         volume = 0f
@@ -169,6 +189,7 @@ fun HeroTrailer(vm: AppViewModel, item: PlexItem?, enabled: Boolean, state: Trai
         addListener(object : Player.Listener {
             override fun onRenderedFirstFrame() {
                 state.showing = true
+                vm.trailerStatus = "spelar «${playingTitle[0]}»"
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -176,6 +197,7 @@ fun HeroTrailer(vm: AppViewModel, item: PlexItem?, enabled: Boolean, state: Trai
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                vm.trailerStatus = "trailern för «${playingTitle[0]}» gick inte att spela (${error.errorCodeName})"
                 ended++
             }
         })
@@ -190,6 +212,9 @@ fun HeroTrailer(vm: AppViewModel, item: PlexItem?, enabled: Boolean, state: Trai
     }
 
     val key = item?.ratingKey?.takeIf { enabled && vm.heroTrailers && vm.pip == null }
+    LaunchedEffect(item?.ratingKey, vm.pip != null) {
+        if (item != null && vm.heroTrailers && vm.pip != null) vm.trailerStatus = "av medan bild-i-bild visas"
+    }
     LaunchedEffect(key) {
         // Fokus flyttades: tillbaka till bilden först, stoppa sedan.
         if (state.showing) {
@@ -203,11 +228,22 @@ fun HeroTrailer(vm: AppViewModel, item: PlexItem?, enabled: Boolean, state: Trai
         mounted = false
         if (key == null || item == null) return@LaunchedEffect
         delay(3_000)
-        val trailer = vm.trailerFor(item) ?: return@LaunchedEffect
+        val title = item.showTitle?.takeIf { item.type == "episode" || item.type == "season" } ?: item.title
+        vm.trailerStatus = "söker trailer för «$title»…"
+        val trailer = vm.trailerFor(item)
+        if (trailer == null) {
+            vm.trailerStatus = "Plex har ingen trailer för «$title»"
+            return@LaunchedEffect
+        }
+        playingTitle[0] = title
         try {
             val url = vm.plex.directPlayUrl(trailer)
                 ?: vm.plex.metadata(trailer.ratingKey)?.let { vm.plex.directPlayUrl(it) }
-                ?: return@LaunchedEffect
+            if (url == null) {
+                vm.trailerStatus = "trailern för «$title» saknar fil i Plex"
+                return@LaunchedEffect
+            }
+            vm.trailerStatus = "laddar trailer för «$title»…"
             val http = DefaultHttpDataSource.Factory()
                 .setAllowCrossProtocolRedirects(true)
                 .setDefaultRequestProperties(vm.plex.streamHeaders())
@@ -221,6 +257,7 @@ fun HeroTrailer(vm: AppViewModel, item: PlexItem?, enabled: Boolean, state: Trai
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            vm.trailerStatus = "trailern för «$title» gick inte att hämta (${e.message})"
             mounted = false
         }
     }
