@@ -78,6 +78,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("start_in_last_channel", false)
         set(value) { sp.edit().putBoolean("start_in_last_channel", value).apply() }
 
+    /** Klick när man bläddrar: 0 = av, 1 = lågt, 2 = mellan. */
+    var navSound: Int
+        get() = sp.getInt("nav_sound", 1)
+        set(value) { sp.edit().putInt("nav_sound", value).apply() }
+
     /** Byt TV:ns bildfrekvens efter filmen/kanalen. */
     var autoFrameRate: Boolean
         get() = sp.getBoolean("auto_frame_rate", true)
