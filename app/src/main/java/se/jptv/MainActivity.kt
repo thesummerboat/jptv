@@ -46,7 +46,16 @@ private fun navSound(ev: androidx.compose.ui.input.key.KeyEvent): Boolean {
     when (native.keyCode) {
         android.view.KeyEvent.KEYCODE_DPAD_UP, android.view.KeyEvent.KEYCODE_DPAD_DOWN,
         android.view.KeyEvent.KEYCODE_DPAD_LEFT, android.view.KeyEvent.KEYCODE_DPAD_RIGHT ->
-            if (native.action == android.view.KeyEvent.ACTION_DOWN) se.jptv.ui.NavSounds.move()
+            if (native.action == android.view.KeyEvent.ACTION_DOWN) {
+                se.jptv.ui.NavSounds.move(
+                    when (native.keyCode) {
+                        android.view.KeyEvent.KEYCODE_DPAD_UP -> se.jptv.ui.NavSounds.UP
+                        android.view.KeyEvent.KEYCODE_DPAD_DOWN -> se.jptv.ui.NavSounds.DOWN
+                        android.view.KeyEvent.KEYCODE_DPAD_LEFT -> se.jptv.ui.NavSounds.LEFT
+                        else -> se.jptv.ui.NavSounds.RIGHT
+                    },
+                )
+            }
         android.view.KeyEvent.KEYCODE_DPAD_CENTER, android.view.KeyEvent.KEYCODE_ENTER ->
             if (native.action == android.view.KeyEvent.ACTION_UP) se.jptv.ui.NavSounds.select()
     }
