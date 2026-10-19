@@ -49,12 +49,18 @@ private const val HALF_HOUR = 30 * MINUTE
 /** TV-guide som rutnät: kanaler nedåt, tid åt höger. OK på ett program startar kanalen. */
 @Composable
 fun GuideScreen(vm: AppViewModel, group: String) {
-    val channels = remember(group, vm.playlist) { vm.channelsForGroup(group) }
+    val channels = remember(group, vm.playlist, vm.hiddenGroups) { vm.channelsForGuide(group) }
     val epg = vm.epg
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var windowStart by remember { mutableLongStateOf(now - now % HALF_HOUR) }
     var focusedText by remember { mutableStateOf<String?>(null) }
     val firstFocus = remember { FocusRequester() }
+    // Tillbaka från spelaren: samma kanal som sist, inte översta raden.
+    val memoryKey = "guide_$group"
+    val focusIndex = remember(channels) {
+        channels.indexOfFirst { it.key == vm.focusKeys[memoryKey] }.coerceAtLeast(0)
+    }
+    val listState = vm.rememberListState(memoryKey)
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -98,7 +104,7 @@ fun GuideScreen(vm: AppViewModel, group: String) {
             Column {
                 TimeHeader(windowStart, nameWidth, dpPerMinute)
                 LazyColumn(
-                    state = vm.listState("guide_$group"),
+                    state = listState,
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                     contentPadding = PaddingValues(bottom = 48.dp),
                 ) {
@@ -111,8 +117,9 @@ fun GuideScreen(vm: AppViewModel, group: String) {
                             nameWidth = nameWidth,
                             dpPerMinute = dpPerMinute,
                             now = now,
-                            firstFocus = if (i == 0) firstFocus else null,
+                            firstFocus = if (i == focusIndex) firstFocus else null,
                             onFocusProgramme = { p ->
+                                vm.focusKeys[memoryKey] = ch.key
                                 focusedText = if (p == null) {
                                     "${ch.number}  ${ch.name}: ingen guide"
                                 } else {
@@ -137,7 +144,13 @@ fun GuideScreen(vm: AppViewModel, group: String) {
             }
         }
     }
-    LaunchedEffect(channels) { firstFocus.requestWhenReady() }
+    LaunchedEffect(channels) {
+        if (channels.isEmpty()) return@LaunchedEffect
+        if (listState.layoutInfo.visibleItemsInfo.none { it.index == focusIndex }) {
+            listState.scrollToItem((focusIndex - 3).coerceAtLeast(0))
+        }
+        firstFocus.requestWhenReady()
+    }
 }
 
 @Composable

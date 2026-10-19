@@ -6,13 +6,20 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import se.jptv.BuildConfig
+import java.io.IOException
 import java.net.URLEncoder
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -56,11 +63,33 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
         )
     }
 
-    private suspend fun getJson(url: String, token: String?): JSONObject = withContext(Dispatchers.IO) {
+    /**
+     * Skickar anropet och väntar utan att låsa en tråd, så att det går att avbryta – t.ex. när
+     * spelaren ger upp efter några sekunder eller skärmen stängs.
+     */
+    private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
+        enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (cont.isActive) cont.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                if (cont.isActive) cont.resume(response) else response.close()
+            }
+        })
+        cont.invokeOnCancellation { runCatching { cancel() } }
+    }
+
+    private suspend fun getJson(url: String, token: String?): JSONObject {
         val req = Request.Builder().url(url).plexHeaders(token).get().build()
-        http.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) throw PlexException("Plex svarade HTTP ${resp.code}")
-            JSONObject(resp.body?.string().orEmpty())
+        val resp = http.newCall(req).await()
+        try {
+            return withContext(Dispatchers.IO) {
+                if (!resp.isSuccessful) throw PlexException("Plex svarade HTTP ${resp.code}")
+                JSONObject(resp.body?.string().orEmpty())
+            }
+        } finally {
+            resp.close()
         }
     }
 
@@ -207,7 +236,8 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
     private suspend fun items(path: String): List<PlexItem> {
         val s = srv()
         val mc = getJson("${s.uri}$path", s.token).getJSONObject("MediaContainer")
-        return metadataArray(mc)
+        // Långa serier och stora bibliotek: tolka utanför huvudtråden.
+        return withContext(Dispatchers.Default) { metadataArray(mc) }
     }
 
     private fun metadataArray(container: JSONObject): List<PlexItem> {
@@ -287,11 +317,9 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
     }
 
     private suspend fun put(url: String, token: String) {
-        withContext(Dispatchers.IO) {
-            val req = Request.Builder().url(url).plexHeaders(token).put("".toRequestBody()).build()
-            http.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) throw PlexException("Plex svarade HTTP ${resp.code}")
-            }
+        val req = Request.Builder().url(url).plexHeaders(token).put("".toRequestBody()).build()
+        http.newCall(req).await().use { resp ->
+            if (!resp.isSuccessful) throw PlexException("Plex svarade HTTP ${resp.code}")
         }
     }
 
@@ -323,7 +351,7 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
             val m = markerArr.optJSONObject(i) ?: return@mapNotNull null
             val start = m.optLongOrNull("startTimeOffset") ?: return@mapNotNull null
             val end = m.optLongOrNull("endTimeOffset") ?: return@mapNotNull null
-            PlexMarker(m.optString("type"), start, end)
+            PlexMarker(m.optString("type"), start, end, final = m.optBoolean("final", false))
         }
         val genreArr = o.optJSONArray("Genre")
         val genres = if (genreArr == null) emptyList() else (0 until genreArr.length()).mapNotNull { i ->

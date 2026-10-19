@@ -1,8 +1,6 @@
 package se.jptv
 
 import android.app.Application
-import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -68,15 +66,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- Minne för listor, så att fokus och scroll är kvar när man går tillbaka ----------
 
-    private val listStates = HashMap<String, LazyListState>()
-    private val gridStates = HashMap<String, LazyGridState>()
+    /**
+     * Scrollposition (index, förskjutning) per lista. Bara siffror – hela listtillståndet skulle
+     * hålla kvar gamla skärmars layout och bilder i minnet.
+     */
+    val scrollPositions = HashMap<String, Pair<Int, Int>>()
 
     /** Senast fokuserade element per skärm, t.ex. "home" -> "1_12345". */
     val focusKeys = HashMap<String, String>()
 
-    fun listState(key: String): LazyListState = listStates.getOrPut(key) { LazyListState() }
-
-    fun gridState(key: String): LazyGridState = gridStates.getOrPut(key) { LazyGridState() }
 
     // ---------- Navigering: en enkel stapel av skärmar, Tillbaka plockar bort den översta ----------
 
@@ -121,6 +119,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var iptvStatus by mutableStateOf<String?>(null)
         private set
     var iptvLoading by mutableStateOf(false)
+        private set
+
+    /** true medan sparad spellista läses in vid start (visa "Laddar…", inte "ingen spellista"). */
+    var iptvRestoring by mutableStateOf(prefs.m3uUrl != null)
         private set
 
     var epg by mutableStateOf<Epg?>(null)
@@ -168,6 +170,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var lastUpdateCheck = 0L
 
     private var loginJob: Job? = null
+    private var homeLoadedAt = 0L
+    private var epgRefreshAgain = false
 
     init {
         if (prefs.plexToken == null) {
@@ -180,20 +184,37 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val cachedPlaylist = runCatching { iptv.cached() }.getOrNull()
             playlist = cachedPlaylist
-            epg = runCatching { epgRepo.cached() }.getOrNull()
-            if (startInLastChannel && current == Screen.Home && lastChannel != null) playLastChannel()
-            // Spellistan uppdateras i bakgrunden en gång per dygn, guiden var tolfte timme.
-            val url = prefs.m3uUrl
-            if (url != null && System.currentTimeMillis() - prefs.playlistLoadedAt > 24 * HOUR) {
-                loadPlaylist(url, quiet = true)
-            } else {
-                refreshEpg(force = false)
+            epg = try {
+                epgRepo.cached()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                null
             }
+            iptvRestoring = false
+            if (startInLastChannel && current == Screen.Home && lastChannel != null) playLastChannel()
+            refreshIfStale()
         }
         viewModelScope.launch {
             delay(3_000)
             checkForUpdate(manual = false)
         }
+    }
+
+    /**
+     * Körs vid start och varje gång appen kommer tillbaka till skärmen (TV:n håller appen vid liv i
+     * dagar): spellistan en gång per dygn, guiden var tolfte timme, hemskärmen efter en halvtimme.
+     */
+    fun refreshIfStale() {
+        val now = System.currentTimeMillis()
+        val url = prefs.m3uUrl
+        if (url != null && !iptvRestoring && !iptvLoading) {
+            if (now - prefs.playlistLoadedAt > 24 * HOUR) loadPlaylist(url, quiet = true) else refreshEpg(force = false)
+        }
+        if (plex.server != null && !homeLoading && now - homeLoadedAt > 30 * 60_000L) {
+            viewModelScope.launch { runCatching { loadHome() } }
+        }
+        checkForUpdate(manual = false)
     }
 
     // ---------- Uppdateringar ----------
@@ -365,6 +386,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             if (items.isNotEmpty()) rows += PlexHomeRow("Nytt i ${section.title}", items)
         }
         homeRows = rows
+        homeLoadedAt = System.currentTimeMillis()
     }
 
     /** Filmer och avsnitt öppnar detaljsidan, serier och säsonger avsnittslistan. */
@@ -471,6 +493,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 throw e
             } catch (e: Exception) {
                 iptvStatus = "Fel: ${e.message ?: "kunde inte ladda listan"}"
+                // Den sparade listan finns kvar; guiden ska ändå hållas färsk.
+                if (quiet) refreshEpg(force = false)
+            } catch (e: OutOfMemoryError) {
+                iptvStatus = "Spellistan är för stor för TV:ns minne."
             } finally {
                 iptvLoading = false
             }
@@ -508,7 +534,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
         val age = System.currentTimeMillis() - (epg?.loadedAt ?: 0L)
         if (!force && epg != null && age < 12 * HOUR) return
-        if (epgLoading) return
+        if (epgLoading) {
+            // Ny adress medan en hämtning pågår: kör igen när den är klar (två samtidigt tar för mycket minne).
+            if (force) epgRefreshAgain = true
+            return
+        }
         viewModelScope.launch {
             epgLoading = true
             epgStatus = "Hämtar TV-guiden…"
@@ -520,8 +550,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 throw e
             } catch (e: Exception) {
                 epgStatus = "Guiden kunde inte hämtas: ${e.message}"
+            } catch (e: OutOfMemoryError) {
+                epgStatus = "Guiden är för stor för TV:ns minne. Prova en guide med färre kanaler."
             } finally {
                 epgLoading = false
+                if (epgRefreshAgain) {
+                    epgRefreshAgain = false
+                    refreshEpg(force = true)
+                }
             }
         }
     }
@@ -553,7 +589,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             if (favorites.any { pl.byKey.containsKey(it) }) add(GROUP_FAVORITES)
             if (recents.any { pl.byKey.containsKey(it) }) add(GROUP_RECENTS)
             add(GROUP_SEARCH)
-            addAll(pl.groups.filter { it !in hiddenGroups })
+            // Leverantörsgrupper med samma namn som våra egna skulle krocka i listan.
+            addAll(pl.groups.filter { it !in hiddenGroups && it != GROUP_FAVORITES && it != GROUP_RECENTS && it != GROUP_SEARCH })
         }
     }
 
@@ -578,7 +615,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun liveNowChannels(): List<Channel> {
         val pl = playlist ?: return emptyList()
         val favs = pl.channels.filter { it.key in favorites }
-        return (favs.ifEmpty { recents.mapNotNull { pl.byKey[it] } }).take(20)
+        return (favs.ifEmpty { recents.mapNotNull { pl.byKey[it] } }).distinctBy { it.key }.take(20)
     }
 
     // ---------- Sök över allt ----------
@@ -633,6 +670,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
             else -> pl.channels.filter { it.group == group }
         }
+    }
+
+    /** Kanaler i TV-guiden. Från "Sök kanal" visas alla synliga kanaler. */
+    fun channelsForGuide(group: String): List<Channel> {
+        val pl = playlist ?: return emptyList()
+        return if (group == GROUP_SEARCH) pl.channels.filter { it.group !in hiddenGroups } else channelsForGroup(group)
     }
 
     fun playChannel(channels: List<Channel>, index: Int) {

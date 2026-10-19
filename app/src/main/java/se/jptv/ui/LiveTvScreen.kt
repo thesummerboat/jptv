@@ -28,12 +28,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
@@ -49,6 +51,7 @@ import androidx.tv.material3.OutlinedButton
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import se.jptv.AppViewModel
 import se.jptv.Screen
 import se.jptv.iptv.Channel
@@ -64,7 +67,9 @@ fun clock(ms: Long): String = clockFormat.format(Date(ms))
 @Composable
 fun LiveTvScreen(vm: AppViewModel) {
     val playlist = vm.playlist
-    if (playlist == null || playlist.channels.isEmpty()) {
+    if (playlist == null && vm.iptvRestoring) {
+        MessageBox("Laddar kanalerna…")
+    } else if (playlist == null || playlist.channels.isEmpty()) {
         MessageBox(
             message = "Ingen IPTV-spellista ännu. Lägg till adressen till din M3U-lista i Inställningar.",
             buttonText = "Öppna Inställningar",
@@ -78,21 +83,41 @@ fun LiveTvScreen(vm: AppViewModel) {
 @Composable
 private fun ChannelBrowser(vm: AppViewModel) {
     val groups = vm.groupsForUi()
-    val remembered = vm.focusKeys["live_group"]
+    // Tillbaka från spelaren: kanalen du tittade på sist (även om du zappat till en annan grupp).
+    val rememberedChannel = remember { vm.focusKeys["live_channel"] }
     val startGroup = remember {
-        remembered?.takeIf { it in groups }
-            ?: vm.lastChannel?.group?.takeIf { it in groups }
-            ?: groups.firstOrNull { it != AppViewModel.GROUP_SEARCH }
-            ?: AppViewModel.GROUP_SEARCH
+        val rememberedGroup = vm.focusKeys["live_group"]?.takeIf { it in groups }
+        val channelGroup = rememberedChannel?.let { vm.playlist?.byKey?.get(it)?.group }?.takeIf { it in groups }
+        when {
+            rememberedGroup != null && rememberedChannel != null &&
+                vm.channelsForGroup(rememberedGroup).any { it.key == rememberedChannel } -> rememberedGroup
+            channelGroup != null -> channelGroup
+            rememberedGroup != null -> rememberedGroup
+            else -> vm.lastChannel?.group?.takeIf { it in groups }
+                ?: groups.firstOrNull { it != AppViewModel.GROUP_SEARCH }
+                ?: AppViewModel.GROUP_SEARCH
+        }
     }
     var group by remember { mutableStateOf(startGroup) }
     var query by remember { mutableStateOf("") }
     val channels = remember(group, query, vm.playlist, vm.favorites, vm.recents) { vm.channelsForGroup(group, query) }
     val groupFocus = remember { FocusRequester() }
     val channelFocus = remember { FocusRequester() }
-    // Tillbaka från spelaren: fokus på kanalen du tittade på, i samma grupp.
-    val rememberedChannel = remember { vm.focusKeys["live_channel"] }
     val startChannelIndex = remember { channels.indexOfFirst { it.key == rememberedChannel } }
+    val groupsList = vm.rememberListState("live_groups")
+    val channelList = vm.rememberListState("live_ch_$group")
+    val scope = rememberCoroutineScope()
+
+    /** Fokus till den valda gruppen, även om den är utanför skärmen. */
+    fun focusSelectedGroup() {
+        scope.launch {
+            val gi = groups.indexOf(group)
+            if (gi >= 0 && groupsList.layoutInfo.visibleItemsInfo.none { it.index == gi }) {
+                groupsList.scrollToItem((gi - 3).coerceAtLeast(0))
+            }
+            groupFocus.requestWhenReady()
+        }
+    }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -123,7 +148,7 @@ private fun ChannelBrowser(vm: AppViewModel) {
         Spacer(Modifier.height(16.dp))
         Row(Modifier.fillMaxSize()) {
             LazyColumn(
-                state = vm.listState("live_groups"),
+                state = groupsList,
                 modifier = Modifier
                     .width(280.dp)
                     .fillMaxHeight(),
@@ -134,7 +159,17 @@ private fun ChannelBrowser(vm: AppViewModel) {
                     ListItem(
                         selected = g == group,
                         onClick = { group = g },
-                        onLongClick = { vm.hideGroup(g) },
+                        onLongClick = {
+                            val index = groups.indexOf(g)
+                            vm.hideGroup(g)
+                            if (g == group) {
+                                // Gruppen försvann: välj grannen och behåll fokus i listan.
+                                val left = vm.groupsForUi()
+                                group = left.getOrNull(index) ?: left.lastOrNull() ?: AppViewModel.GROUP_SEARCH
+                                vm.focusKeys["live_group"] = group
+                                focusSelectedGroup()
+                            }
+                        },
                         modifier = Modifier
                             .onFocusChanged {
                                 if (it.isFocused) {
@@ -142,7 +177,7 @@ private fun ChannelBrowser(vm: AppViewModel) {
                                     vm.focusKeys["live_group"] = g
                                 }
                             }
-                            .then(if (g == startGroup) Modifier.focusRequester(groupFocus) else Modifier),
+                            .then(if (g == group) Modifier.focusRequester(groupFocus) else Modifier),
                         headlineContent = { Text(g, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     )
                 }
@@ -160,8 +195,18 @@ private fun ChannelBrowser(vm: AppViewModel) {
                     )
                 }
                 LazyColumn(
-                    state = vm.listState("live_ch_$group"),
-                    modifier = Modifier.fillMaxHeight(),
+                    state = channelList,
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        // ◀ från en kanal: tillbaka till den valda gruppen, inte den som råkar ligga bredvid.
+                        .onPreviewKeyEvent { ev ->
+                            if (ev.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT) {
+                                if (ev.nativeKeyEvent.action == android.view.KeyEvent.ACTION_DOWN) focusSelectedGroup()
+                                true
+                            } else {
+                                false
+                            }
+                        },
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                     contentPadding = PaddingValues(bottom = 48.dp),
                 ) {
@@ -186,18 +231,12 @@ private fun ChannelBrowser(vm: AppViewModel) {
     }
     LaunchedEffect(Unit) {
         if (startChannelIndex >= 0) {
-            val list = vm.listState("live_ch_$startGroup")
-            if (list.layoutInfo.visibleItemsInfo.none { it.index == startChannelIndex }) {
-                list.scrollToItem((startChannelIndex - 3).coerceAtLeast(0))
+            if (channelList.layoutInfo.visibleItemsInfo.none { it.index == startChannelIndex }) {
+                channelList.scrollToItem((startChannelIndex - 3).coerceAtLeast(0))
             }
             channelFocus.requestWhenReady()
         } else {
-            val groupsList = vm.listState("live_groups")
-            val gi = groups.indexOf(startGroup)
-            if (gi >= 0 && groupsList.layoutInfo.visibleItemsInfo.none { it.index == gi }) {
-                groupsList.scrollToItem((gi - 3).coerceAtLeast(0))
-            }
-            groupFocus.requestWhenReady()
+            focusSelectedGroup()
         }
     }
 }

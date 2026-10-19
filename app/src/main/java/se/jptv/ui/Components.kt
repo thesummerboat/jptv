@@ -19,6 +19,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -179,6 +181,55 @@ suspend fun androidx.compose.ui.focus.FocusRequester.requestWhenReady(attempts: 
     }
 }
 
+
+/**
+ * Släpper igenom OK-knappen först efter att den tryckts ner här. TV-komponenterna klickar när OK
+ * släpps, utan att kolla var den trycktes ner – så ett långtryck som öppnar en ny skärm eller meny
+ * skulle annars klicka på det som har fokus där.
+ */
+fun Modifier.ignoreUnpairedOk(): Modifier = composed {
+    val armed = androidx.compose.runtime.remember { booleanArrayOf(false) }
+    onPreviewKeyEvent { ev ->
+        val native = ev.nativeKeyEvent
+        val code = native.keyCode
+        val ok = code == android.view.KeyEvent.KEYCODE_DPAD_CENTER || code == android.view.KeyEvent.KEYCODE_ENTER ||
+            code == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER
+        when {
+            !ok -> false
+            native.action == android.view.KeyEvent.ACTION_DOWN && native.repeatCount == 0 -> {
+                armed[0] = true
+                false
+            }
+            else -> !armed[0]
+        }
+    }
+}
+
+/** Listans scrollposition, sparad i ViewModel när skärmen stängs och återställd när den öppnas igen. */
+@Composable
+fun se.jptv.AppViewModel.rememberListState(memoryKey: String): androidx.compose.foundation.lazy.LazyListState {
+    val state = androidx.compose.runtime.key(memoryKey) {
+        val saved = scrollPositions[memoryKey]
+        androidx.compose.foundation.lazy.rememberLazyListState(saved?.first ?: 0, saved?.second ?: 0)
+    }
+    androidx.compose.runtime.DisposableEffect(memoryKey, state) {
+        onDispose { scrollPositions[memoryKey] = state.firstVisibleItemIndex to state.firstVisibleItemScrollOffset }
+    }
+    return state
+}
+
+/** Samma sak för rutnät. */
+@Composable
+fun se.jptv.AppViewModel.rememberGridState(memoryKey: String): androidx.compose.foundation.lazy.grid.LazyGridState {
+    val state = androidx.compose.runtime.key(memoryKey) {
+        val saved = scrollPositions[memoryKey]
+        androidx.compose.foundation.lazy.grid.rememberLazyGridState(saved?.first ?: 0, saved?.second ?: 0)
+    }
+    androidx.compose.runtime.DisposableEffect(memoryKey, state) {
+        onDispose { scrollPositions[memoryKey] = state.firstVisibleItemIndex to state.firstVisibleItemScrollOffset }
+    }
+    return state
+}
 
 /** Klocka för hörnet, uppdateras var 15:e sekund. */
 @Composable

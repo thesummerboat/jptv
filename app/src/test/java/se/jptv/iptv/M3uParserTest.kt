@@ -24,6 +24,15 @@ class M3uParserTest {
     """.trimIndent().replace("\n", "\r\n")
 
     @Test
+    fun cacheRoundTripKeepsEverything() {
+        val original = M3uParser.parse(sample)
+        val text = StringBuilder().also { M3uParser.write(original, it) }.toString()
+        val again = M3uParser.parse(text)
+        assertEquals(original, again)
+        assertFalse(text.contains("/movie/"))
+    }
+
+    @Test
     fun parsesLiveChannelsAndSkipsVod() {
         val p = M3uParser.parse(sample)
         assertEquals("http://epg.example/guide.xml.gz", p.epgUrl)

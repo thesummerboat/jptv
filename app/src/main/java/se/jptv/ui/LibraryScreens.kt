@@ -98,7 +98,7 @@ fun SectionScreen(vm: AppViewModel, section: PlexSection) {
                 val focusIndex = remember(items) {
                     items.indexOfFirst { it.ratingKey == remembered }.coerceAtLeast(0)
                 }
-                val grid = vm.gridState(memoryKey)
+                val grid = vm.rememberGridState(memoryKey)
                 LazyVerticalGrid(
                     state = grid,
                     columns = GridCells.Adaptive(PosterWidth + 18.dp),
@@ -212,7 +212,7 @@ fun EpisodesScreen(vm: AppViewModel, container: PlexItem) {
                     episodes.indexOfFirst { it.ratingKey == remembered }.takeIf { it >= 0 }
                         ?: episodes.indexOfFirst { !it.watched }.coerceAtLeast(0)
                 }
-                val list = vm.listState(memoryKey)
+                val list = vm.rememberListState(memoryKey)
                 LazyColumn(
                     state = list,
                     verticalArrangement = Arrangement.spacedBy(6.dp),

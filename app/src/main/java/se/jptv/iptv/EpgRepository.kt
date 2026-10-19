@@ -37,8 +37,8 @@ class EpgRepository(private val context: Context, private val http: OkHttpClient
                     parser = Xml.newPullParser(),
                     wantedIds = wantedIds,
                     wantedNames = wantedNames,
-                    from = now - 3 * HOUR,
-                    to = now + 36 * HOUR,
+                    from = now - 2 * HOUR,
+                    to = now + 24 * HOUR,
                     now = now,
                 )
             }

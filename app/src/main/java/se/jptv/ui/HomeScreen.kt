@@ -24,7 +24,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.focusGroup
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
@@ -52,13 +54,15 @@ fun HomeScreen(vm: AppViewModel) {
     // Kom tillbaka till samma kort som sist, om det finns kvar.
     val rememberedKey = remember { vm.focusKeys["home"] }
     val liveNow = remember(vm.playlist, vm.favorites, vm.recents) { vm.liveNowChannels() }
+    // Nyckeln bygger på radens namn och titelns id, så den håller även när raderna laddas om.
     val rememberedExists = remember(vm.homeRows, liveNow) {
         rememberedKey != null && (
-            vm.homeRows.withIndex().any { (r, row) ->
-                row.items.withIndex().any { (i, item) -> homeKey(r, i, item.ratingKey) == rememberedKey }
-            } || liveNow.withIndex().any { (i, ch) -> homeKey(-1, i, ch.key) == rememberedKey }
+            vm.homeRows.any { row -> row.items.any { item -> homeKey(row.title, item.ratingKey) == rememberedKey } } ||
+                liveNow.any { ch -> homeKey(LIVE_ROW, ch.key) == rememberedKey }
             )
     }
+    // Fokus sätts en gång när skärmen öppnas; senare omladdningar ska inte rycka fokus.
+    var initialFocusDone by remember { mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize()) {
         Backdrop(vm.plex.imageUrl(focusedItem?.art, 1280, 720))
@@ -137,13 +141,18 @@ fun HomeScreen(vm: AppViewModel) {
             )
         }
     }
-    LaunchedEffect(rememberedExists) {
+    LaunchedEffect(rememberedExists, vm.homeRows.isNotEmpty()) {
+        if (initialFocusDone) return@LaunchedEffect
+        // Vänta på raderna om vi har ett kort att komma tillbaka till men de inte hunnit laddas.
+        if (!rememberedExists && rememberedKey != null && vm.homeRows.isEmpty() && vm.homeLoading) return@LaunchedEffect
+        initialFocusDone = true
         if (rememberedExists) itemFocus.requestWhenReady() else topFocus.requestWhenReady()
-        vm.checkForUpdate(manual = false)
     }
 }
 
-private fun homeKey(row: Int, index: Int, id: String) = "${row}_${index}_$id"
+private const val LIVE_ROW = "live"
+
+private fun homeKey(row: String, id: String) = "$row|$id"
 
 /** Titel och handling för kortet som har fokus, ovanför raderna. */
 @Composable
@@ -189,7 +198,7 @@ private fun HomeRows(
     onLongPress: (PlexItem, Boolean) -> Unit,
 ) {
     LazyColumn(
-        state = vm.listState("home"),
+        state = vm.rememberListState("home"),
         verticalArrangement = Arrangement.spacedBy(28.dp),
         contentPadding = PaddingValues(bottom = 48.dp),
     ) {
@@ -199,12 +208,12 @@ private fun HomeRows(
                     Text(if (vm.favorites.isEmpty()) "Senaste kanaler" else "Live nu", style = MaterialTheme.typography.titleLarge)
                     Spacer(Modifier.height(12.dp))
                     LazyRow(
-                        state = vm.listState("home_row_live"),
+                        state = vm.rememberListState("home_row_live"),
                         horizontalArrangement = Arrangement.spacedBy(18.dp),
                         contentPadding = PaddingValues(end = 48.dp, top = 6.dp, bottom = 6.dp),
                     ) {
-                        itemsIndexed(liveNow, key = { i, ch -> "${i}_${ch.key}" }) { i, ch ->
-                            val key = homeKey(-1, i, ch.key)
+                        itemsIndexed(liveNow, key = { _, ch -> ch.key }) { i, ch ->
+                            val key = homeKey(LIVE_ROW, ch.key)
                             LiveTile(
                                 vm = vm,
                                 channel = ch,
@@ -218,17 +227,19 @@ private fun HomeRows(
                 }
             }
         }
-        itemsIndexed(rows, key = { r, row -> "${r}_${row.title}" }) { r, row ->
+        itemsIndexed(rows, key = { r, row -> rowKey(rows, r) }) { r, row ->
             Column {
                 Text(row.title, style = MaterialTheme.typography.titleLarge)
                 Spacer(Modifier.height(12.dp))
+                // Nycklar på id (inte plats), så att fokus följer med när ordningen ändras.
+                val items = remember(row) { row.items.distinctBy { it.ratingKey } }
                 LazyRow(
-                    state = vm.listState("home_row_${r}_${row.title}"),
+                    state = vm.rememberListState("home_row_${rowKey(rows, r)}"),
                     horizontalArrangement = Arrangement.spacedBy(18.dp),
                     contentPadding = PaddingValues(end = 48.dp, top = 6.dp, bottom = 6.dp),
                 ) {
-                    itemsIndexed(row.items, key = { i, item -> "${i}_${item.ratingKey}" }) { i, item ->
-                        val key = homeKey(r, i, item.ratingKey)
+                    itemsIndexed(items, key = { _, item -> item.ratingKey }) { _, item ->
+                        val key = homeKey(row.title, item.ratingKey)
                         PosterCard(
                             title = item.displayTitle,
                             subtitle = item.subtitle,
@@ -246,6 +257,13 @@ private fun HomeRows(
             }
         }
     }
+}
+
+/** Radens nyckel: namnet, med löpnummer om två rader skulle heta likadant. */
+private fun rowKey(rows: List<PlexHomeRow>, index: Int): String {
+    val title = rows[index].title
+    val before = (0 until index).count { rows[it].title == title }
+    return if (before == 0) title else "$title#$before"
 }
 
 /** Kanalruta på hemskärmen: logga, namn och vad som går just nu. */
@@ -283,6 +301,7 @@ private fun LiveTile(vm: AppViewModel, channel: Channel, onClick: () -> Unit, mo
 }
 
 /** Meny när man håller in OK på ett kort. */
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 private fun ItemMenu(vm: AppViewModel, item: PlexItem, inContinueWatching: Boolean, onClose: () -> Unit) {
     val first = remember { FocusRequester() }
@@ -290,11 +309,16 @@ private fun ItemMenu(vm: AppViewModel, item: PlexItem, inContinueWatching: Boole
     Box(
         Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.7f)),
+            .background(Color.Black.copy(alpha = 0.7f))
+            // Menyn öppnas medan OK fortfarande hålls inne; släppet ska inte välja första knappen.
+            .ignoreUnpairedOk(),
         contentAlignment = Alignment.Center,
     ) {
         Column(
             Modifier
+                // Fokus stannar i menyn tills den stängs.
+                .focusProperties { exit = { FocusRequester.Cancel } }
+                .focusGroup()
                 .width(520.dp)
                 .background(JptvColors.Surface, MaterialTheme.shapes.large)
                 .padding(28.dp),
