@@ -18,6 +18,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
@@ -149,8 +150,24 @@ fun DetailsScreen(vm: AppViewModel, initial: PlexItem) {
 
 /** Stor bakgrundsbild som tonas mot mörkt, så att texten går att läsa. */
 @Composable
-fun Backdrop(url: String?, modifier: Modifier = Modifier) {
+fun Backdrop(
+    url: String?,
+    modifier: Modifier = Modifier,
+    imageAlpha: Float = 1f,
+    /** Video bakom bilden (trailer på hemskärmen); syns när bilden tonas bort. */
+    video: (@Composable () -> Unit)? = null,
+) {
     Box(modifier.fillMaxSize()) {
+        if (video != null) {
+            video()
+            // Täcker videoytan tills trailern faktiskt syns.
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = imageAlpha }
+                    .background(JptvColors.Background),
+            )
+        }
         if (url != null) {
             // Mjuk övertoning när bakgrunden byts (t.ex. när fokus flyttas på hemskärmen).
             val context = androidx.compose.ui.platform.LocalContext.current
@@ -161,7 +178,9 @@ fun Backdrop(url: String?, modifier: Modifier = Modifier) {
                 model = request,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = imageAlpha },
             )
         }
         Box(

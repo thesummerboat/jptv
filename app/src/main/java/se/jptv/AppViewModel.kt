@@ -92,12 +92,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val stack = mutableStateListOf<Screen>()
     val current: Screen get() = stack.lastOrNull() ?: Screen.Login
 
+    /** true när senaste navigeringen var Tillbaka (t.ex. från spelaren), för att inte spela ledmotivet igen. */
+    var cameBack = false
+        private set
+
     fun open(screen: Screen) {
+        // Plex-uppspelning tar över skärmen och ljudet: stäng bild-i-bild först.
+        if (screen is Screen.Player && screen.request is PlayRequest.Vod) closePip()
+        cameBack = false
         stack.add(screen)
     }
 
     fun back(): Boolean {
         if (stack.size <= 1) return false
+        cameBack = true
         // Ut ur spelaren: svart direkt, innan menyn ritas, medan TV:n byter tillbaka frekvens.
         if (stack.last() is Screen.Player) se.jptv.player.DisplayModes.beginBlackout()
         stack.removeAt(stack.lastIndex)
@@ -106,7 +114,100 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Byter ut översta skärmen, t.ex. när nästa avsnitt tar över efter det förra. */
     fun replaceTop(screen: Screen) {
+        if (screen is Screen.Player && screen.request is PlayRequest.Vod) closePip()
+        cameBack = false
         if (stack.isEmpty()) stack.add(screen) else stack[stack.lastIndex] = screen
+    }
+
+    // ---------- Bild-i-bild: live-kanalen spelar vidare i ett hörn ----------
+
+    /**
+     * Kanalen som spelar i hörnet. Det är samma spelare och ström som i helskärm, så det blir aldrig
+     * mer än en ström hos IPTV-leverantören.
+     */
+    var pip by mutableStateOf<se.jptv.player.LiveSession?>(null)
+        private set
+
+    /** Var skärmen har plats för bilden (i pixlar), annars ett hörn längst ner till höger. */
+    var pipSlot by mutableStateOf<androidx.compose.ui.geometry.Rect?>(null)
+
+    var pipEnabled by mutableStateOf(prefs.pip)
+        private set
+
+    fun startPip(session: se.jptv.player.LiveSession) {
+        val old = pip
+        if (old != null && old.exo !== session.exo) old.exo.release()
+        pip = session
+    }
+
+    /** Helskärmsspelaren tar över spelaren och strömmen; inget släpps. */
+    fun handOverPip(session: se.jptv.player.LiveSession) {
+        if (pip === session) pip = null
+    }
+
+    fun closePip() {
+        val session = pip ?: return
+        pip = null
+        session.exo.release()
+    }
+
+    /** Tillbaka till helskärm med kanalen som spelar. */
+    fun resumePip() {
+        val session = pip ?: return
+        open(Screen.Player(PlayRequest.Live(session.channels, session.index)))
+    }
+
+    fun changePipEnabled(enabled: Boolean) {
+        pipEnabled = enabled
+        prefs.pip = enabled
+        if (!enabled) closePip()
+    }
+
+    override fun onCleared() {
+        closePip()
+        super.onCleared()
+    }
+
+    // ---------- Trailer i bakgrunden och ledmotiv ----------
+
+    var heroTrailers by mutableStateOf(prefs.heroTrailers)
+        private set
+
+    fun changeHeroTrailers(enabled: Boolean) {
+        heroTrailers = enabled
+        prefs.heroTrailers = enabled
+    }
+
+    var themeMusic by mutableStateOf(prefs.themeMusic)
+        private set
+
+    fun changeThemeMusic(enabled: Boolean) {
+        themeMusic = enabled
+        prefs.themeMusic = enabled
+        if (!enabled) se.jptv.ui.ThemePlayer.stop(fade = true)
+    }
+
+    /** Trailer per film/serie (null = har ingen), så att samma titel inte frågas om igen. */
+    private val trailerCache = HashMap<String, PlexItem?>()
+
+    /** Trailern för en film eller serie; för avsnitt och säsonger seriens trailer. */
+    suspend fun trailerFor(item: PlexItem): PlexItem? {
+        val key = when (item.type) {
+            "movie", "show" -> item.ratingKey
+            "episode", "season" -> item.showKey ?: return null
+            else -> return null
+        }
+        if (trailerCache.containsKey(key)) return trailerCache[key]
+        val trailer = try {
+            val target = if (key == item.ratingKey) item else plex.metadata(key) ?: return null
+            plex.trailers(target).firstOrNull()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return null
+        }
+        trailerCache[key] = trailer
+        return trailer
     }
 
     // ---------- Tillstånd som skärmarna visar ----------

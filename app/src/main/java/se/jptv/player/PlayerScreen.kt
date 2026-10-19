@@ -129,29 +129,32 @@ fun PlayerScreen(vm: AppViewModel, request: PlayRequest) {
 @Composable
 private fun rememberExoPlayer(tunneling: Boolean = false): ExoPlayer {
     val context = LocalContext.current
-    return remember {
-        // Decoder fallback: om hårdvaruavkodaren vägrar provas nästa, vilket hjälper på svagare TV-apparater.
-        val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
-        val selector = DefaultTrackSelector(context).apply {
-            setParameters(buildUponParameters().setTunnelingEnabled(tunneling))
-        }
-        ExoPlayer.Builder(context, renderers).setTrackSelector(selector).build().apply {
-            setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(C.USAGE_MEDIA)
-                    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-                    .build(),
-                true,
-            )
-            playWhenReady = true
-        }
+    return remember { buildExoPlayer(context, tunneling) }
+}
+
+@OptIn(UnstableApi::class)
+internal fun buildExoPlayer(context: Context, tunneling: Boolean): ExoPlayer {
+    // Decoder fallback: om hårdvaruavkodaren vägrar provas nästa, vilket hjälper på svagare TV-apparater.
+    val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
+    val selector = DefaultTrackSelector(context).apply {
+        setParameters(buildUponParameters().setTunnelingEnabled(tunneling))
+    }
+    return ExoPlayer.Builder(context, renderers).setTrackSelector(selector).build().apply {
+        setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                .build(),
+            true,
+        )
+        playWhenReady = true
     }
 }
 
 /** scale: 0 = anpassa, 1 = fyll (sträck), 2 = zooma (beskär). */
 @OptIn(UnstableApi::class)
 @Composable
-private fun VideoSurface(exo: ExoPlayer, scale: Int) {
+internal fun VideoSurface(exo: ExoPlayer, scale: Int) {
     AndroidView(
         factory = { ctx ->
             PlayerView(ctx).apply {
@@ -162,6 +165,8 @@ private fun VideoSurface(exo: ExoPlayer, scale: Int) {
                 player = exo
             }
         },
+        // Spelaren kan leva vidare (bild-i-bild): släpp bara den här ytan, inte spelaren.
+        onRelease = { view -> view.player = null },
         update = { view ->
             view.resizeMode = when (scale) {
                 1 -> AspectRatioFrameLayout.RESIZE_MODE_FILL
@@ -291,6 +296,8 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
 
     // Spolning: ◀/▶ flyttar en markör med förhandsbild; hoppet görs när man släpper (eller trycker OK).
     var scrubTarget by remember { mutableStateOf<Long?>(null) }
+    /** Ökas vid "Hoppa över intro" för en automatisk omsynk av ljudet. */
+    var resyncToken by remember { mutableIntStateOf(0) }
     val thumbs = remember(item.partId, item.hasPreviews) {
         val partId = item.partId
         if (item.hasPreviews && partId != null) PreviewThumbnails(context, vm.plex, partId) else null
@@ -487,6 +494,21 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         val target = scrubTarget ?: return
         scrubTarget = null
         exo.seekTo(target)
+    }
+
+    // Efter "Hoppa över intro": spola om en gång när filmen gått en sekund. Vissa TV-boxar och
+    // förstärkare tappar ibland ljudsynken vid långa hopp (även i Plex egen app); ett hopp till rättar det,
+    // som när man backar tio sekunder för hand.
+    LaunchedEffect(resyncToken) {
+        if (resyncToken == 0) return@LaunchedEffect
+        var waited = 0
+        while (!(exo.playbackState == Player.STATE_READY && exo.isPlaying)) {
+            if (waited >= 20_000) return@LaunchedEffect
+            delay(100)
+            waited += 100
+        }
+        delay(1_000)
+        if (exo.isPlaying && scrubTarget == null) exo.seekTo((exo.currentPosition - 300).coerceAtLeast(0))
     }
 
     DisposableEffect(exo) {
@@ -761,6 +783,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                     }
                     isOk(code) && introActive && intro != null -> {
                         exo.seekTo(intro.endMs)
+                        resyncToken++
                         true
                     }
                     isOk(code) || code == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || code == KeyEvent.KEYCODE_SPACE -> {
@@ -1790,12 +1813,36 @@ private fun StillWatchingCard(onContinue: () -> Unit, onStop: () -> Unit, modifi
 @OptIn(UnstableApi::class)
 @Composable
 private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
-    val exo = rememberExoPlayer(tunneling = vm.useTunneling())
+    val context = LocalContext.current
+    // Från bild-i-bild: samma spelare och ström fortsätter i helskärm, ingen ny anslutning.
+    val handoff = remember { vm.pip }
+    val exo = remember { handoff?.exo ?: buildExoPlayer(context, vm.useTunneling()) }
+    DisposableEffect(Unit) {
+        if (handoff != null) vm.handOverPip(handoff)
+        onDispose { }
+    }
     val focus = remember { FocusRequester() }
 
     var channels by remember { mutableStateOf(request.channels) }
     var index by remember { mutableIntStateOf(request.index.coerceIn(0, request.channels.lastIndex)) }
-    var previousKey by remember { mutableStateOf<String?>(null) }
+    var previousKey by remember {
+        mutableStateOf(
+            handoff?.let { h -> if (h.channel.key != channels[index].key) h.channel.key else h.previousKey },
+        )
+    }
+    /** Kanalen som redan spelar i bild-i-bild; den ska inte anslutas igen. */
+    var continuing by remember {
+        mutableStateOf(
+            handoff?.takeIf {
+                it.exo.playbackState == Player.STATE_READY || it.exo.playbackState == Player.STATE_BUFFERING
+            }?.channel?.key,
+        )
+    }
+    /** Stopp eller sovtimer: stäng strömmen helt, ingen bild-i-bild. */
+    var stopRequested by remember { mutableStateOf(false) }
+    // Hem-knappen: stoppa strömmen (den tar en anslutning hos leverantören), starta igen vid återkomst.
+    // ON_START skickas även när skärmen öppnas, därför bara omstart efter ett riktigt stopp.
+    var stoppedInBackground by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var bannerToken by remember { mutableIntStateOf(0) }
     var bannerVisible by remember { mutableStateOf(true) }
@@ -1894,8 +1941,17 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
             exo.removeListener(listener)
             exo.clearVideoFrameMetadataListener(liveFpsMeter)
             // Tillbaka till menyerna: byt till vanligt läge bakom svart skärm. Nästa avsnitt: behåll.
-            DisplayModes.release(restore = vm.current !is Screen.Player)
-            exo.release()
+            val toMenus = vm.current !is Screen.Player
+            DisplayModes.release(restore = toMenus)
+            // Bild-i-bild: kanalen som faktiskt spelar fortsätter i ett hörn, med samma ström.
+            val playingIndex = channels.indexOfFirst { it.key == playingKey }
+            val keep = toMenus && vm.pipEnabled && !stopRequested && !stoppedInBackground &&
+                error == null && playingIndex >= 0
+            if (keep) {
+                vm.startPip(LiveSession(exo, channels, playingIndex, previousKey))
+            } else {
+                exo.release()
+            }
         }
     }
 
@@ -1904,9 +1960,6 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
         if (DisplayModes.needsSwitch(fps)) DisplayModes.switchTo(fps)
     }
 
-    // Hem-knappen: stoppa strömmen (den tar en anslutning hos leverantören), starta igen vid återkomst.
-    // ON_START skickas även när skärmen öppnas, därför bara omstart efter ett riktigt stopp.
-    var stoppedInBackground by remember { mutableStateOf(false) }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
         stoppedInBackground = true
         exo.stop()
@@ -1930,6 +1983,15 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
         retries = 0
         showBanner()
         vm.focusKeys["live_channel"] = channel.key
+        if (continuing == channel.key) {
+            // Samma kanal som i bild-i-bild: den spelar redan.
+            continuing = null
+            firstTune = false
+            playingKey = channel.key
+            recordedKey = channel.key
+            return@LaunchedEffect
+        }
+        continuing = null
         if (!firstTune) delay(350)
         firstTune = false
         playingKey = channel.key
@@ -2022,6 +2084,12 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                         if (prev != null) jumpTo(prev) else showBanner()
                         true
                     }
+                    code == KeyEvent.KEYCODE_GUIDE && vm.pipEnabled && error == null -> {
+                        // Guiden med kanalen kvar i hörnet.
+                        DisplayModes.beginBlackout()
+                        vm.replaceTop(Screen.Guide(channel.group))
+                        true
+                    }
                     code == KeyEvent.KEYCODE_DPAD_RIGHT || code == KeyEvent.KEYCODE_INFO ||
                         code == KeyEvent.KEYCODE_GUIDE -> {
                         showBanner()
@@ -2041,6 +2109,7 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                         true
                     }
                     code == KeyEvent.KEYCODE_MEDIA_STOP -> {
+                        stopRequested = true
                         vm.back()
                         true
                     }
@@ -2064,7 +2133,10 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
         }
         SleepTimer(
             vm = vm,
-            onSleep = { vm.back() },
+            onSleep = {
+                stopRequested = true
+                vm.back()
+            },
             modifier = Modifier.align(Alignment.TopCenter).padding(32.dp),
         )
         if (digits.isNotEmpty()) {

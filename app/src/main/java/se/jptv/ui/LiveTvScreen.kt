@@ -227,6 +227,31 @@ private fun ChannelBrowser(vm: AppViewModel) {
                     }
                 }
             }
+            // Bild-i-bild: kanalen som spelar, med vad som går just nu.
+            vm.pip?.let { session ->
+                Spacer(Modifier.width(24.dp))
+                Column(Modifier.width(256.dp)) {
+                    se.jptv.player.PipSlot(vm, Modifier.size(256.dp, 144.dp))
+                    Spacer(Modifier.height(10.dp))
+                    val ch = session.channel
+                    Text("${ch.number}  ${ch.name}", style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    vm.epg?.now(ch, now)?.let { p ->
+                        Text(
+                            "${clock(p.start)}–${clock(p.stop)}  ${p.title}",
+                            color = JptvColors.TextDim,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "▶‖ = helskärm. Tillbaka på hemskärmen stänger.",
+                        color = JptvColors.TextDim,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+            }
         }
     }
     LaunchedEffect(Unit) {

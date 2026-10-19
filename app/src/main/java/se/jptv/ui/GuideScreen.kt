@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -74,25 +75,36 @@ fun GuideScreen(vm: AppViewModel, group: String) {
             .fillMaxSize()
             .padding(start = 48.dp, top = 28.dp, end = 48.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            ScreenTitle("Guide", group)
-            Spacer(Modifier.weight(1f))
-            OutlinedButton(onClick = { windowStart -= 2 * 60 * MINUTE }) { Text("◀ Tidigare") }
-            OutlinedButton(onClick = { windowStart = now - now % HALF_HOUR }) { Text("Nu") }
-            OutlinedButton(onClick = { windowStart += 2 * 60 * MINUTE }) { Text("Senare ▶") }
+        Row {
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ScreenTitle("Guide", group)
+                    Spacer(Modifier.weight(1f))
+                    OutlinedButton(onClick = { windowStart -= 2 * 60 * MINUTE }) { Text("◀ Tidigare") }
+                    OutlinedButton(onClick = { windowStart = now - now % HALF_HOUR }) { Text("Nu") }
+                    OutlinedButton(onClick = { windowStart += 2 * 60 * MINUTE }) { Text("Senare ▶") }
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    focusedText ?: if (epg == null) {
+                        "Ingen guide laddad. Lägg till guide-adressen (XMLTV) i Inställningar."
+                    } else if (vm.pip != null) {
+                        "Välj ett program och tryck OK för att titta. ▶‖ = kanalen i hörnet i helskärm."
+                    } else {
+                        "Välj ett program och tryck OK för att titta."
+                    },
+                    color = JptvColors.TextDim,
+                    maxLines = if (vm.pip != null) 3 else 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.height(if (vm.pip != null) 64.dp else 44.dp),
+                )
+            }
+            // Bild-i-bild: kanalen som spelar, uppe till höger som i TiviMate.
+            if (vm.pip != null) {
+                Spacer(Modifier.width(16.dp))
+                se.jptv.player.PipSlot(vm, Modifier.size(208.dp, 117.dp))
+            }
         }
-        Spacer(Modifier.height(10.dp))
-        Text(
-            focusedText ?: if (epg == null) {
-                "Ingen guide laddad. Lägg till guide-adressen (XMLTV) i Inställningar."
-            } else {
-                "Välj ett program och tryck OK för att titta."
-            },
-            color = JptvColors.TextDim,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.height(44.dp),
-        )
         Spacer(Modifier.height(6.dp))
 
         BoxWithConstraints(Modifier.fillMaxSize()) {

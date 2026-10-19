@@ -210,6 +210,23 @@ fun SettingsScreen(vm: AppViewModel) {
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedButton(onClick = { vm.changeHeroTrailers(!vm.heroTrailers) }) {
+                Text(if (vm.heroTrailers) "Trailer på hemskärmen: PÅ" else "Trailer på hemskärmen: AV")
+            }
+            OutlinedButton(onClick = { vm.changeThemeMusic(!vm.themeMusic) }) {
+                Text(if (vm.themeMusic) "Ledmotiv på seriesidan: PÅ" else "Ledmotiv på seriesidan: AV")
+            }
+            OutlinedButton(onClick = { vm.changePipEnabled(!vm.pipEnabled) }) {
+                Text(if (vm.pipEnabled) "Bild-i-bild för live-TV: PÅ" else "Bild-i-bild för live-TV: AV")
+            }
+        }
+        Text(
+            "Bild-i-bild: Tillbaka från en kanal lämnar den i ett hörn medan du bläddrar (samma ström, aldrig två). " +
+                "▶‖ tar den till helskärm, Tillbaka på hemskärmen eller Stopp stänger.",
+            color = JptvColors.TextDim,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedButton(onClick = { vm.refreshImdb(force = true) }) { Text("Uppdatera IMDb-betyg") }
             if (vm.notInterested.isNotEmpty()) {
                 OutlinedButton(onClick = { vm.clearNotInterested() }) {

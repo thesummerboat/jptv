@@ -113,6 +113,8 @@ data class PlexItem(
     val addedAt: Long = 0L,
     val lastViewedAt: Long = 0L,
     val viewCount: Int = 0,
+    /** Seriens ledmotiv, t.ex. "/library/metadata/123/theme/1700000000" (även för säsonger och avsnitt). */
+    val theme: String? = null,
 ) {
     /** Märken som 4K, Dolby Vision, Atmos och 5.1, från filens spår (eller grovt från listdata). */
     val badges: List<String>
