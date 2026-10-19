@@ -101,20 +101,25 @@ object DisplayModes {
     }
 
     /**
-     * Spelaren stängs: tillbaka till TV:ns vanliga läge. Väntar lite först, så att nästa avsnitt
-     * kan behålla samma läge utan ett extra svart byte.
+     * Spelaren stängs. Läget behålls i menyerna: att byta tillbaka ger en sekunds svart bild,
+     * och nästa film eller kanal har ofta samma bildfrekvens. Byts bara när något annat behövs.
      */
     fun release() {
-        val original = originalModeId ?: return
         restoreJob?.cancel()
-        restoreJob = scope.launch {
-            delay(2_500)
-            val activity = activityRef?.get() ?: return@launch
-            val attrs = activity.window.attributes
-            attrs.preferredDisplayModeId = original
-            activity.window.attributes = attrs
-            originalModeId = null
-        }
+    }
+
+    /**
+     * Tillbaka till TV:ns vanliga läge direkt. Används när appen lämnas (då syns inget byte i
+     * JPTV, och menyerna är i vanligt läge nästa gång) och när automatisk bildfrekvens stängs av.
+     */
+    fun resetNow() {
+        restoreJob?.cancel()
+        val original = originalModeId ?: return
+        val activity = activityRef?.get() ?: return
+        val attrs = activity.window.attributes
+        attrs.preferredDisplayModeId = original
+        activity.window.attributes = attrs
+        originalModeId = null
     }
 }
 
