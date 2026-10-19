@@ -94,9 +94,10 @@ class Prefs(context: Context) {
         set(value) { sp.edit().putBoolean("hero_trailers", value).apply() }
 
     /** Seriens ledmotiv på seriesidan. */
-    var themeMusic: Boolean
-        get() = sp.getBoolean("theme_music", true)
-        set(value) { sp.edit().putBoolean("theme_music", value).apply() }
+    /** 0 = av, 1 = lågt, 2 = mellan. (Tidigare av/på: "av" blir 0.) */
+    var themeLevel: Int
+        get() = sp.getInt("theme_level", if (sp.getBoolean("theme_music", true)) 1 else 0)
+        set(value) { sp.edit().putInt("theme_level", value).apply() }
 
     /** Live-kanalen spelar vidare i ett hörn när man går ur spelaren. */
     var pip: Boolean
