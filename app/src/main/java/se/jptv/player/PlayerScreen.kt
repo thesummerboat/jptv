@@ -1628,6 +1628,7 @@ private fun streamInfoLines(exo: ExoPlayer, mode: String): List<String> = buildL
         a.language?.takeIf { it != C.LANGUAGE_UNDETERMINED }?.let { parts += it }
         add("Ljud: " + parts.joinToString(" · "))
     }
+    DisplayModes.currentModeText()?.let { add("Skärm: $it") }
     add(String.format(Locale.US, "Buffert: %.1f s", exo.totalBufferedDuration / 1000f))
     exo.videoDecoderCounters?.let { add("Tappade bildrutor: ${it.droppedBufferCount}") }
 }
