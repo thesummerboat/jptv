@@ -46,13 +46,14 @@ fun PosterCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     onLongClick: (() -> Unit)? = null,
+    width: Dp = PosterWidth,
 ) {
-    Column(modifier.width(PosterWidth)) {
+    Column(modifier.width(width)) {
         Card(
             onClick = onClick,
             onLongClick = onLongClick,
             modifier = Modifier
-                .width(PosterWidth)
+                .width(width)
                 .aspectRatio(2f / 3f),
         ) {
             Box(

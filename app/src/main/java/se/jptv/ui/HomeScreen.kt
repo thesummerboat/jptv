@@ -21,9 +21,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.focusGroup
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
@@ -37,6 +39,7 @@ import androidx.tv.material3.Card
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.OutlinedButton
 import androidx.tv.material3.Text
+import kotlinx.coroutines.launch
 import se.jptv.AppViewModel
 import se.jptv.Screen
 import se.jptv.iptv.Channel
@@ -50,6 +53,7 @@ fun HomeScreen(vm: AppViewModel) {
     val topFocus = remember { FocusRequester() }
     val itemFocus = remember { FocusRequester() }
     var focusedItem by remember { mutableStateOf<PlexItem?>(null) }
+    var focusedChannel by remember { mutableStateOf<Channel?>(null) }
     var menuFor by remember { mutableStateOf<Pair<PlexItem, Boolean>?>(null) }
     // Kom tillbaka till samma kort som sist, om det finns kvar.
     val rememberedKey = remember { vm.focusKeys["home"] }
@@ -93,7 +97,7 @@ fun HomeScreen(vm: AppViewModel) {
                 Spacer(Modifier.weight(1f))
                 Clock()
             }
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(12.dp))
 
             vm.availableUpdate?.let { release ->
                 UpdateBanner(
@@ -104,7 +108,7 @@ fun HomeScreen(vm: AppViewModel) {
                 Spacer(Modifier.height(16.dp))
             }
 
-            FocusedInfo(vm, focusedItem)
+            FocusedInfo(vm, focusedItem, focusedChannel)
 
             val error = vm.homeError
             when {
@@ -127,8 +131,10 @@ fun HomeScreen(vm: AppViewModel) {
                     focusRequester = itemFocus,
                     onFocused = { key, item ->
                         focusedItem = item
+                        if (item != null) focusedChannel = null
                         vm.focusKeys["home"] = key
                     },
+                    onChannelFocused = { focusedChannel = it },
                     onLongPress = { item, inContinue -> menuFor = item to inContinue },
                 )
             }
@@ -156,9 +162,9 @@ private const val LIVE_ROW = "live"
 
 private fun homeKey(row: String, id: String) = "$row|$id"
 
-/** Titel och handling för kortet som har fokus, ovanför raderna. */
+/** Stor ruta överst: logotyp, märken och handling för kortet som har fokus (eller kanalen). */
 @Composable
-private fun FocusedInfo(vm: AppViewModel, item: PlexItem?) {
+private fun FocusedInfo(vm: AppViewModel, item: PlexItem?, channel: Channel?) {
     // Logotypen hämtas en kort stund efter att fokus stannat, så att snabb bläddring inte ger en massa anrop.
     var logo by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(item?.ratingKey) {
@@ -170,29 +176,63 @@ private fun FocusedInfo(vm: AppViewModel, item: PlexItem?) {
     }
     Column(
         Modifier
-            .height(112.dp)
-            .width(820.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+            .height(HERO_HEIGHT)
+            .width(680.dp)
+            .clipToBounds(),
+        verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.Bottom),
     ) {
-        if (item != null) {
-            TitleLogo(
-                logoUrl = vm.plex.rawImageUrl(logo),
-                title = item.displayTitle,
-                maxHeight = 48.dp,
-                maxWidth = 320.dp,
-                textStyle = MaterialTheme.typography.headlineSmall,
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Badges(listOfNotNull(vm.imdbText(item)) + item.badges)
-                item.subtitle?.let {
-                    Spacer(Modifier.width(12.dp))
-                    Text(it, color = JptvColors.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        when {
+            item != null -> {
+                TitleLogo(
+                    logoUrl = vm.plex.rawImageUrl(logo),
+                    title = item.displayTitle,
+                    maxHeight = 80.dp,
+                    maxWidth = 380.dp,
+                    textStyle = MaterialTheme.typography.headlineMedium,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Badges(listOfNotNull(vm.imdbText(item)) + item.badges)
+                    val meta = listOfNotNull(
+                        item.subtitle,
+                        item.genres.take(2).joinToString(", ").ifEmpty { null },
+                        if (item.durationMs > 0 && item.type != "show") formatDuration(item.durationMs) else null,
+                    ).joinToString("  ·  ")
+                    if (meta.isNotEmpty()) {
+                        Spacer(Modifier.width(12.dp))
+                        Text(meta, color = JptvColors.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                item.summary?.let {
+                    Text(it, color = JptvColors.Text.copy(alpha = 0.85f), maxLines = 3, overflow = TextOverflow.Ellipsis)
                 }
             }
-            item.summary?.let { Text(it, color = JptvColors.TextDim, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+            channel != null -> {
+                val now = System.currentTimeMillis()
+                val current = vm.epg?.now(channel, now)
+                val next = vm.epg?.next(channel, now)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ChannelLogo(channel, size = 56)
+                    Spacer(Modifier.width(14.dp))
+                    Text("${channel.number}  ${channel.name}", style = MaterialTheme.typography.headlineMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (current != null) {
+                    Text(
+                        "${clock(current.start)}–${clock(current.stop)}  ${current.title}",
+                        style = MaterialTheme.typography.titleLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    ProgressBar(current.progress(now), Modifier.width(360.dp))
+                    current.desc?.let { Text(it, color = JptvColors.TextDim, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+                }
+                next?.let { Text("Sedan ${clock(it.start)}  ${it.title}", color = JptvColors.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            }
         }
     }
 }
+
+private val HERO_HEIGHT = 196.dp
+private val HOME_POSTER = 104.dp
 
 @Composable
 private fun UpdateBanner(text: String, busy: Boolean, onUpdate: () -> Unit) {
@@ -219,17 +259,29 @@ private fun HomeRows(
     focusKey: String?,
     focusRequester: FocusRequester,
     onFocused: (String, PlexItem?) -> Unit,
+    onChannelFocused: (Channel) -> Unit,
     onLongPress: (PlexItem, Boolean) -> Unit,
 ) {
+    val listState = vm.rememberListState("home")
+    val scope = rememberCoroutineScope()
+    // Raden med fokus läggs alltid överst, så att raden ovanför inte syns halvt bakom texten.
+    fun pin(index: Int): Modifier = Modifier.onFocusChanged {
+        if (it.hasFocus) scope.launch { listState.animateScrollToItem(index) }
+    }
     LazyColumn(
-        state = vm.rememberListState("home"),
-        verticalArrangement = Arrangement.spacedBy(28.dp),
-        contentPadding = PaddingValues(bottom = 48.dp),
+        state = listState,
+        modifier = Modifier.padding(top = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(22.dp),
+        // Utrymme under sista raden, så att även den kan läggas överst.
+        contentPadding = PaddingValues(bottom = 400.dp),
     ) {
+        // Radernas plats i listan räknas om varje gång listan byggs.
+        var index = 0
         if (liveNow.isNotEmpty()) {
+            val pinAt = index++
             item(key = "live_now") {
-                Column {
-                    Text(if (vm.favorites.isEmpty()) "Senaste kanaler" else "Live nu", style = MaterialTheme.typography.titleLarge)
+                Column(pin(pinAt)) {
+                    Text(if (vm.favorites.isEmpty()) "Senaste kanaler" else "Live nu", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(12.dp))
                     LazyRow(
                         state = vm.rememberListState("home_row_live"),
@@ -243,7 +295,12 @@ private fun HomeRows(
                                 channel = ch,
                                 onClick = { vm.playChannel(liveNow, i) },
                                 modifier = Modifier
-                                    .onFocusChanged { if (it.hasFocus) onFocused(key, null) }
+                                    .onFocusChanged {
+                                        if (it.hasFocus) {
+                                            onFocused(key, null)
+                                            onChannelFocused(ch)
+                                        }
+                                    }
                                     .then(if (key == focusKey) Modifier.focusRequester(focusRequester) else Modifier),
                             )
                         }
@@ -253,13 +310,16 @@ private fun HomeRows(
         }
         // Bläddra efter genre: efter Fortsätt titta och Nytt, före resten av raderna.
         val lead = vm.homeLeadRows.coerceAtMost(rows.size)
+        val leadStart = index
+        index += lead
         itemsIndexed(rows.take(lead), key = { r, _ -> rowKey(rows, r) }) { r, row ->
-            HomeRow(vm, rows, r, row, focusKey, focusRequester, onFocused, onLongPress)
+            HomeRow(vm, rows, r, row, focusKey, focusRequester, onFocused, onLongPress, pin(leadStart + r))
         }
         vm.genreShortcuts.forEach { (section, genres) ->
+            val pinAt = index++
             item(key = "genres_${section.key}") {
-                Column {
-                    Text("Bläddra i ${section.title}", style = MaterialTheme.typography.titleLarge)
+                Column(pin(pinAt)) {
+                    Text("Bläddra i ${section.title}", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(12.dp))
                     LazyRow(
                         state = vm.rememberListState("home_genres_${section.key}"),
@@ -273,8 +333,9 @@ private fun HomeRows(
                 }
             }
         }
+        val restStart = index
         itemsIndexed(rows.drop(lead), key = { r, _ -> rowKey(rows, r + lead) }) { r, row ->
-            HomeRow(vm, rows, r + lead, row, focusKey, focusRequester, onFocused, onLongPress)
+            HomeRow(vm, rows, r + lead, row, focusKey, focusRequester, onFocused, onLongPress, pin(restStart + r))
         }
     }
 }
@@ -290,16 +351,17 @@ private fun HomeRow(
     focusRequester: FocusRequester,
     onFocused: (String, PlexItem?) -> Unit,
     onLongPress: (PlexItem, Boolean) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     run {
-            Column {
-                Text(row.title, style = MaterialTheme.typography.titleLarge)
-                Spacer(Modifier.height(12.dp))
+            Column(modifier) {
+                Text(row.title, style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(8.dp))
                 // Nycklar på id (inte plats), så att fokus följer med när ordningen ändras.
                 val items = remember(row) { row.items.distinctBy { it.ratingKey } }
                 LazyRow(
                     state = vm.rememberListState("home_row_${rowKey(rows, r)}"),
-                    horizontalArrangement = Arrangement.spacedBy(18.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
                     contentPadding = PaddingValues(end = 48.dp, top = 6.dp, bottom = 6.dp),
                 ) {
                     itemsIndexed(items, key = { _, item -> item.ratingKey }) { _, item ->
@@ -312,6 +374,7 @@ private fun HomeRow(
                             watched = item.watched,
                             onClick = { vm.select(item) },
                             onLongClick = { onLongPress(item, row.title == CONTINUE_ROW) },
+                            width = HOME_POSTER,
                             modifier = Modifier
                                 .onFocusChanged { if (it.hasFocus) onFocused(key, item) }
                                 .then(if (key == focusKey) Modifier.focusRequester(focusRequester) else Modifier),
@@ -334,7 +397,7 @@ private fun rowKey(rows: List<PlexHomeRow>, index: Int): String {
 private fun LiveTile(vm: AppViewModel, channel: Channel, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val now = System.currentTimeMillis()
     val current = vm.epg?.now(channel, now)
-    Card(onClick = onClick, modifier = modifier.width(300.dp)) {
+    Card(onClick = onClick, modifier = modifier.width(240.dp)) {
         Column(
             Modifier
                 .fillMaxWidth()
