@@ -464,6 +464,49 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return sectionCache[cacheKey] ?: plex.all(sectionKey, sort, unwatchedOnly).also { sectionCache[cacheKey] = it }
     }
 
+    // ---------- Skanna bibliotek ----------
+
+    var scanning by mutableStateOf(false)
+        private set
+    var scanStatus by mutableStateOf<String?>(null)
+        private set
+    /** Ökas när en skanning är klar, så att öppna bibliotek laddar om sig. */
+    var libraryVersion by mutableStateOf(0)
+        private set
+
+    /** Ber Plex leta efter nya filer (ett bibliotek, eller alla när section är null) och laddar om när den är klar. */
+    fun scanLibrary(section: PlexSection?) {
+        if (scanning || plex.server == null) return
+        scanning = true
+        scanStatus = "Plex letar efter nya filer${section?.let { " i ${it.title}" } ?: ""}…"
+        viewModelScope.launch {
+            try {
+                val targets = if (section != null) listOf(section.key) else plex.sections().map { it.key }
+                for (key in targets) plex.scanLibrary(key)
+                // Vänta tills servern är klar (högst fem minuter), sedan hämtas allt på nytt.
+                delay(3_000)
+                val deadline = System.currentTimeMillis() + 5 * 60_000L
+                while (System.currentTimeMillis() < deadline) {
+                    val busy = runCatching { plex.refreshingSections() }.getOrDefault(emptySet())
+                    if (targets.none { it in busy }) break
+                    delay(2_000)
+                }
+                sectionCache.clear()
+                runCatching { loadHome() }
+                libraryVersion++
+                scanStatus = "Klart – biblioteket är uppdaterat."
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                scanStatus = "Kunde inte skanna: ${e.message}"
+            } finally {
+                scanning = false
+            }
+            delay(10_000)
+            if (!scanning) scanStatus = null
+        }
+    }
+
     fun removeFromContinueWatching(item: PlexItem) {
         viewModelScope.launch {
             runCatching { plex.removeFromContinueWatching(item) }

@@ -211,6 +211,32 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
             .map { PlexSection(it.optString("key"), it.optString("title"), it.optString("type")) }
     }
 
+    // ---------- Skanna bibliotek ----------
+
+    /** Ber servern leta efter nya filer i ett bibliotek. Fungerar när du äger servern. */
+    suspend fun scanLibrary(sectionKey: String) {
+        val s = srv()
+        val req = Request.Builder().url("${s.uri}/library/sections/$sectionKey/refresh").plexHeaders(s.token).get().build()
+        http.newCall(req).await().use { resp ->
+            when {
+                resp.code == 401 || resp.code == 403 -> throw PlexException("bara serverns ägare kan skanna bibliotek")
+                !resp.isSuccessful -> throw PlexException("Plex svarade HTTP ${resp.code}")
+            }
+        }
+    }
+
+    /** Nycklarna för de bibliotek som servern skannar just nu. */
+    suspend fun refreshingSections(): Set<String> {
+        val s = srv()
+        val mc = getJson("${s.uri}/library/sections", s.token).getJSONObject("MediaContainer")
+        val dirs = mc.optJSONArray("Directory") ?: return emptySet()
+        return (0 until dirs.length())
+            .map { dirs.getJSONObject(it) }
+            .filter { it.optBoolean("refreshing", false) }
+            .map { it.optString("key") }
+            .toSet()
+    }
+
     suspend fun onDeck(): List<PlexItem> = items("/library/onDeck")
 
     suspend fun recentlyAdded(sectionKey: String): List<PlexItem> =

@@ -50,9 +50,13 @@ import se.jptv.plex.PlexSection
 fun SectionScreen(vm: AppViewModel, section: PlexSection) {
     var sort by remember { mutableStateOf(vm.sectionSort[section.key] ?: LibrarySort.TITLE) }
     var unwatched by remember { mutableStateOf(vm.sectionUnwatched[section.key] ?: false) }
-    val result by produceState<Result<List<PlexItem>>?>(initialValue = null, section.key, sort, unwatched) {
-        value = null
-        value = runCatching { vm.sectionItems(section.key, sort, unwatched) }
+    // Efter en skanning (libraryVersion ökar) ligger den gamla listan kvar tills den nya har kommit.
+    var shownVersion by remember { mutableIntStateOf(vm.libraryVersion) }
+    val version = vm.libraryVersion
+    val result by produceState<Result<List<PlexItem>>?>(initialValue = null, section.key, sort, unwatched, version) {
+        if (version == shownVersion) value = null
+        value = runCatching { vm.sectionItems(section.key, sort, unwatched).distinctBy { it.ratingKey } }
+        shownVersion = version
     }
     val firstFocus = remember { FocusRequester() }
     val sortFocus = remember { FocusRequester() }
@@ -87,6 +91,14 @@ fun SectionScreen(vm: AppViewModel, section: PlexSection) {
             } else {
                 OutlinedButton(onClick = toggle) { Text("Alla") }
             }
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton(onClick = { vm.scanLibrary(section) }, enabled = !vm.scanning) {
+                Text(if (vm.scanning) "Skannar…" else "Skanna")
+            }
+        }
+        vm.scanStatus?.let {
+            Spacer(Modifier.height(6.dp))
+            Text(it, color = if (vm.scanning) JptvColors.Accent else JptvColors.TextDim, style = MaterialTheme.typography.bodySmall)
         }
         Spacer(Modifier.height(20.dp))
         when {
@@ -106,7 +118,8 @@ fun SectionScreen(vm: AppViewModel, section: PlexSection) {
                     horizontalArrangement = Arrangement.spacedBy(18.dp),
                     contentPadding = PaddingValues(top = 6.dp, bottom = 48.dp),
                 ) {
-                    itemsIndexed(items, key = { i, item -> "${i}_${item.ratingKey}" }) { i, item ->
+                    // Nyckel på id, så att fokus stannar på samma titel när listan laddas om efter en skanning.
+                    itemsIndexed(items, key = { _, item -> item.ratingKey }) { i, item ->
                         PosterCard(
                             title = item.displayTitle,
                             subtitle = item.subtitle,
