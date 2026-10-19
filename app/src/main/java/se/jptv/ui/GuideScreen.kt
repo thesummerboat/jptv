@@ -89,7 +89,7 @@ fun GuideScreen(vm: AppViewModel, group: String) {
                     focusedText ?: if (epg == null) {
                         "Ingen guide laddad. Lägg till guide-adressen (XMLTV) i Inställningar."
                     } else if (vm.pip != null) {
-                        "Välj ett program och tryck OK för att titta. ▶‖ = kanalen i hörnet i helskärm."
+                        "OK byter kanal i rutan. OK igen på samma kanal (eller ▶‖) = helskärm."
                     } else {
                         "Välj ett program och tryck OK för att titta."
                     },
@@ -139,6 +139,7 @@ fun GuideScreen(vm: AppViewModel, group: String) {
                                 }
                             },
                             onPlay = { vm.playChannel(channels, i) },
+                            playing = vm.pip?.channel?.key == ch.key,
                         )
                     }
                 }
@@ -196,6 +197,8 @@ private fun GuideRow(
     firstFocus: FocusRequester?,
     onFocusProgramme: (Programme?) -> Unit,
     onPlay: () -> Unit,
+    /** Kanalen spelar i bild-i-bild-rutan. */
+    playing: Boolean = false,
 ) {
     Row(
         Modifier
@@ -212,10 +215,11 @@ private fun GuideRow(
             ChannelLogo(channel, size = 40)
             Spacer(Modifier.width(10.dp))
             Text(
-                "${channel.number} ${channel.name}",
+                (if (playing) "▶ " else "") + "${channel.number} ${channel.name}",
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodySmall,
+                color = if (playing) JptvColors.Accent else androidx.compose.ui.graphics.Color.Unspecified,
             )
         }
         Box(

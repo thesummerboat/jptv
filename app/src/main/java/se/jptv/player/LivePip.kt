@@ -43,6 +43,18 @@ class LiveSession(
     val previousKey: String?,
 ) {
     val channel: Channel get() = channels[index]
+
+    /**
+     * Byter kanal i rutan. Samma spelare: den gamla strömmen stängs när den nya startar, så det
+     * blir fortfarande bara en ström.
+     */
+    fun retune(newChannels: List<Channel>, newIndex: Int): LiveSession {
+        val target = newChannels[newIndex]
+        exo.setMediaSource(liveSource(target))
+        exo.prepare()
+        exo.play()
+        return LiveSession(exo, newChannels, newIndex, previousKey = channel.key)
+    }
 }
 
 /**

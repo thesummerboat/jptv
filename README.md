@@ -20,7 +20,7 @@ Egen TV-app för Android TV / Google TV (Nvidia Shield, TCL m.fl.) som samlar Pl
 | Uppspelning | **Direct Play** först. Klarar TV:n inte filen – t.ex. DTS-ljud på TCL – byter appen automatiskt till Plex-omkodning (H.264 + AAC). Hoppa över intro (med en automatisk omsynk av ljudet en sekund efter hoppet), nästa avsnitt vid eftertexterna och "Tittar du fortfarande?" efter tre avsnitt i rad. |
 | Ljud och undertexter | Valet sparas i Plex och per serie, så nästa avsnitt startar med samma språk. **Sök undertexter** hämtar från internet via din Plex-server (OpenSubtitles m.fl.). Externa .srt kan synkas ±0,1 s åt gången. |
 | Alternativ | Sovtimer (15–120 min eller "när det här är slut"), bildformat (anpassa/fyll/zooma) och teknisk info (upplösning, codec, HDR, bithastighet, buffert). |
-| Live-TV | M3U- eller Xtream-lista med grupper, favoriter, senaste kanaler, kanalsök och dolda grupper. TV-guide (XMLTV) med nu/sedan och ett 3-timmarsrutnät. Kan starta direkt i senaste kanalen. **Bild-i-bild**: Tillbaka från en kanal lämnar den i ett hörn medan du bläddrar i guiden och menyerna – samma ström, aldrig två. ▶‖ tar den till helskärm; Tillbaka på hemskärmen, Stopp, eller att starta något från Plex stänger den. |
+| Live-TV | M3U- eller Xtream-lista med grupper, favoriter, senaste kanaler, kanalsök och dolda grupper. TV-guide (XMLTV) med nu/sedan och ett 3-timmarsrutnät. Kan starta direkt i senaste kanalen. **Bild-i-bild**: Tillbaka från en kanal lämnar den i ett hörn medan du bläddrar i guiden och menyerna – samma ström, aldrig två. OK på en annan kanal i listan eller guiden byter kanal i rutan; OK igen på samma kanal (eller ▶‖) tar den till helskärm. Tillbaka på hemskärmen, Stopp, eller att starta något från Plex stänger den. |
 | Mobilen som tangentbord | Under Inställningar visas en QR-kod. Öppna den i mobilen och klistra in M3U- och guideadressen där istället för att skriva med fjärren. |
 
 ## Fjärrkontrollen
@@ -35,6 +35,7 @@ Egen TV-app för Android TV / Google TV (Nvidia Shield, TCL m.fl.) som samlar Pl
 | Siffror | – | Kanalnummer |
 | Tillbaka | Avsluta, position sparas i Plex | Stäng panel / tillbaka, kanalen fortsätter i ett hörn (bild-i-bild) |
 | Guide | – | Guiden med kanalen kvar i hörnet |
+| OK i kanallistan/guiden med bild-i-bild | – | Byter kanal i rutan; OK igen på samma kanal = helskärm |
 | ▶‖ i menyerna | – | Kanalen i hörnet tillbaka till helskärm |
 
 ## Installera på Shield eller TCL
