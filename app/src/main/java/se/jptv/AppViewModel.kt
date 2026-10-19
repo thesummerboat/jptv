@@ -173,6 +173,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var heroTrailers by mutableStateOf(prefs.heroTrailers)
         private set
 
+    /** Vad trailern i bakgrunden gjorde senast, för Inställningar (felsökning). */
+    var trailerStatus by mutableStateOf<String?>(null)
+
     fun changeHeroTrailers(enabled: Boolean) {
         heroTrailers = enabled
         prefs.heroTrailers = enabled

@@ -355,7 +355,7 @@ fun EpisodesScreen(vm: AppViewModel, container: PlexItem) {
             value = runCatching { vm.plex.trailers(showMeta ?: showItem) }.getOrDefault(emptyList())
         }
         // Seriens ledmotiv, lågt, när sidan öppnas.
-        ThemeMusic(vm, showMeta?.theme?.let { vm.plex.rawImageUrl(it) })
+        ThemeMusic(vm, showMeta)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             ScreenTitle(container.showTitle?.takeIf { container.type == "season" } ?: container.title)
             showMeta?.let { meta -> Badges(listOfNotNull(vm.imdbText(meta)) + meta.ratings.filter { it.source != "IMDb" }.map { it.text }) }

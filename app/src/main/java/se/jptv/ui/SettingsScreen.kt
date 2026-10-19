@@ -226,6 +226,17 @@ fun SettingsScreen(vm: AppViewModel) {
             color = JptvColors.TextDim,
             style = MaterialTheme.typography.bodySmall,
         )
+        // Felsökning: vad trailern och ledmotivet gjorde senast.
+        Text(
+            "Senaste trailer: ${vm.trailerStatus ?: "ingen ännu (stå kvar på en titel på hemskärmen i tre sekunder)"}",
+            color = JptvColors.TextDim,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            "Senaste ledmotiv: ${ThemePlayer.status ?: "inget ännu (öppna en serie)"}",
+            color = JptvColors.TextDim,
+            style = MaterialTheme.typography.bodySmall,
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedButton(onClick = { vm.refreshImdb(force = true) }) { Text("Uppdatera IMDb-betyg") }
             if (vm.notInterested.isNotEmpty()) {
