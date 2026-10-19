@@ -275,6 +275,8 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     var switchingMode by remember { mutableStateOf(false) }
     var fpsHandled by remember { mutableStateOf(false) }
     var measuredFps by remember { mutableStateOf<Float?>(null) }
+    /** Bildfrekvensen som gäller, för att byta tillbaka om man lämnat appen och kommer tillbaka. */
+    var videoFps by remember { mutableStateOf<Float?>(null) }
     val fpsMeter = remember { FpsMeter { measuredFps = it } }
 
     // Spolning: ◀/▶ flyttar en markör med förhandsbild; hoppet görs när man släpper (eller trycker OK).
@@ -583,6 +585,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         val fps = meta.streams.firstOrNull { it.type == 1 }?.frameRate
         if (fps != null && fps > 0f) {
             fpsHandled = true
+            videoFps = fps
             if (DisplayModes.needsSwitch(fps)) {
                 switchingMode = true
                 DisplayModes.switchTo(fps)
@@ -631,6 +634,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         val fps = measuredFps ?: return@LaunchedEffect
         if (fpsHandled) return@LaunchedEffect
         fpsHandled = true
+        videoFps = fps
         if (DisplayModes.needsSwitch(fps)) {
             val wasPlaying = exo.playWhenReady
             exo.pause()
@@ -692,6 +696,12 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
             delay(3_500)
             toast = null
         }
+    }
+
+    // Tillbaka till appen: TV:n gick till sitt vanliga läge när appen lämnades; byt till filmens igen.
+    LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        val fps = videoFps ?: return@LifecycleEventEffect
+        scope.launch { if (DisplayModes.needsSwitch(fps)) DisplayModes.switchTo(fps) }
     }
 
     // Hem-knappen eller skärmsläckare: pausa, så att ljudet inte fortsätter i bakgrunden.
@@ -1817,6 +1827,9 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
             retries = 0
             exo.prepare()
             exo.play()
+            // TV:n gick till sitt vanliga läge när appen lämnades; mät kanalen igen.
+            liveFps = null
+            liveFpsMeter.reset()
         }
     }
 

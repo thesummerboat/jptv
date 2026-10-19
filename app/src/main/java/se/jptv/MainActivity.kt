@@ -29,6 +29,12 @@ import se.jptv.ui.SettingsScreen
 import se.jptv.ui.ignoreUnpairedOk
 
 class MainActivity : ComponentActivity() {
+    override fun onStop() {
+        super.onStop()
+        // Appen lämnas: släpp filmens bildfrekvens, så att menyerna startar i TV:ns vanliga läge nästa gång.
+        se.jptv.player.DisplayModes.resetNow()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         se.jptv.player.DisplayModes.attach(this)

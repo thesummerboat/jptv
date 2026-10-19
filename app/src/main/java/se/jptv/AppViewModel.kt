@@ -339,6 +339,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         autoFrameRate = enabled
         prefs.autoFrameRate = enabled
         se.jptv.player.DisplayModes.enabled = enabled
+        if (!enabled) se.jptv.player.DisplayModes.resetNow()
     }
 
     // ---------- Uppdateringar ----------
