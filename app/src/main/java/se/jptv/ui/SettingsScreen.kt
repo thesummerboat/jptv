@@ -120,7 +120,7 @@ fun SettingsScreen(vm: AppViewModel) {
         Spacer(Modifier.height(8.dp))
         Text("Live-TV", style = MaterialTheme.typography.titleMedium)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(onClick = { vm.setStartInLastChannel(!vm.startInLastChannel) }) {
+            OutlinedButton(onClick = { vm.changeStartInLastChannel(!vm.startInLastChannel) }) {
                 Text(if (vm.startInLastChannel) "Starta i senaste kanal: PÅ" else "Starta i senaste kanal: AV")
             }
             if (vm.hiddenGroups.isNotEmpty()) {

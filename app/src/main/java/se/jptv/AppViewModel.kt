@@ -569,7 +569,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         prefs.hiddenGroups = emptySet()
     }
 
-    fun setStartInLastChannel(enabled: Boolean) {
+    fun changeStartInLastChannel(enabled: Boolean) {
         startInLastChannel = enabled
         prefs.startInLastChannel = enabled
     }
