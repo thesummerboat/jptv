@@ -19,18 +19,27 @@ object FrameRateMatcher {
         return if (abs(refreshRate - fps * k) <= tolerance) k else null
     }
 
-    /** Läget som ska väljas, eller null om nuvarande läge redan passar (eller inget passar). */
+    // 25 och 30 Hz flimrar och klaras inte av alla TV-apparater; 24 Hz är däremot det normala för film.
+    private fun lowRefresh(fps: Float, m: ModeInfo) = fps >= 24.5f && m.refreshRate < 47f
+
+    /** true om nuvarande läge redan passar bildfrekvensen. */
+    fun fits(fps: Float, current: ModeInfo): Boolean =
+        multiple(fps, current.refreshRate) != null && !lowRefresh(fps, current)
+
+    /**
+     * Läget som ska väljas, eller null om nuvarande läge redan passar (eller inget passar).
+     * Samma upplösning i första hand; finns inget passande läge där tas den högsta upplösning
+     * som har ett (t.ex. 1080p @ 60 Hz → 4K @ 23,976 Hz).
+     */
     fun choose(fps: Float, current: ModeInfo, modes: List<ModeInfo>): ModeInfo? {
         if (fps < 10f || fps > 121f) return null
-        // 25 och 30 Hz flimrar och klaras inte av alla TV-apparater; 24 Hz är däremot det normala för film.
-        fun lowRefresh(m: ModeInfo) = fps >= 24.5f && m.refreshRate < 47f
-        val candidates = modes
-            .filter { it.width == current.width && it.height == current.height }
+        if (fits(fps, current)) return null
+        fun pick(list: List<ModeInfo>): ModeInfo? = list
             .mapNotNull { m -> multiple(fps, m.refreshRate)?.let { k -> m to k } }
-            .sortedWith(compareBy({ if (lowRefresh(it.first)) 1 else 0 }, { it.second }))
-        val currentFits = multiple(fps, current.refreshRate) != null && !lowRefresh(current)
-        if (currentFits) return null
-        val best = candidates.firstOrNull()?.first ?: return null
+            .sortedWith(compareBy({ if (lowRefresh(fps, it.first)) 1 else 0 }, { -it.first.width * it.first.height }, { it.second }))
+            .firstOrNull()?.first
+        val sameRes = pick(modes.filter { it.width == current.width && it.height == current.height })
+        val best = sameRes ?: pick(modes.filter { it.width >= current.width && it.height >= current.height }) ?: return null
         return if (best.id == current.id) null else best
     }
 

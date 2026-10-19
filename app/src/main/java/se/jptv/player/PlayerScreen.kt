@@ -813,6 +813,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         if (vm.showStreamInfo && !panelOpen) {
             StreamInfo(
                 exo = exo,
+                contentFps = videoFps ?: item.streams.firstOrNull { it.type == 1 }?.frameRate,
                 mode = if (transcoding) "Omkodas av Plex (H.264/AAC)" else "Direct Play",
                 modifier = Modifier.align(Alignment.TopStart),
             )
@@ -1587,12 +1588,13 @@ private fun SyncPanel(label: String, offsetMs: Long, onChange: (Long) -> Unit, m
 /** Teknisk information om strömmen, uppdateras varje sekund. */
 @OptIn(UnstableApi::class)
 @Composable
-private fun StreamInfo(exo: ExoPlayer, mode: String, modifier: Modifier = Modifier) {
+private fun StreamInfo(exo: ExoPlayer, mode: String, contentFps: Float?, modifier: Modifier = Modifier) {
     val currentMode by rememberUpdatedState(mode)
+    val currentFps by rememberUpdatedState(contentFps)
     var lines by remember { mutableStateOf(emptyList<String>()) }
     LaunchedEffect(exo) {
         while (true) {
-            lines = streamInfoLines(exo, currentMode)
+            lines = streamInfoLines(exo, currentMode, currentFps)
             delay(1_000)
         }
     }
@@ -1608,12 +1610,13 @@ private fun StreamInfo(exo: ExoPlayer, mode: String, modifier: Modifier = Modifi
 }
 
 @OptIn(UnstableApi::class)
-private fun streamInfoLines(exo: ExoPlayer, mode: String): List<String> = buildList {
+private fun streamInfoLines(exo: ExoPlayer, mode: String, contentFps: Float?): List<String> = buildList {
     add(mode)
     exo.videoFormat?.let { v ->
         val parts = mutableListOf<String>()
         if (v.width > 0 && v.height > 0) parts += "${v.width}×${v.height}"
-        if (v.frameRate > 0) parts += String.format(Locale.US, "%.3f fps", v.frameRate).replace(".000", "")
+        val fps = if (v.frameRate > 0) v.frameRate else contentFps ?: 0f
+        if (fps > 0) parts += String.format(Locale.US, "%.3f fps", fps).replace(".000", "")
         (codecName(v.sampleMimeType) ?: v.sampleMimeType)?.let { parts += it }
         when (v.colorInfo?.colorTransfer) {
             C.COLOR_TRANSFER_ST2084 -> parts += "HDR10"
@@ -1640,6 +1643,8 @@ private fun streamInfoLines(exo: ExoPlayer, mode: String): List<String> = buildL
         add("Ljud: " + parts.joinToString(" · "))
     }
     DisplayModes.currentModeText()?.let { add("Skärm: $it") }
+    DisplayModes.lastDecision?.let { add("Bildfrekvens: $it") }
+    DisplayModes.modesSummary()?.let { add("TV:ns lägen: $it") }
     add(String.format(Locale.US, "Buffert: %.1f s", exo.totalBufferedDuration / 1000f))
     exo.videoDecoderCounters?.let { add("Tappade bildrutor: ${it.droppedBufferCount}") }
 }
@@ -1972,7 +1977,7 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
             )
         }
         if (vm.showStreamInfo && !optionsOpen) {
-            StreamInfo(exo = exo, mode = "Live-TV · ${channel.name}", modifier = Modifier.align(Alignment.TopStart))
+            StreamInfo(exo = exo, mode = "Live-TV · ${channel.name}", contentFps = liveFps, modifier = Modifier.align(Alignment.TopStart))
         }
         SleepTimer(
             vm = vm,

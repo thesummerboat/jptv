@@ -36,10 +36,26 @@ class FrameRateTest {
     }
 
     @Test
-    fun keepsResolutionAndGivesUpWhenNothingFits() {
-        val only60 = listOf(ModeInfo(1, 1920, 1080, 60f), ModeInfo(2, 3840, 2160, 50f))
+    fun givesUpWhenNothingFits() {
+        val only60 = listOf(ModeInfo(1, 1920, 1080, 60f), ModeInfo(2, 3840, 2160, 60f))
         assertNull(FrameRateMatcher.choose(25f, only60[0], only60))
         assertNull(FrameRateMatcher.choose(0f, at60, modes4k))
+        // Finns 50 Hz bara i 4K tas det hellre än 60 Hz i 1080p.
+        val with4k50 = listOf(ModeInfo(1, 1920, 1080, 60f), ModeInfo(2, 3840, 2160, 50f))
+        assertEquals(2, FrameRateMatcher.choose(25f, with4k50[0], with4k50)?.id)
+    }
+
+    @Test
+    fun movesToHigherResolutionWhenCurrentHasNoMatchingRate() {
+        val modes = listOf(
+            ModeInfo(1, 1920, 1080, 60f),
+            ModeInfo(2, 1920, 1080, 50f),
+            ModeInfo(3, 3840, 2160, 60f),
+            ModeInfo(4, 3840, 2160, 23.976f),
+        )
+        assertEquals(4, FrameRateMatcher.choose(23.976f, modes[0], modes)?.id)
+        // 25 bild/s finns i samma upplösning (50 Hz): stanna i 1080p.
+        assertEquals(2, FrameRateMatcher.choose(25f, modes[0], modes)?.id)
     }
 
     @Test

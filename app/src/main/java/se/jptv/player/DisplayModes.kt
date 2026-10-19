@@ -48,15 +48,44 @@ object DisplayModes {
             activity.windowManager.defaultDisplay
         }
 
+    /** Senaste beslutet, för teknisk info: "byter till …", "står redan rätt", "inget läge passar" … */
+    var lastDecision: String? = null
+        private set
+
+    private fun hz(v: Float): String =
+        String.format(java.util.Locale("sv", "SE"), "%.3f", v).trimEnd('0').trimEnd(',')
+
     private fun target(fps: Float): Pair<Activity, ModeInfo>? {
-        if (!enabled) return null
+        if (!enabled) {
+            lastDecision = "automatiskt byte är avstängt"
+            return null
+        }
         val activity = activityRef?.get() ?: return null
         val d = display(activity) ?: return null
         val cur = d.mode
         val current = ModeInfo(cur.modeId, cur.physicalWidth, cur.physicalHeight, cur.refreshRate)
         val modes = d.supportedModes.map { ModeInfo(it.modeId, it.physicalWidth, it.physicalHeight, it.refreshRate) }
-        val chosen = FrameRateMatcher.choose(fps, current, modes) ?: return null
-        return activity to chosen
+        val chosen = FrameRateMatcher.choose(fps, current, modes)
+        lastDecision = when {
+            chosen != null -> "byter till ${chosen.width}×${chosen.height} @ ${hz(chosen.refreshRate)} Hz"
+            FrameRateMatcher.fits(fps, current) -> "TV:n står redan rätt"
+            else -> "TV:n erbjuder inget läge för ${hz(fps)} bilder/s"
+        }
+        return if (chosen == null) null else activity to chosen
+    }
+
+    /** Alla lägen TV:n erbjuder, t.ex. "3840×2160: 60/50/23,976 Hz · 1920×1080: 60 Hz". */
+    fun modesSummary(): String? {
+        val activity = activityRef?.get() ?: return null
+        val d = display(activity) ?: return null
+        return d.supportedModes
+            .groupBy { it.physicalWidth to it.physicalHeight }
+            .entries
+            .sortedByDescending { it.key.first * it.key.second }
+            .joinToString(" · ") { (res, list) ->
+                val rates = list.map { it.refreshRate }.distinctBy { Math.round(it * 100) }.sortedDescending()
+                "${res.first}×${res.second}: ${rates.joinToString("/") { hz(it) }} Hz"
+            }
     }
 
     /** TV:ns läge just nu, t.ex. "3840×2160 @ 23,976 Hz" (för teknisk info). */
