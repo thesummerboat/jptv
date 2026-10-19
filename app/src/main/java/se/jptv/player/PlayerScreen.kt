@@ -213,7 +213,7 @@ private fun plexSource(
 }
 
 @OptIn(UnstableApi::class)
-private fun liveSource(channel: Channel): MediaSource {
+internal fun liveSource(channel: Channel): MediaSource {
     val headers = buildMap<String, String> {
         channel.referrer?.let { put("Referer", it) }
     }
@@ -1989,6 +1989,7 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
             firstTune = false
             playingKey = channel.key
             recordedKey = channel.key
+            vm.onChannelTuned(channel)
             return@LaunchedEffect
         }
         continuing = null

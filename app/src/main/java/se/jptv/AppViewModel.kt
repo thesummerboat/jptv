@@ -1278,6 +1278,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun playChannel(channels: List<Channel>, index: Int) {
+        val session = pip
+        val target = channels.getOrNull(index)
+        if (session != null && target != null && current !is Screen.Player) {
+            if (target.key == session.channel.key) {
+                // Andra OK på kanalen som redan spelar i rutan: helskärm, med listan man valde i.
+                pip = se.jptv.player.LiveSession(session.exo, channels, index, session.previousKey)
+                resumePip()
+            } else {
+                // Första OK: byt kanal i rutan och stanna kvar i listan eller guiden.
+                pip = session.retune(channels, index)
+            }
+            return
+        }
         open(Screen.Player(PlayRequest.Live(channels, index)))
     }
 

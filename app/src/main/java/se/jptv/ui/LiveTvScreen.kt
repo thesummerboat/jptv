@@ -223,6 +223,8 @@ private fun ChannelBrowser(vm: AppViewModel) {
                             favorite = vm.isFavorite(ch),
                             onClick = { vm.playChannel(channels, i) },
                             onLongClick = { vm.toggleFavorite(ch) },
+                            playing = vm.pip?.channel?.key == ch.key,
+                            compact = vm.pip != null,
                         )
                     }
                 }
@@ -246,7 +248,7 @@ private fun ChannelBrowser(vm: AppViewModel) {
                     }
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "▶‖ = helskärm. Tillbaka på hemskärmen stänger.",
+                        "OK på en annan kanal byter här. OK igen (eller ▶‖) = helskärm. Tillbaka på hemskärmen stänger.",
                         color = JptvColors.TextDim,
                         style = MaterialTheme.typography.labelSmall,
                     )
@@ -299,9 +301,13 @@ fun ChannelRow(
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    /** Kanalen spelar i bild-i-bild-rutan. */
+    playing: Boolean = false,
+    /** Smalare rad (bild-i-bild tar plats till höger): utan "sedan". */
+    compact: Boolean = false,
 ) {
     val current = epg?.now(channel, now)
-    val next = epg?.next(channel, now)
+    val next = epg?.next(channel, now)?.takeIf { !compact }
     ListItem(
         selected = false,
         onClick = onClick,
@@ -310,9 +316,10 @@ fun ChannelRow(
         leadingContent = { ChannelLogo(channel) },
         headlineContent = {
             Text(
-                "${channel.number}  ${channel.name}${if (favorite) "  ★" else ""}",
+                (if (playing) "▶ " else "") + "${channel.number}  ${channel.name}${if (favorite) "  ★" else ""}",
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                color = if (playing) JptvColors.Accent else androidx.compose.ui.graphics.Color.Unspecified,
             )
         },
         supportingContent = if (current != null) {
