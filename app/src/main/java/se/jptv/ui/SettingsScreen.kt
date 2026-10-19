@@ -184,6 +184,11 @@ fun SettingsScreen(vm: AppViewModel) {
                 Text(if (vm.autoFrameRate) "Automatisk bildfrekvens: PÅ" else "Automatisk bildfrekvens: AV")
             }
             OutlinedButton(onClick = { vm.refreshImdb(force = true) }) { Text("Uppdatera IMDb-betyg") }
+            if (vm.notInterested.isNotEmpty()) {
+                OutlinedButton(onClick = { vm.clearNotInterested() }) {
+                    Text("Glöm ${vm.notInterested.size} \"Inte intresserad\"")
+                }
+            }
         }
         Text(
             vm.imdbStatus ?: if (vm.imdb.count > 0) {

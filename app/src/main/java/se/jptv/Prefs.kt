@@ -65,6 +65,11 @@ class Prefs(context: Context) {
         get() = sp.getStringSet("favorite_sections", emptySet())?.toSet() ?: emptySet()
         set(value) { sp.edit().putStringSet("favorite_sections", value).apply() }
 
+    /** Titlar du sagt "Inte intresserad" om (IMDb-id eller "rk:<ratingKey>"). */
+    var notInterested: Set<String>
+        get() = sp.getStringSet("not_interested", emptySet())?.toSet() ?: emptySet()
+        set(value) { sp.edit().putStringSet("not_interested", value).apply() }
+
     var hiddenGroups: Set<String>
         get() = sp.getStringSet("hidden_groups", emptySet())?.toSet() ?: emptySet()
         set(value) { sp.edit().putStringSet("hidden_groups", value).apply() }

@@ -431,6 +431,12 @@ private fun ItemMenu(vm: AppViewModel, item: PlexItem, inContinueWatching: Boole
                     Text("Gå till serien")
                 }
             }
+            OutlinedButton(onClick = {
+                onClose()
+                vm.markNotInterested(item)
+            }, modifier = Modifier.fillMaxWidth()) {
+                Text(if (item.type == "episode") "Inte intresserad av serien" else "Inte intresserad")
+            }
         }
     }
     LaunchedEffect(Unit) { first.requestWhenReady() }

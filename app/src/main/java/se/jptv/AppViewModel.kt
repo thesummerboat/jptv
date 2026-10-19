@@ -271,7 +271,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val n = imdb.refresh()
                 imdbVersion++
-                runCatching { refreshImdbTop() }
+                runCatching { refreshLibraryIndex() }
                 imdbStatus = "IMDb-betyg för ${"%,d".format(n).replace(',', ' ')} titlar"
             } catch (e: CancellationException) {
                 throw e
@@ -515,13 +515,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         rebuildHome()
         homeLoadedAt = System.currentTimeMillis()
         loadGenreShortcuts(shown)
-        refreshImdbTop()
+        refreshLibraryIndex()
     }
 
     private fun rebuildHome() {
         homeLeadRows = leadRows.size
         // Radnamn måste vara unika på hemskärmen.
-        homeRows = (leadRows + imdbTopRows + hubRows).distinctBy { it.title }
+        homeRows = (leadRows + recRows + imdbTopRows + hubRows).distinctBy { it.title }
     }
 
     suspend fun genres(sectionKey: String): List<se.jptv.plex.PlexFilterOption> =
@@ -535,17 +535,54 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private var imdbTopBuiltFor = -1 to -1
+    // ---------- Hela biblioteket: IMDb-topplistor och rekommendationer ----------
 
-    /** "Topplista IMDb": bibliotekets högst betygsatta titlar, med tillräckligt många röster. */
-    private suspend fun refreshImdbTop() {
-        val stamp = imdbVersion to libraryVersion
-        if (stamp == imdbTopBuiltFor) return
-        imdbTopBuiltFor = stamp
-        val shown = visibleSections.filter { favoriteSections.isEmpty() || it.key in favoriteSections }
-        val rows = mutableListOf<PlexHomeRow>()
-        for (s in shown) {
-            val all = runCatching { plex.all(s.key) }.getOrNull() ?: continue
+    private var recRows: List<PlexHomeRow> = emptyList()
+    private var indexStamp: List<Any> = emptyList()
+    private var indexBuiltAt = 0L
+    var notInterested by mutableStateOf(prefs.notInterested)
+        private set
+
+    /** Nyckel för "Inte intresserad": serien för avsnitt, annars IMDb-id eller Plex-id. */
+    private fun recKey(item: PlexItem): String =
+        if ((item.type == "episode" || item.type == "season") && item.showKey != null) "rk:${item.showKey}"
+        else item.imdbId ?: "rk:${item.ratingKey}"
+
+    fun markNotInterested(item: PlexItem) {
+        val updated = notInterested + recKey(item)
+        notInterested = updated
+        prefs.notInterested = updated
+        indexStamp = emptyList()
+        viewModelScope.launch { runCatching { refreshLibraryIndex() } }
+    }
+
+    fun clearNotInterested() {
+        notInterested = emptySet()
+        prefs.notInterested = emptySet()
+        indexStamp = emptyList()
+        viewModelScope.launch { runCatching { refreshLibraryIndex() } }
+    }
+
+    /**
+     * Läser in alla filmer och serier (synliga bibliotek) och din tittarhistorik, och räknar fram
+     * IMDb-topplistor och rekommendationer. Görs högst varannan timme eller när något ändrats.
+     */
+    private suspend fun refreshLibraryIndex() {
+        val stamp = listOf(imdbVersion, libraryVersion, hiddenSections, favoriteSections, notInterested)
+        val now = System.currentTimeMillis()
+        if (stamp == indexStamp && now - indexBuiltAt < 2 * HOUR) return
+        indexStamp = stamp
+        indexBuiltAt = now
+        val shown = visibleSections.filter { it.type == "movie" || it.type == "show" }
+        val bySection = coroutineScope {
+            shown.map { s -> async { s to (runCatching { plex.all(s.key) }.getOrNull() ?: emptyList()) } }.awaitAll()
+        }
+        val history = runCatching { plex.watchHistory() }.getOrDefault(emptyList())
+
+        // IMDb-topplistor för favoritbiblioteken (eller alla om inga favoriter).
+        val topRows = mutableListOf<PlexHomeRow>()
+        for ((s, all) in bySection) {
+            if (favoriteSections.isNotEmpty() && s.key !in favoriteSections) continue
             val minVotes = if (s.type == "movie") 25_000 else 10_000
             val top = withContext(kotlinx.coroutines.Dispatchers.Default) {
                 all.mapNotNull { item ->
@@ -557,10 +594,94 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }.sortedByDescending { it.second }.take(20).map { it.first }
             }
-            if (top.size >= 5) rows += PlexHomeRow("Topplista IMDb · ${s.title}", top)
+            if (top.size >= 5) topRows += PlexHomeRow("Topplista IMDb · ${s.title}", top)
         }
-        imdbTopRows = rows
+        imdbTopRows = topRows
+
+        recRows = withContext(kotlinx.coroutines.Dispatchers.Default) {
+            buildRecommendations(bySection.flatMap { it.second }, history, now)
+        }
         rebuildHome()
+    }
+
+    private fun buildRecommendations(
+        library: List<PlexItem>,
+        history: List<se.jptv.plex.PlexHistoryEntry>,
+        now: Long,
+    ): List<PlexHomeRow> {
+        val day = 24 * HOUR
+        // Samma film i flera bibliotek (t.ex. 1080p och 4K) räknas en gång.
+        val items = library.distinctBy { it.imdbId ?: "${it.type}|${it.title}|${it.year}" }
+        val plays = HashMap<String, Int>()
+        val lastSeen = HashMap<String, Long>()
+        val episodesSeen = HashMap<String, MutableSet<String>>()
+        for (h in history) {
+            val key = if (h.type == "episode") h.showKey ?: continue else h.ratingKey
+            if (h.type == "episode") episodesSeen.getOrPut(key) { HashSet() } += h.ratingKey
+            else plays[key] = (plays[key] ?: 0) + 1
+            lastSeen[key] = maxOf(lastSeen[key] ?: 0L, h.viewedAt)
+        }
+        val recItems = items.map { item ->
+            val excluded = recKey(item) in notInterested || "rk:${item.ratingKey}" in notInterested
+            val last = maxOf(item.lastViewedAt, lastSeen[item.ratingKey] ?: 0L)
+            val engagement: Float
+            val unseen: Boolean
+            if (item.type == "show") {
+                val n = maxOf(episodesSeen[item.ratingKey]?.size ?: 0, item.viewedLeafCount ?: 0)
+                unseen = n == 0
+                engagement = when {
+                    n >= 3 -> 1f + minOf(0.6f, n / 30f)
+                    n >= 1 -> if (now - last > 30 * day) -0.3f else 0.3f
+                    else -> 0f
+                }
+            } else {
+                val p = maxOf(plays[item.ratingKey] ?: 0, item.viewCount)
+                unseen = p == 0 && item.viewOffsetMs == 0L
+                engagement = when {
+                    p > 0 -> 1f + 0.2f * (p - 1).coerceIn(0, 3)
+                    item.viewOffsetMs > 0 -> {
+                        val fraction = if (item.durationMs > 0) item.viewOffsetMs.toFloat() / item.durationMs else 0f
+                        when {
+                            fraction >= 0.2f -> 0.6f
+                            now - last > 14 * day -> -0.4f
+                            else -> 0.2f
+                        }
+                    }
+                    else -> 0f
+                }
+            }
+            val fromFile = item.imdbId?.let { imdb.lookup(it) }
+            se.jptv.recs.RecItem(
+                id = item.ratingKey,
+                type = item.type,
+                tags = item.tags,
+                engagement = if (excluded) -1f else engagement,
+                lastViewedAt = last,
+                unseen = unseen,
+                rating = fromFile?.first ?: item.ratings.firstOrNull { it.source == "IMDb" }?.value?.toFloat(),
+                votes = fromFile?.second ?: 0,
+                addedAt = item.addedAt,
+                excluded = excluded,
+            )
+        }
+        val byId = items.associateBy { it.ratingKey }
+        val model = se.jptv.recs.Recommender.build(recItems, now)
+        val rows = mutableListOf<PlexHomeRow>()
+        fun row(title: String, ids: List<String>) {
+            val list = ids.mapNotNull { byId[it] }
+            if (list.size >= 5) rows += PlexHomeRow(title, list)
+        }
+        if (se.jptv.recs.Recommender.signal(model, "movie") >= 3) {
+            row("Rekommenderat för dig · Filmer", se.jptv.recs.Recommender.forYou(model, "movie", now))
+        }
+        if (se.jptv.recs.Recommender.signal(model, "show") >= 2) {
+            row("Rekommenderat för dig · Serier", se.jptv.recs.Recommender.forYou(model, "show", now))
+        }
+        for (seed in se.jptv.recs.Recommender.seeds(model, now)) {
+            val title = byId[seed]?.title ?: continue
+            row("Eftersom du såg $title", se.jptv.recs.Recommender.similarTo(model, seed))
+        }
+        return rows
     }
 
     fun toggleSectionHidden(section: PlexSection) {
@@ -574,7 +695,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val updated = if (section.key in favoriteSections) favoriteSections - section.key else favoriteSections + section.key
         favoriteSections = updated
         prefs.favoriteSections = updated
-        imdbTopBuiltFor = -1 to -1
         refreshHome()
     }
 
