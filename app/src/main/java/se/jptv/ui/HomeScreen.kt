@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package se.jptv.ui
 
 import androidx.activity.compose.BackHandler
@@ -16,7 +18,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -264,10 +269,13 @@ private fun HomeRows(
 ) {
     val listState = vm.rememberListState("home")
     val scope = rememberCoroutineScope()
+    // Raderna (vågrätt) scrollar som vanligt; listan (lodrätt) styrs bara av pin() nedan.
+    val rowSpec = LocalBringIntoViewSpec.current
     // Raden med fokus läggs alltid överst, så att raden ovanför inte syns halvt bakom texten.
     fun pin(index: Int): Modifier = Modifier.onFocusChanged {
         if (it.hasFocus) scope.launch { listState.animateScrollToItem(index) }
     }
+    CompositionLocalProvider(LocalBringIntoViewSpec provides NoAutoScroll) {
     LazyColumn(
         state = listState,
         modifier = Modifier.padding(top = 8.dp),
@@ -282,7 +290,8 @@ private fun HomeRows(
             item(key = "live_now") {
                 Column(pin(pinAt)) {
                     Text(if (vm.favorites.isEmpty()) "Senaste kanaler" else "Live nu", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(8.dp))
+                    CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec) {
                     LazyRow(
                         state = vm.rememberListState("home_row_live"),
                         horizontalArrangement = Arrangement.spacedBy(18.dp),
@@ -305,6 +314,7 @@ private fun HomeRows(
                             )
                         }
                     }
+                    }
                 }
             }
         }
@@ -313,14 +323,15 @@ private fun HomeRows(
         val leadStart = index
         index += lead
         itemsIndexed(rows.take(lead), key = { r, _ -> rowKey(rows, r) }) { r, row ->
-            HomeRow(vm, rows, r, row, focusKey, focusRequester, onFocused, onLongPress, pin(leadStart + r))
+            HomeRow(vm, rows, r, row, focusKey, focusRequester, onFocused, onLongPress, rowSpec, pin(leadStart + r))
         }
         vm.genreShortcuts.forEach { (section, genres) ->
             val pinAt = index++
             item(key = "genres_${section.key}") {
                 Column(pin(pinAt)) {
                     Text("Bläddra i ${section.title}", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(8.dp))
+                    CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec) {
                     LazyRow(
                         state = vm.rememberListState("home_genres_${section.key}"),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -330,14 +341,21 @@ private fun HomeRows(
                             OutlinedButton(onClick = { vm.open(Screen.Section(section, g)) }) { Text(g.title) }
                         }
                     }
+                    }
                 }
             }
         }
         val restStart = index
         itemsIndexed(rows.drop(lead), key = { r, _ -> rowKey(rows, r + lead) }) { r, row ->
-            HomeRow(vm, rows, r + lead, row, focusKey, focusRequester, onFocused, onLongPress, pin(restStart + r))
+            HomeRow(vm, rows, r + lead, row, focusKey, focusRequester, onFocused, onLongPress, rowSpec, pin(restStart + r))
         }
     }
+    }
+}
+
+/** Listan scrollar inte av sig själv när fokus flyttas; pin() lägger raden med fokus överst i stället. */
+private object NoAutoScroll : BringIntoViewSpec {
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float = 0f
 }
 
 /** En rad med affischer på hemskärmen. */
@@ -351,9 +369,10 @@ private fun HomeRow(
     focusRequester: FocusRequester,
     onFocused: (String, PlexItem?) -> Unit,
     onLongPress: (PlexItem, Boolean) -> Unit,
+    rowSpec: BringIntoViewSpec,
     modifier: Modifier = Modifier,
 ) {
-    run {
+    CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec) {
             Column(modifier) {
                 Text(row.title, style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(8.dp))
@@ -361,7 +380,7 @@ private fun HomeRow(
                 val items = remember(row) { row.items.distinctBy { it.ratingKey } }
                 LazyRow(
                     state = vm.rememberListState("home_row_${rowKey(rows, r)}"),
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(end = 48.dp, top = 6.dp, bottom = 6.dp),
                 ) {
                     itemsIndexed(items, key = { _, item -> item.ratingKey }) { _, item ->

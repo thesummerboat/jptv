@@ -52,6 +52,8 @@ fun PosterCard(
         Card(
             onClick = onClick,
             onLongClick = onLongClick,
+            // Affischen med fokus större, de andra lite mindre, så att det syns tydligt var man är.
+            scale = androidx.tv.material3.CardDefaults.scale(scale = 0.86f, focusedScale = 1.06f),
             modifier = Modifier
                 .width(width)
                 .aspectRatio(2f / 3f),
