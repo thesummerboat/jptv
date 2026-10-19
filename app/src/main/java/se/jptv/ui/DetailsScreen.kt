@@ -41,15 +41,19 @@ fun DetailsScreen(vm: AppViewModel, initial: PlexItem) {
     var watched by remember { mutableStateOf(initial.watched) }
     val playFocus = remember { FocusRequester() }
 
+    var logo by remember { mutableStateOf(initial.logo) }
+
     LaunchedEffect(initial.ratingKey) {
         runCatching { vm.plex.metadata(initial.ratingKey) }.getOrNull()?.let {
             item = it
             watched = it.watched
         }
+        // Avsnitt har ingen egen logotyp; använd seriens.
+        logo = vm.showLogo(item)
     }
 
     Box(Modifier.fillMaxSize()) {
-        Backdrop(vm.plex.imageUrl(item.art, 1280, 720))
+        Backdrop(vm.plex.imageUrl(item.art, 1920, 1080))
         Column(
             Modifier
                 .align(Alignment.CenterStart)
@@ -58,7 +62,13 @@ fun DetailsScreen(vm: AppViewModel, initial: PlexItem) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             if (item.type == "episode") {
-                Text(item.showTitle ?: "", style = MaterialTheme.typography.titleLarge, color = JptvColors.Accent)
+                TitleLogo(
+                    logoUrl = vm.plex.rawImageUrl(logo),
+                    title = item.showTitle ?: "",
+                    maxHeight = 90.dp,
+                    maxWidth = 420.dp,
+                    textStyle = MaterialTheme.typography.titleLarge,
+                )
                 Text(
                     buildString {
                         if (item.season != null && item.episode != null) append("Säsong ${item.season} · Avsnitt ${item.episode}  ")
@@ -69,15 +79,22 @@ fun DetailsScreen(vm: AppViewModel, initial: PlexItem) {
                     overflow = TextOverflow.Ellipsis,
                 )
             } else {
-                Text(item.title, style = MaterialTheme.typography.displayMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                TitleLogo(
+                    logoUrl = vm.plex.rawImageUrl(logo),
+                    title = item.title,
+                    maxHeight = 140.dp,
+                    maxWidth = 560.dp,
+                    textStyle = MaterialTheme.typography.displayMedium,
+                )
             }
+
+            Badges(vm.ratingBadges(item) + item.badges)
 
             val facts = buildList {
                 item.year?.let { add(it.toString()) }
                 if (item.durationMs > 0) add(formatDuration(item.durationMs))
                 item.contentRating?.let { add(it) }
                 if (item.genres.isNotEmpty()) add(item.genres.take(3).joinToString(", "))
-                if (item.mediaInfo.isNotBlank()) add(item.mediaInfo)
             }
             Text(facts.joinToString("  ·  "), color = JptvColors.TextDim)
 
@@ -132,8 +149,13 @@ fun DetailsScreen(vm: AppViewModel, initial: PlexItem) {
 fun Backdrop(url: String?, modifier: Modifier = Modifier) {
     Box(modifier.fillMaxSize()) {
         if (url != null) {
+            // Mjuk övertoning när bakgrunden byts (t.ex. när fokus flyttas på hemskärmen).
+            val context = androidx.compose.ui.platform.LocalContext.current
+            val request = remember(url) {
+                coil.request.ImageRequest.Builder(context).data(url).crossfade(400).build()
+            }
             AsyncImage(
-                model = url,
+                model = request,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),

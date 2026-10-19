@@ -117,7 +117,7 @@ fun SearchScreen(vm: AppViewModel) {
                         itemsIndexed(hub.items, key = { i, item -> "${i}_${item.ratingKey}" }) { _, item ->
                             PosterCard(
                                 title = item.displayTitle,
-                                subtitle = item.subtitle,
+                                subtitle = vm.posterSubtitle(item),
                                 imageUrl = vm.plex.imageUrl(item.thumb),
                                 progress = item.progress,
                                 watched = item.watched,

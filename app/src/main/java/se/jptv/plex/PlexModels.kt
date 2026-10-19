@@ -18,9 +18,24 @@ data class PlexStream(
     val selected: Boolean,
     /** Satt för externa undertexter (t.ex. en .srt bredvid filen) som hämtas separat. */
     val key: String?,
+    /** Video: bildfrekvens, t.ex. 23.976. */
+    val frameRate: Float? = null,
+    /** Video: Dolby Vision-profil om filen har Dolby Vision. */
+    val doviProfile: Int? = null,
+    val doviPresent: Boolean = false,
+    /** Video: överföringsfunktion, "smpte2084" = HDR10/PQ, "arib-std-b67" = HLG. */
+    val colorTrc: String? = null,
+    val height: Int? = null,
+    /** Ljud: antal kanaler (6 = 5.1, 8 = 7.1). */
+    val channels: Int? = null,
 ) {
     val isExternalSubtitle: Boolean get() = type == 3 && key != null
+
+    val isAtmos: Boolean get() = type == 2 && title.contains("Atmos", ignoreCase = true)
 }
+
+/** Betyg från t.ex. IMDb eller Rotten Tomatoes, som Plex har hämtat. */
+data class PlexRating(val source: String, val text: String)
 
 /** En träff från Plex undertextsökning (OpenSubtitles m.fl.). */
 data class SubtitleResult(
@@ -74,7 +89,38 @@ data class PlexItem(
     val partId: Long? = null,
     /** Antal sedda avsnitt i en säsong/serie. */
     val viewedLeafCount: Int? = null,
+    /** Titelns logotyp (clearLogo) om Plex har en. */
+    val logo: String? = null,
+    val ratings: List<PlexRating> = emptyList(),
+    val audioChannels: Int? = null,
+    /** Plex har gjort förhandsbilder (BIF) för spolning. */
+    val hasPreviews: Boolean = false,
+    /** IMDb-id, t.ex. "tt0111161". */
+    val imdbId: String? = null,
 ) {
+    /** Märken som 4K, Dolby Vision, Atmos och 5.1, från filens spår (eller grovt från listdata). */
+    val badges: List<String>
+        get() = buildList {
+            val video = streams.firstOrNull { it.type == 1 }
+            val res = resolution?.lowercase()
+            when {
+                res == "4k" || (video?.height ?: 0) >= 2000 -> add("4K")
+                res == "1080" || (video?.height ?: 0) >= 1000 -> add("1080p")
+                res == "720" -> add("720p")
+            }
+            when {
+                video?.doviPresent == true -> add("Dolby Vision")
+                video?.colorTrc == "smpte2084" -> add("HDR10")
+                video?.colorTrc == "arib-std-b67" -> add("HLG")
+            }
+            val audio = streams.firstOrNull { it.type == 2 && it.selected } ?: streams.firstOrNull { it.type == 2 }
+            if (audio?.isAtmos == true) add("Atmos")
+            when (audio?.channels ?: audioChannels) {
+                6 -> add("5.1")
+                8 -> add("7.1")
+            }
+        }
+
     val hasUnwatched: Boolean get() = (childCount ?: 0) > (viewedLeafCount ?: 0)
 
     val intro: PlexMarker? get() = markers.firstOrNull { it.type == "intro" }

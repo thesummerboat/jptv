@@ -231,6 +231,59 @@ fun se.jptv.AppViewModel.rememberGridState(memoryKey: String): androidx.compose.
     return state
 }
 
+/** Små märken på rad: "4K", "Dolby Vision", "IMDb 8,6" … */
+@Composable
+fun Badges(labels: List<String>, modifier: Modifier = Modifier) {
+    if (labels.isEmpty()) return
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        labels.forEach { label ->
+            val imdb = label.startsWith("IMDb")
+            Text(
+                label,
+                style = MaterialTheme.typography.labelMedium,
+                color = if (imdb) androidx.compose.ui.graphics.Color.Black else JptvColors.Text,
+                maxLines = 1,
+                modifier = Modifier
+                    .background(
+                        if (imdb) androidx.compose.ui.graphics.Color(0xFFF5C518) else JptvColors.SurfaceHigh,
+                        MaterialTheme.shapes.extraSmall,
+                    )
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+            )
+        }
+    }
+}
+
+/**
+ * Titelns logotyp (Plex clearLogo) om den finns, annars titeln som text.
+ * Bilden laddas utan omskalning så att den genomskinliga bakgrunden behålls.
+ */
+@Composable
+fun TitleLogo(
+    logoUrl: String?,
+    title: String,
+    maxHeight: Dp,
+    maxWidth: Dp,
+    textStyle: androidx.compose.ui.text.TextStyle,
+    modifier: Modifier = Modifier,
+) {
+    var failed by androidx.compose.runtime.remember(logoUrl) { androidx.compose.runtime.mutableStateOf(false) }
+    if (logoUrl == null || failed) {
+        Text(title, style = textStyle, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = modifier)
+    } else {
+        AsyncImage(
+            model = logoUrl,
+            contentDescription = title,
+            contentScale = ContentScale.Fit,
+            alignment = Alignment.CenterStart,
+            onError = { failed = true },
+            modifier = modifier
+                .height(maxHeight)
+                .width(maxWidth),
+        )
+    }
+}
+
 /** Klocka för hörnet, uppdateras var 15:e sekund. */
 @Composable
 fun Clock(modifier: Modifier = Modifier) {

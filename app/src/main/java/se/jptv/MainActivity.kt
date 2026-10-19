@@ -30,6 +30,7 @@ import se.jptv.ui.ignoreUnpairedOk
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        se.jptv.player.DisplayModes.attach(this)
         setContent {
             JptvTheme {
                 JptvApp()

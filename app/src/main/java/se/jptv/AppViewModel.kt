@@ -63,6 +63,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val iptv = IptvRepository(app, http)
     private val epgRepo = EpgRepository(app, http)
     private val updater = Updater(app, http)
+    val imdb = se.jptv.imdb.ImdbRatings(app, http)
 
     // ---------- Minne för listor, så att fokus och scroll är kvar när man går tillbaka ----------
 
@@ -136,6 +137,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var hiddenGroups by mutableStateOf(prefs.hiddenGroups)
         private set
+    var autoFrameRate by mutableStateOf(prefs.autoFrameRate)
+        private set
+
+    /** Ökas när IMDb-betygen har laddats, så att skärmarna ritar om med betyg. */
+    var imdbVersion by mutableStateOf(0)
+        private set
+    var imdbStatus by mutableStateOf<String?>(null)
+        private set
+    private var imdbLoading = false
+
     var startInLastChannel by mutableStateOf(prefs.startInLastChannel)
         private set
 
@@ -170,6 +181,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private var lastUpdateCheck = 0L
 
     private var loginJob: Job? = null
+
+    init {
+        se.jptv.player.DisplayModes.enabled = prefs.autoFrameRate
+    }
     private var homeLoadedAt = 0L
     private var epgRefreshAgain = false
 
@@ -192,6 +207,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 null
             }
             iptvRestoring = false
+            runCatching { imdb.load() }
+            imdbVersion++
             if (startInLastChannel && current == Screen.Home && lastChannel != null) playLastChannel()
             refreshIfStale()
         }
@@ -215,6 +232,79 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             viewModelScope.launch { runCatching { loadHome() } }
         }
         checkForUpdate(manual = false)
+        refreshImdb(force = false)
+    }
+
+    // ---------- IMDb-betyg ----------
+
+    /** Hämtar IMDb:s betygsfil om den saknas eller är äldre än en vecka. */
+    fun refreshImdb(force: Boolean) {
+        if (imdbLoading) return
+        val age = System.currentTimeMillis() - imdb.updatedAt
+        if (!force && imdb.count > 0 && age < 7 * 24 * HOUR) return
+        imdbLoading = true
+        viewModelScope.launch {
+            // Vid start: låt Plex och kanalerna laddas först.
+            if (!force) delay(20_000)
+            imdbStatus = "Hämtar IMDb-betyg…"
+            try {
+                val n = imdb.refresh()
+                imdbVersion++
+                imdbStatus = "IMDb-betyg för ${"%,d".format(n).replace(',', ' ')} titlar"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                imdbStatus = "IMDb-betygen kunde inte hämtas: ${e.message}"
+            } catch (e: OutOfMemoryError) {
+                imdbStatus = "IMDb-betygen fick inte plats i TV:ns minne."
+            } finally {
+                imdbLoading = false
+            }
+        }
+    }
+
+    /** "IMDb 8,6" för en film, serie eller ett avsnitt, eller null om betyg saknas. */
+    fun imdbText(item: PlexItem): String? {
+        @Suppress("UNUSED_VARIABLE")
+        val version = imdbVersion // läses så att skärmen ritas om när betygen kommit
+        item.imdbId?.let { id ->
+            imdb.lookup(id)?.let { (rating, _) -> return "IMDb ${String.format(java.util.Locale("sv", "SE"), "%.1f", rating)}" }
+        }
+        return item.ratings.firstOrNull { it.source == "IMDb" }?.text
+    }
+
+    /** Raden under affischen: år/avsnitt plus IMDb-betyg. */
+    fun posterSubtitle(item: PlexItem): String? =
+        listOfNotNull(item.subtitle, imdbText(item)).joinToString(" · ").ifEmpty { null }
+
+    /** Alla betyg för detaljsidan: IMDb först, sedan Rotten Tomatoes och TMDB från Plex. */
+    fun ratingBadges(item: PlexItem): List<String> =
+        listOfNotNull(imdbText(item)) + item.ratings.filter { it.source != "IMDb" }.map { it.text }
+
+    // ---------- Logotyper ----------
+
+    private val logoCache = HashMap<String, String?>()
+
+    /** Seriens logotyp för ett avsnitt eller en säsong (hämtas en gång per serie). */
+    suspend fun showLogo(item: PlexItem): String? {
+        item.logo?.let { return it }
+        val key = item.showKey ?: return null
+        if (logoCache.containsKey(key)) return logoCache[key]
+        val logo = try {
+            plex.metadata(key)?.logo
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return null
+        }
+        logoCache[key] = logo
+        return logo
+    }
+
+    fun changeAutoFrameRate(enabled: Boolean) {
+        autoFrameRate = enabled
+        prefs.autoFrameRate = enabled
+        se.jptv.player.DisplayModes.enabled = enabled
     }
 
     // ---------- Uppdateringar ----------

@@ -63,6 +63,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("start_in_last_channel", false)
         set(value) { sp.edit().putBoolean("start_in_last_channel", value).apply() }
 
+    /** Byt TV:ns bildfrekvens efter filmen/kanalen. */
+    var autoFrameRate: Boolean
+        get() = sp.getBoolean("auto_frame_rate", true)
+        set(value) { sp.edit().putBoolean("auto_frame_rate", value).apply() }
+
     /** Valt ljud-/undertextspråk per serie: "ljud|undertext", där undertext kan vara "off". */
     fun trackPreference(showKey: String): Pair<String?, String?>? {
         val raw = sp.getString("track_$showKey", null) ?: return null

@@ -147,6 +147,27 @@ fun SettingsScreen(vm: AppViewModel) {
         }
 
         Spacer(Modifier.height(16.dp))
+        Text("Bild och betyg", style = MaterialTheme.typography.titleLarge)
+        Text(
+            "Automatisk bildfrekvens byter TV:ns läge efter filmen (t.ex. 23,976 Hz) och kanalen (50 Hz), så att bilden inte rycker.",
+            color = JptvColors.TextDim,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedButton(onClick = { vm.changeAutoFrameRate(!vm.autoFrameRate) }) {
+                Text(if (vm.autoFrameRate) "Automatisk bildfrekvens: PÅ" else "Automatisk bildfrekvens: AV")
+            }
+            OutlinedButton(onClick = { vm.refreshImdb(force = true) }) { Text("Uppdatera IMDb-betyg") }
+        }
+        Text(
+            vm.imdbStatus ?: if (vm.imdb.count > 0) {
+                "IMDb-betyg för ${vm.imdb.count} titlar, hämtade ${java.text.SimpleDateFormat("d MMM", java.util.Locale("sv", "SE")).format(java.util.Date(vm.imdb.updatedAt))}."
+            } else {
+                "IMDb-betygen hämtas automatiskt en gång i veckan."
+            },
+            color = JptvColors.TextDim,
+        )
+
+        Spacer(Modifier.height(16.dp))
         Text("Uppdateringar", style = MaterialTheme.typography.titleLarge)
         Text(
             vm.updateMessage ?: "Installerad version: ${BuildConfig.VERSION_NAME}. Appen söker själv efter nya versioner.",
