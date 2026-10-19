@@ -2,27 +2,33 @@
 
 Egen TV-app för Android TV / Google TV (Nvidia Shield, TCL m.fl.) som samlar Plex-biblioteket och IPTV-kanaler i ett gränssnitt.
 
-**Status: Fas 0 – spik.** Målet är att bevisa att en Plex-film och en IPTV-kanal spelar smidigt i en egen app, på både Shield och TCL.
+**Status:** används dagligen på Shield och TCL. Nya versioner byggs automatiskt och appen uppdaterar sig själv.
 
 ## Vad som finns
 
 | Del | Vad den gör |
 | --- | --- |
 | Plex-inloggning | Appen visar en kod, du skriver in den på [plex.tv/link](https://plex.tv/link). Servern hittas automatiskt, lokal adress först. |
-| Hemskärm | Fortsätt titta + nyligen tillagt per bibliotek. Knappar till varje bibliotek, Live-TV och Inställningar. |
-| Bibliotek | Alla filmer/serier som rutnät. Serier öppnas som avsnittslista, fokus hamnar på första osedda avsnittet. |
-| Uppspelning | **Direct Play** först (filen spelas som den är). Klarar TV:n inte filen – t.ex. DTS-ljud på TCL – byter appen automatiskt till Plex-omkodning (H.264 + AAC). Position och sett-status rapporteras tillbaka till Plex. |
-| Live-TV | M3U- eller Xtream-lista, grupper till vänster, kanaler till höger. Film/serier i listan hoppas över. |
-| Kanalbyte | ▲/▼ eller kanal-knapparna byter kanal i helskärm. OK visar info, Tillbaka går till listan. |
+| Hemskärm | Live nu, Fortsätt titta och nyligen tillagt. Håll inne OK på en titel för meny (detaljer, markera sedd, ta bort från Fortsätt titta, gå till serien). Klocka i hörnet. |
+| Bibliotek | Rutnät med sortering (A–Ö, tillagt, år, betyg) och filter för osett. Serier visas med säsongsflikar; hela säsonger kan markeras som sedda. |
+| Sök | Söker samtidigt i Plex, bland kanalerna och i TV-guiden. |
+| Uppspelning | **Direct Play** först. Klarar TV:n inte filen – t.ex. DTS-ljud på TCL – byter appen automatiskt till Plex-omkodning (H.264 + AAC). Hoppa över intro, nästa avsnitt vid eftertexterna och "Tittar du fortfarande?" efter tre avsnitt i rad. |
+| Ljud och undertexter | Valet sparas i Plex och per serie, så nästa avsnitt startar med samma språk. **Sök undertexter** hämtar från internet via din Plex-server (OpenSubtitles m.fl.). Externa .srt kan synkas ±0,1 s åt gången. |
+| Alternativ | Sovtimer (15–120 min eller "när det här är slut"), bildformat (anpassa/fyll/zooma) och teknisk info (upplösning, codec, HDR, bithastighet, buffert). |
+| Live-TV | M3U- eller Xtream-lista med grupper, favoriter, senaste kanaler, kanalsök och dolda grupper. TV-guide (XMLTV) med nu/sedan och ett 3-timmarsrutnät. Kan starta direkt i senaste kanalen. |
+| Mobilen som tangentbord | Under Inställningar visas en QR-kod. Öppna den i mobilen och klistra in M3U- och guideadressen där istället för att skriva med fjärren. |
 
 ## Fjärrkontrollen
 
 | Knapp | Film/avsnitt | Live-TV |
 | --- | --- | --- |
-| OK | Paus / spela | Visa kanalinfo (eller försök igen vid fel) |
-| ◀ / ▶ | −10 s / +30 s | Visa kanalinfo |
-| ▲ / ▼ | Visa tid | Nästa / föregående kanal |
-| Tillbaka | Avsluta, position sparas i Plex | Tillbaka till kanallistan |
+| OK | Paus / spela (hoppar över intro när det visas) | Kanallista (eller försök igen vid fel) |
+| Håll inne OK | – | Alternativ: favorit, ljud, undertext, sovtimer, bildformat, info |
+| ◀ / ▶ | −10 s / +30 s (håll inne för snabbare) | Förra kanalen / kanalinfo |
+| ▲ | Ljud och undertexter | Nästa kanal |
+| ▼ | Alternativ: sovtimer, bildformat, info | Föregående kanal |
+| Siffror | – | Kanalnummer |
+| Tillbaka | Avsluta, position sparas i Plex | Stäng panel / tillbaka till kanallistan |
 
 ## Installera på Shield eller TCL
 
@@ -51,12 +57,12 @@ Spara lösenordet på säkert ställe (t.ex. Bitwarden). Tappar du det måste JP
 
 Kotlin · Jetpack Compose for TV · Media3/ExoPlayer · OkHttp · Coil. Plex-API enligt [developer.plex.tv](https://developer.plex.tv).
 
-## Nästa steg (Fas 1)
+## Nästa steg
 
-- EPG/guide från XMLTV
-- Favoritkanaler och kanalnummer som sparas
-- Detaljsida för filmer med "Fortsätt" / "Börja om"
-- Val av ljud- och textspår
+- Förhandsbilder när man spolar (Plex index-bilder)
+- Påminnelser från TV-guiden, timeshift/catch-up där leverantören stöder det
+- Flera profiler, multiview
+- Automatisk undertextsynk
 
 ## Bra att veta
 

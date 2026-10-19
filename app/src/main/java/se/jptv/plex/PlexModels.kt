@@ -22,6 +22,26 @@ data class PlexStream(
     val isExternalSubtitle: Boolean get() = type == 3 && key != null
 }
 
+/** En träff från Plex undertextsökning (OpenSubtitles m.fl.). */
+data class SubtitleResult(
+    val key: String,
+    val title: String,
+    val languageCode: String?,
+    val provider: String?,
+    val score: String?,
+    val hearingImpaired: Boolean,
+    val codec: String?,
+)
+
+data class PlexSearchHub(val title: String, val items: List<PlexItem>)
+
+enum class LibrarySort(val label: String, val param: String) {
+    TITLE("A–Ö", "titleSort"),
+    ADDED("Nyligen tillagt", "addedAt:desc"),
+    YEAR("År", "year:desc"),
+    RATING("Betyg", "audienceRating:desc"),
+}
+
 /** Intro- och eftertextsmarkörer som Plex-servern har hittat. */
 data class PlexMarker(val type: String, val startMs: Long, val endMs: Long)
 
@@ -50,7 +70,13 @@ data class PlexItem(
     val contentRating: String? = null,
     val genres: List<String> = emptyList(),
     val childCount: Int? = null,
+    /** Filens id i Plex, behövs för att spara valt ljud- och undertextspår. */
+    val partId: Long? = null,
+    /** Antal sedda avsnitt i en säsong/serie. */
+    val viewedLeafCount: Int? = null,
 ) {
+    val hasUnwatched: Boolean get() = (childCount ?: 0) > (viewedLeafCount ?: 0)
+
     val intro: PlexMarker? get() = markers.firstOrNull { it.type == "intro" }
 
     val credits: PlexMarker? get() = markers.firstOrNull { it.type == "credits" }

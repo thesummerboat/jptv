@@ -41,12 +41,14 @@ sealed interface Screen {
     data class Details(val item: PlexItem) : Screen
     data object LiveTv : Screen
     data class Guide(val group: String) : Screen
+    data object Search : Screen
     data object Settings : Screen
     data class Player(val request: PlayRequest) : Screen
 }
 
 sealed interface PlayRequest {
-    data class Vod(val item: PlexItem, val fromStart: Boolean = false) : PlayRequest
+    /** autoplayCount: hur många avsnitt i rad som startat av sig själva (för "Tittar du fortfarande?"). */
+    data class Vod(val item: PlexItem, val fromStart: Boolean = false, val autoplayCount: Int = 0) : PlayRequest
     data class Live(val channels: List<Channel>, val index: Int) : PlayRequest
 }
 
@@ -130,6 +132,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     var favorites by mutableStateOf(prefs.favorites)
         private set
+    var hiddenGroups by mutableStateOf(prefs.hiddenGroups)
+        private set
+    var startInLastChannel by mutableStateOf(prefs.startInLastChannel)
+        private set
+
+    /** Insomningstimer: tidpunkt då uppspelningen ska stängas av, eller null. */
+    var sleepAt by mutableStateOf<Long?>(null)
+    /** Insomningstimer "när det här är slut": inget nästa avsnitt, spelaren stängs. */
+    var sleepAtEnd by mutableStateOf(false)
+    /** Bildformat i spelaren: 0 = anpassa, 1 = fyll (sträck), 2 = zooma. Gäller tills appen stängs. */
+    var videoScale by mutableStateOf(0)
+    /** Visa teknisk information (upplösning, codec, buffert) ovanpå bilden. */
+    var showStreamInfo by mutableStateOf(false)
+
+    fun setSleepTimer(minutes: Int?) {
+        sleepAtEnd = false
+        sleepAt = minutes?.let { System.currentTimeMillis() + it * 60_000L }
+    }
+
+    fun setSleepAtEnd() {
+        sleepAt = null
+        sleepAtEnd = true
+    }
+
     var recents by mutableStateOf(prefs.recents)
         private set
 
@@ -155,6 +181,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val cachedPlaylist = runCatching { iptv.cached() }.getOrNull()
             playlist = cachedPlaylist
             epg = runCatching { epgRepo.cached() }.getOrNull()
+            if (startInLastChannel && current == Screen.Home && lastChannel != null) playLastChannel()
             // Spellistan uppdateras i bakgrunden en gång per dygn, guiden var tolfte timme.
             val url = prefs.m3uUrl
             if (url != null && System.currentTimeMillis() - prefs.playlistLoadedAt > 24 * HOUR) {
@@ -402,8 +429,25 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private val sectionCache = HashMap<String, List<PlexItem>>()
 
-    suspend fun sectionItems(sectionKey: String): List<PlexItem> =
-        sectionCache[sectionKey] ?: plex.all(sectionKey).also { sectionCache[sectionKey] = it }
+    /** Sortering och filter per bibliotek, så att valet finns kvar när man kommer tillbaka. */
+    val sectionSort = HashMap<String, se.jptv.plex.LibrarySort>()
+    val sectionUnwatched = HashMap<String, Boolean>()
+
+    suspend fun sectionItems(
+        sectionKey: String,
+        sort: se.jptv.plex.LibrarySort = se.jptv.plex.LibrarySort.TITLE,
+        unwatchedOnly: Boolean = false,
+    ): List<PlexItem> {
+        val cacheKey = "$sectionKey|${sort.name}|$unwatchedOnly"
+        return sectionCache[cacheKey] ?: plex.all(sectionKey, sort, unwatchedOnly).also { sectionCache[cacheKey] = it }
+    }
+
+    fun removeFromContinueWatching(item: PlexItem) {
+        viewModelScope.launch {
+            runCatching { plex.removeFromContinueWatching(item) }
+            runCatching { loadHome() }
+        }
+    }
 
     // ---------- IPTV: spellista ----------
 
@@ -509,8 +553,73 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             if (favorites.any { pl.byKey.containsKey(it) }) add(GROUP_FAVORITES)
             if (recents.any { pl.byKey.containsKey(it) }) add(GROUP_RECENTS)
             add(GROUP_SEARCH)
-            addAll(pl.groups)
+            addAll(pl.groups.filter { it !in hiddenGroups })
         }
+    }
+
+    fun hideGroup(group: String) {
+        if (group == GROUP_FAVORITES || group == GROUP_RECENTS || group == GROUP_SEARCH) return
+        val updated = hiddenGroups + group
+        hiddenGroups = updated
+        prefs.hiddenGroups = updated
+    }
+
+    fun showAllGroups() {
+        hiddenGroups = emptySet()
+        prefs.hiddenGroups = emptySet()
+    }
+
+    fun setStartInLastChannel(enabled: Boolean) {
+        startInLastChannel = enabled
+        prefs.startInLastChannel = enabled
+    }
+
+    /** Kanaler för "Live nu" på hemskärmen: favoriter, annars senast tittade. */
+    fun liveNowChannels(): List<Channel> {
+        val pl = playlist ?: return emptyList()
+        val favs = pl.channels.filter { it.key in favorites }
+        return (favs.ifEmpty { recents.mapNotNull { pl.byKey[it] } }).take(20)
+    }
+
+    // ---------- Sök över allt ----------
+
+    data class SearchResults(
+        val plex: List<se.jptv.plex.PlexSearchHub> = emptyList(),
+        val channels: List<Channel> = emptyList(),
+        val programmes: List<Pair<Channel, se.jptv.iptv.Programme>> = emptyList(),
+        val error: String? = null,
+    )
+
+    suspend fun searchEverything(query: String): SearchResults {
+        val q = query.trim()
+        if (q.length < 2) return SearchResults()
+        val lower = q.lowercase()
+        val pl = playlist
+        val channels = pl?.channels?.filter { it.name.lowercase().contains(lower) }?.take(40) ?: emptyList()
+        val now = System.currentTimeMillis()
+        val programmes = mutableListOf<Pair<Channel, se.jptv.iptv.Programme>>()
+        val e = epg
+        if (pl != null && e != null) {
+            for (ch in pl.channels) {
+                for (p in e.programmesFor(ch)) {
+                    if (p.stop > now && p.title.lowercase().contains(lower)) programmes += ch to p
+                }
+                if (programmes.size > 200) break
+            }
+        }
+        programmes.sortBy { it.second.start }
+        var error: String? = null
+        val hubs = if (plex.server != null) {
+            try {
+                plex.search(q)
+            } catch (ex: CancellationException) {
+                throw ex
+            } catch (ex: Exception) {
+                error = ex.message
+                emptyList()
+            }
+        } else emptyList()
+        return SearchResults(hubs, channels, programmes.take(60), error)
     }
 
     fun channelsForGroup(group: String, query: String = ""): List<Channel> {

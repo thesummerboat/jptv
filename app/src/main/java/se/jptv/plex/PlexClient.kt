@@ -187,8 +187,17 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
     suspend fun recentlyAdded(sectionKey: String): List<PlexItem> =
         items("/library/sections/$sectionKey/recentlyAdded?X-Plex-Container-Start=0&X-Plex-Container-Size=30")
 
-    suspend fun all(sectionKey: String): List<PlexItem> =
-        items("/library/sections/$sectionKey/all?sort=titleSort&X-Plex-Container-Start=0&X-Plex-Container-Size=500")
+    suspend fun all(sectionKey: String, sort: LibrarySort = LibrarySort.TITLE, unwatchedOnly: Boolean = false): List<PlexItem> {
+        val filter = if (unwatchedOnly) "&unwatched=1" else ""
+        return items(
+            "/library/sections/$sectionKey/all?sort=${sort.param}$filter" +
+                "&X-Plex-Container-Start=0&X-Plex-Container-Size=2000",
+        )
+    }
+
+    /** Säsongerna i en serie. */
+    suspend fun seasons(showKey: String): List<PlexItem> =
+        items("/library/metadata/$showKey/children").filter { it.type == "season" }
 
     /** Avsnitt i en serie (alla säsonger) eller i en säsong. */
     suspend fun episodes(container: PlexItem): List<PlexItem> =
@@ -198,8 +207,92 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
     private suspend fun items(path: String): List<PlexItem> {
         val s = srv()
         val mc = getJson("${s.uri}$path", s.token).getJSONObject("MediaContainer")
-        val arr = mc.optJSONArray("Metadata") ?: return emptyList()
-        return (0 until arr.length()).map { parseItem(arr.getJSONObject(it)) }
+        return metadataArray(mc)
+    }
+
+    private fun metadataArray(container: JSONObject): List<PlexItem> {
+        val out = mutableListOf<PlexItem>()
+        for (name in listOf("Metadata", "Directory", "Video")) {
+            val arr = container.optJSONArray(name) ?: continue
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                if (o.has("ratingKey")) out += parseItem(o)
+            }
+        }
+        return out
+    }
+
+    // ---------- Sök ----------
+
+    /** Sök i hela Plex-biblioteket; svaret kommer grupperat (filmer, serier, avsnitt …). */
+    suspend fun search(query: String): List<PlexSearchHub> {
+        val s = srv()
+        val q = URLEncoder.encode(query, "UTF-8")
+        val mc = getJson("${s.uri}/hubs/search?query=$q&limit=20&includeCollections=0", s.token)
+            .getJSONObject("MediaContainer")
+        val hubs = mc.optJSONArray("Hub") ?: return emptyList()
+        return (0 until hubs.length()).mapNotNull { i ->
+            val hub = hubs.optJSONObject(i) ?: return@mapNotNull null
+            val items = metadataArray(hub).filter { it.type in setOf("movie", "show", "episode", "season") }
+            if (items.isEmpty()) null else PlexSearchHub(hub.optStringOrNull("title") ?: "Träffar", items)
+        }
+    }
+
+    // ---------- Undertexter och spårval ----------
+
+    /** Söker undertexter via Plex-serverns undertextagent. Språk som tvåbokstavskod (sv, en …). */
+    suspend fun searchSubtitles(item: PlexItem, language: String): List<SubtitleResult> {
+        val s = srv()
+        val mc = getJson(
+            "${s.uri}/library/metadata/${item.ratingKey}/subtitles?language=$language&hearingImpaired=0&forced=0",
+            s.token,
+        ).getJSONObject("MediaContainer")
+        val arr = mc.optJSONArray("Stream") ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val key = o.optStringOrNull("key") ?: return@mapNotNull null
+            SubtitleResult(
+                key = key,
+                title = o.optStringOrNull("title") ?: o.optStringOrNull("displayTitle") ?: "Undertext ${i + 1}",
+                languageCode = o.optStringOrNull("languageCode") ?: o.optStringOrNull("language"),
+                provider = o.optStringOrNull("providerTitle"),
+                score = o.optStringOrNull("score"),
+                hearingImpaired = o.optBoolean("hearingImpaired"),
+                codec = o.optStringOrNull("codec"),
+            )
+        }
+    }
+
+    /** Ber servern ladda ner en undertext. Servern gör det i bakgrunden; den dyker upp som nytt spår. */
+    suspend fun downloadSubtitle(item: PlexItem, result: SubtitleResult) {
+        val s = srv()
+        put("${s.uri}/library/metadata/${item.ratingKey}/subtitles?key=${URLEncoder.encode(result.key, "UTF-8")}", s.token)
+    }
+
+    /** Sparar valt ljud-/undertextspår i Plex. subtitleStreamId = 0 betyder undertexter av. */
+    suspend fun setSelectedStreams(item: PlexItem, audioStreamId: Long? = null, subtitleStreamId: Long? = null) {
+        val s = server ?: return
+        val part = item.partId ?: return
+        val params = buildList {
+            add("allParts=1")
+            audioStreamId?.let { add("audioStreamID=$it") }
+            subtitleStreamId?.let { add("subtitleStreamID=$it") }
+        }.joinToString("&")
+        put("${s.uri}/library/parts/$part?$params", s.token)
+    }
+
+    suspend fun removeFromContinueWatching(item: PlexItem) {
+        val s = server ?: return
+        put("${s.uri}/actions/removeFromContinueWatching?ratingKey=${item.ratingKey}", s.token)
+    }
+
+    private suspend fun put(url: String, token: String) {
+        withContext(Dispatchers.IO) {
+            val req = Request.Builder().url(url).plexHeaders(token).put("".toRequestBody()).build()
+            http.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) throw PlexException("Plex svarade HTTP ${resp.code}")
+            }
+        }
     }
 
     private fun parseItem(o: JSONObject): PlexItem {
@@ -253,6 +346,8 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
             viewOffsetMs = o.optLongOrNull("viewOffset") ?: 0L,
             watched = (o.optIntOrNull("viewCount") ?: 0) > 0,
             partKey = part?.optStringOrNull("key"),
+            partId = part?.optLongOrNull("id"),
+            viewedLeafCount = o.optIntOrNull("viewedLeafCount"),
             videoCodec = media?.optStringOrNull("videoCodec"),
             audioCodec = media?.optStringOrNull("audioCodec"),
             resolution = media?.optStringOrNull("videoResolution"),
@@ -282,7 +377,27 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
     fun subtitleUrl(stream: PlexStream): String? {
         val s = server ?: return null
         val key = stream.key ?: return null
-        return "${s.uri}$key?X-Plex-Token=${s.token}"
+        // encoding=utf-8: servern gör om äldre svenska .srt-filer (Windows-1252) så att å, ä och ö blir rätt.
+        return "${s.uri}$key?encoding=utf-8&X-Plex-Token=${s.token}"
+    }
+
+    /** Hämtar en textfil (undertext) och avkodar den som UTF-8, eller Windows-1252 om det inte går. */
+    suspend fun downloadText(url: String): String = withContext(Dispatchers.IO) {
+        val req = Request.Builder().url(url).plexHeaders(server?.token).get().build()
+        val bytes = http.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw PlexException("Plex svarade HTTP ${resp.code}")
+            resp.body?.bytes() ?: ByteArray(0)
+        }
+        try {
+            Charsets.UTF_8.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                .decode(java.nio.ByteBuffer.wrap(bytes))
+                .toString()
+                .removePrefix("﻿")
+        } catch (e: java.nio.charset.CharacterCodingException) {
+            String(bytes, charset("windows-1252"))
+        }
     }
 
     // ---------- Bilder och uppspelning ----------
@@ -317,6 +432,8 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
             "maxVideoBitrate" to "20000",
             "videoResolution" to "1920x1080",
             "offset" to "0",
+            // Vald undertext (enligt Plex) bränns in i bilden vid omkodning.
+            "subtitles" to "burn",
             "session" to session,
             "X-Plex-Session-Identifier" to session,
             "X-Plex-Token" to s.token,

@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
@@ -41,10 +43,12 @@ fun PosterCard(
     watched: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    onLongClick: (() -> Unit)? = null,
 ) {
     Column(modifier.width(PosterWidth)) {
         Card(
             onClick = onClick,
+            onLongClick = onLongClick,
             modifier = Modifier
                 .width(PosterWidth)
                 .aspectRatio(2f / 3f),
@@ -173,4 +177,18 @@ suspend fun androidx.compose.ui.focus.FocusRequester.requestWhenReady(attempts: 
         androidx.compose.runtime.withFrameNanos { }
         if (runCatching { requestFocus() }.isSuccess) return
     }
+}
+
+
+/** Klocka för hörnet, uppdateras var 15:e sekund. */
+@Composable
+fun Clock(modifier: Modifier = Modifier) {
+    var now by androidx.compose.runtime.remember { androidx.compose.runtime.mutableLongStateOf(System.currentTimeMillis()) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(15_000)
+            now = System.currentTimeMillis()
+        }
+    }
+    Text(clock(now), style = MaterialTheme.typography.titleLarge, color = JptvColors.TextDim, modifier = modifier)
 }

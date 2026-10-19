@@ -110,12 +110,15 @@ private fun ChannelBrowser(vm: AppViewModel) {
             ScreenTitle("Live-TV", "${vm.playlist?.channels?.size ?: 0} kanaler")
             Spacer(Modifier.weight(1f))
             Text(
-                vm.epgStatus?.takeIf { vm.epgLoading } ?: "Håll inne OK på en kanal för att spara som favorit",
+                vm.epgStatus?.takeIf { vm.epgLoading }
+                    ?: "Håll OK på en kanal = favorit · på en grupp = dölj",
                 color = JptvColors.TextDim,
                 style = MaterialTheme.typography.bodySmall,
             )
             Spacer(Modifier.width(16.dp))
             Button(onClick = { vm.open(Screen.Guide(group)) }) { Text("Guide") }
+            Spacer(Modifier.width(16.dp))
+            Clock()
         }
         Spacer(Modifier.height(16.dp))
         Row(Modifier.fillMaxSize()) {
@@ -131,6 +134,7 @@ private fun ChannelBrowser(vm: AppViewModel) {
                     ListItem(
                         selected = g == group,
                         onClick = { group = g },
+                        onLongClick = { vm.hideGroup(g) },
                         modifier = Modifier
                             .onFocusChanged {
                                 if (it.isFocused) {

@@ -54,4 +54,27 @@ class Prefs(context: Context) {
     var recents: List<String>
         get() = sp.getString("recents", null)?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
         set(value) { sp.edit().putString("recents", value.joinToString("\n")).apply() }
+
+    var hiddenGroups: Set<String>
+        get() = sp.getStringSet("hidden_groups", emptySet())?.toSet() ?: emptySet()
+        set(value) { sp.edit().putStringSet("hidden_groups", value).apply() }
+
+    var startInLastChannel: Boolean
+        get() = sp.getBoolean("start_in_last_channel", false)
+        set(value) { sp.edit().putBoolean("start_in_last_channel", value).apply() }
+
+    /** Valt ljud-/undertextspråk per serie: "ljud|undertext", där undertext kan vara "off". */
+    fun trackPreference(showKey: String): Pair<String?, String?>? {
+        val raw = sp.getString("track_$showKey", null) ?: return null
+        val audio = raw.substringBefore('|').ifEmpty { null }
+        val sub = raw.substringAfter('|', "").ifEmpty { null }
+        return audio to sub
+    }
+
+    fun setTrackPreference(showKey: String, audio: String?, subtitle: String?) {
+        val old = trackPreference(showKey)
+        val a = audio ?: old?.first ?: ""
+        val s = subtitle ?: old?.second ?: ""
+        sp.edit().putString("track_$showKey", "$a|$s").apply()
+    }
 }
