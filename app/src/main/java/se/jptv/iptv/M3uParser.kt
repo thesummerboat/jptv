@@ -110,6 +110,28 @@ object M3uParser {
         return Playlist(channels, epgUrl)
     }
 
+    /**
+     * Skriver en kompakt M3U med bara de kanaler som finns i listan (live-kanalerna).
+     * Används för cachen, så att appen inte behöver läsa igenom leverantörens film och serier vid start.
+     */
+    fun write(playlist: Playlist, out: Appendable) {
+        fun q(v: String) = v.replace('"', '\'').replace('\n', ' ').replace('\r', ' ')
+        out.append("#EXTM3U")
+        playlist.epgUrl?.let { out.append(" url-tvg=\"").append(q(it)).append('"') }
+        out.append('\n')
+        for (ch in playlist.channels) {
+            out.append("#EXTINF:-1")
+            ch.tvgId?.let { out.append(" tvg-id=\"").append(q(it)).append('"') }
+            ch.tvgName?.let { out.append(" tvg-name=\"").append(q(it)).append('"') }
+            ch.logo?.let { out.append(" tvg-logo=\"").append(q(it)).append('"') }
+            out.append(" group-title=\"").append(q(ch.group)).append("\",")
+            out.append(ch.name.replace('\n', ' ').replace('\r', ' ')).append('\n')
+            ch.userAgent?.let { out.append("#EXTVLCOPT:http-user-agent=").append(it).append('\n') }
+            ch.referrer?.let { out.append("#EXTVLCOPT:http-referrer=").append(it).append('\n') }
+            out.append(ch.url).append('\n')
+        }
+    }
+
     fun isLive(url: String): Boolean {
         val u = url.lowercase()
         if ("/movie/" in u || "/series/" in u) return false

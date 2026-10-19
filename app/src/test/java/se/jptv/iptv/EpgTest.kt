@@ -55,6 +55,58 @@ class EpgTest {
         assertEquals(1_792_425_600_000L, XmltvParser.parseTime("20261019160000 +0000"))
         assertEquals(1_792_425_600_000L, XmltvParser.parseTime("20261019160000"))
         assertNull(XmltvParser.parseTime("igår"))
+        // Utan sekunder, negativ tidszon och skottdag.
+        assertEquals(1_792_425_600_000L, XmltvParser.parseTime("202610191200 -0400"))
+        assertEquals(1_582_934_400_000L, XmltvParser.parseTime("20200229000000 +0000"))
+        assertEquals(0L, XmltvParser.parseTime("19700101010000 +0100"))
+    }
+
+    @Test
+    fun toleratesBadEntitiesAndBrokenTail() {
+        val broken = """
+            <tv>
+              <channel id="svt1.se"><display-name>SVT1</display-name></channel>
+              <programme start="20261019180000 +0200" stop="20261019190000 +0200" channel="svt1.se">
+                <title>Rapport&nbsp;special</title><desc>A & B</desc>
+              </programme>
+              <programme start="20261019190000 +0200" stop="20261019200000 +0200" channel="svt1.se">
+                <title>Sportnytt</title>
+              </programme>
+              <programme start="2026
+        """.trimIndent()
+        val epg = XmltvParser.parse(
+            input = ByteArrayInputStream(broken.toByteArray()),
+            parser = KXmlParser(),
+            wantedIds = setOf("svt1.se"),
+            wantedNames = emptySet(),
+            from = t1800 - 3_600_000L,
+            to = t1800 + 24 * 3_600_000L,
+            now = t1800,
+        )
+        val titles = epg.programmesFor(channel("SVT1", "svt1.se")).map { it.title }
+        assertEquals(2, titles.size)
+        assertEquals("Sportnytt", titles[1])
+    }
+
+    @Test
+    fun keepsProgrammesWithoutChannelElementWhenTvgIdMatches() {
+        val noChannels = """
+            <tv>
+              <programme start="20261019180000 +0200" stop="20261019190000 +0200" channel="TV4.se">
+                <title>Nyheterna</title>
+              </programme>
+            </tv>
+        """.trimIndent()
+        val epg = XmltvParser.parse(
+            input = ByteArrayInputStream(noChannels.toByteArray()),
+            parser = KXmlParser(),
+            wantedIds = setOf("tv4.se"),
+            wantedNames = emptySet(),
+            from = t1800 - 3_600_000L,
+            to = t1800 + 24 * 3_600_000L,
+            now = t1800,
+        )
+        assertEquals("Nyheterna", epg.now(channel("TV4", "TV4.se"), t1800 + 60_000)?.title)
     }
 
     @Test

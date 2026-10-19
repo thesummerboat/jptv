@@ -43,7 +43,7 @@ enum class LibrarySort(val label: String, val param: String) {
 }
 
 /** Intro- och eftertextsmarkörer som Plex-servern har hittat. */
-data class PlexMarker(val type: String, val startMs: Long, val endMs: Long)
+data class PlexMarker(val type: String, val startMs: Long, val endMs: Long, val final: Boolean = false)
 
 data class PlexItem(
     val ratingKey: String,
@@ -79,7 +79,12 @@ data class PlexItem(
 
     val intro: PlexMarker? get() = markers.firstOrNull { it.type == "intro" }
 
-    val credits: PlexMarker? get() = markers.firstOrNull { it.type == "credits" }
+    /**
+     * Eftertexterna i slutet. Plex kan ge flera "credits" (t.ex. en sång mitt i avsnittet);
+     * den sista är märkt final, annars tas den som börjar senast.
+     */
+    val credits: PlexMarker?
+        get() = markers.filter { it.type == "credits" }.let { list -> list.firstOrNull { it.final } ?: list.maxByOrNull { it.startMs } }
 
     /** En minimal serie att öppna avsnittslistan med, från ett avsnitt eller en säsong. */
     fun showContainer(): PlexItem? {

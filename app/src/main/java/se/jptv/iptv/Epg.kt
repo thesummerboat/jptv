@@ -3,8 +3,6 @@ package se.jptv.iptv
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.xmlpull.v1.XmlPullParser
 import java.io.InputStream
-import java.util.GregorianCalendar
-import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
 
 data class Programme(val start: Long, val stop: Long, val title: String, val desc: String?) {
@@ -68,23 +66,43 @@ class Epg(
 }
 
 object XmltvParser {
-    private val timeRegex = Regex("""^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})?\s*([+-]\d{4})?""")
+    /** Längsta beskrivning som sparas. Håller minnet nere med tusentals kanaler. */
+    const val MAX_DESC = 150
 
-    /** XMLTV-tid "20261019180000 +0200" -> millisekunder sedan 1970 (UTC). */
+    /** XMLTV-tid "20261019180000 +0200" -> millisekunder sedan 1970 (UTC). Ren aritmetik, utan Calendar. */
     fun parseTime(value: String): Long? {
-        val m = timeRegex.find(value.trim()) ?: return null
-        val g = m.groupValues
-        val cal = GregorianCalendar(TimeZone.getTimeZone("UTC"))
-        cal.clear()
-        cal.set(g[1].toInt(), g[2].toInt() - 1, g[3].toInt(), g[4].toInt(), g[5].toInt(), g[6].ifEmpty { "0" }.toInt())
-        var t = cal.timeInMillis
-        val offset = g[7]
-        if (offset.isNotEmpty()) {
-            val sign = if (offset[0] == '-') -1 else 1
-            val minutes = offset.substring(1, 3).toInt() * 60 + offset.substring(3, 5).toInt()
+        val s = value.trim()
+        if (s.length < 12) return null
+        for (i in 0 until 12) if (!s[i].isDigit()) return null
+        fun num(from: Int, to: Int): Int {
+            var n = 0
+            for (i in from until to) n = n * 10 + (s[i] - '0')
+            return n
+        }
+        val month = num(4, 6)
+        val day = num(6, 8)
+        if (month !in 1..12 || day !in 1..31) return null
+        val seconds = if (s.length >= 14 && s[12].isDigit() && s[13].isDigit()) num(12, 14) else 0
+        var t = (daysFromCivil(num(0, 4), month, day) * 86_400L +
+            num(8, 10) * 3_600L + num(10, 12) * 60L + seconds) * 1_000L
+        val signAt = s.indexOfAny(charArrayOf('+', '-'), 12)
+        if (signAt >= 0 && s.length >= signAt + 5 && (signAt + 1 until signAt + 5).all { s[it].isDigit() }) {
+            val sign = if (s[signAt] == '-') -1 else 1
+            val minutes = num(signAt + 1, signAt + 3) * 60 + num(signAt + 3, signAt + 5)
             t -= sign * minutes * 60_000L
         }
         return t
+    }
+
+    /** Antal dagar sedan 1970-01-01 för ett datum (Howard Hinnants algoritm). */
+    private fun daysFromCivil(year: Int, month: Int, day: Int): Long {
+        val y = if (month <= 2) year - 1 else year
+        val era = (if (y >= 0) y else y - 399) / 400
+        val yoe = y - era * 400
+        val mp = (month + 9) % 12
+        val doy = (153 * mp + 2) / 5 + day - 1
+        val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        return era * 146_097L + doe - 719_468L
     }
 
     /**
@@ -101,51 +119,65 @@ object XmltvParser {
         now: Long = System.currentTimeMillis(),
     ): Epg {
         parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
+        // Tolerant läge: ett enda "&nbsp;" eller lösryckt "&" i guiden ska inte stoppa allt.
+        runCatching { parser.setFeature("http://xmlpull.org/v1/doc/features.html#relaxed", true) }
         parser.setInput(input, null)
 
         val wantedEpgIds = HashSet<String>()
         val nameIndex = HashMap<String, String>()
         val programmes = HashMap<String, MutableList<Programme>>()
+        // Samma titel ("Nyheter", "Rapport") återkommer tusentals gånger; spara en kopia.
+        val titles = HashMap<String, String>()
         var channelId: String? = null
 
-        var event = parser.eventType
-        while (event != XmlPullParser.END_DOCUMENT) {
-            if (event == XmlPullParser.START_TAG) {
-                when (parser.name) {
-                    "channel" -> {
-                        channelId = parser.getAttributeValue(null, "id")?.lowercase()
-                        if (channelId != null && channelId in wantedIds) wantedEpgIds += channelId
-                    }
-                    "display-name" -> {
-                        val id = channelId
-                        val text = parser.nextText()
-                        if (id != null) {
-                            val norm = Epg.normalize(text)
-                            if (norm.isNotEmpty() && norm in wantedNames) {
-                                wantedEpgIds += id
-                                nameIndex.putIfAbsent(norm, id)
+        try {
+            var event = parser.eventType
+            while (event != XmlPullParser.END_DOCUMENT) {
+                if (event == XmlPullParser.START_TAG) {
+                    when (parser.name) {
+                        "channel" -> {
+                            channelId = parser.getAttributeValue(null, "id")?.lowercase()
+                            if (channelId != null && channelId in wantedIds) wantedEpgIds += channelId
+                        }
+                        "display-name" -> {
+                            val id = channelId
+                            val text = parser.nextText()
+                            if (id != null) {
+                                val norm = Epg.normalize(text)
+                                if (norm.isNotEmpty() && norm in wantedNames) {
+                                    wantedEpgIds += id
+                                    nameIndex.putIfAbsent(norm, id)
+                                }
+                            }
+                        }
+                        "programme" -> {
+                            val id = parser.getAttributeValue(null, "channel")?.lowercase()
+                            // Kolla kanalen först: tiderna tolkas bara för program vi ska ha.
+                            if (id == null || (id !in wantedEpgIds && id !in wantedIds)) {
+                                skip(parser)
+                            } else {
+                                val start = parser.getAttributeValue(null, "start")?.let { parseTime(it) }
+                                val stop = parser.getAttributeValue(null, "stop")?.let { parseTime(it) }
+                                if (start != null && stop != null && stop > from && start < to) {
+                                    val (title, desc) = readProgrammeBody(parser)
+                                    val t = (title ?: "Okänt program").let { titles.getOrPut(it) { it } }
+                                    programmes.getOrPut(id) { ArrayList() } += Programme(start, stop, t, desc)
+                                } else {
+                                    skip(parser)
+                                }
                             }
                         }
                     }
-                    "programme" -> {
-                        val id = parser.getAttributeValue(null, "channel")?.lowercase()
-                        val start = parser.getAttributeValue(null, "start")?.let { parseTime(it) }
-                        val stop = parser.getAttributeValue(null, "stop")?.let { parseTime(it) }
-                        val keep = id != null && id in wantedEpgIds && start != null && stop != null &&
-                            stop > from && start < to
-                        if (keep) {
-                            val (title, desc) = readProgrammeBody(parser)
-                            programmes.getOrPut(id!!) { ArrayList() } +=
-                                Programme(start!!, stop!!, title ?: "Okänt program", desc)
-                        } else {
-                            skip(parser)
-                        }
-                    }
+                } else if (event == XmlPullParser.END_TAG && parser.name == "channel") {
+                    channelId = null
                 }
-            } else if (event == XmlPullParser.END_TAG && parser.name == "channel") {
-                channelId = null
+                event = parser.next()
             }
-            event = parser.next()
+        } catch (e: org.xmlpull.v1.XmlPullParserException) {
+            // Trasig XML längre ner i filen: behåll det som hann läsas.
+            if (programmes.isEmpty()) throw e
+        } catch (e: java.io.EOFException) {
+            if (programmes.isEmpty()) throw e
         }
         val sorted = programmes.mapValues { (_, list) -> list.sortedBy { it.start } }
         return Epg(sorted, nameIndex, now)
@@ -166,7 +198,7 @@ object XmltvParser {
                             depth--
                         }
                         "desc" -> if (desc == null) {
-                            desc = parser.nextText().trim().take(400)
+                            desc = parser.nextText().trim().take(MAX_DESC)
                             depth--
                         }
                     }

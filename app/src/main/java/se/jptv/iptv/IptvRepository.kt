@@ -30,9 +30,14 @@ class IptvRepository(private val context: Context, private val http: OkHttpClien
             tmp.delete()
             throw IOException(if (hasEntries) "Spellistan innehöll inga live-kanaler" else "Adressen gav ingen M3U-spellista")
         }
-        if (!tmp.renameTo(cacheFile)) {
-            tmp.copyTo(cacheFile, overwrite = true)
-            tmp.delete()
+        tmp.delete()
+        // Spara bara live-kanalerna. Leverantörens filmer och serier kan vara 50 MB som annars
+        // skulle läsas igenom vid varje start.
+        val compact = File(context.filesDir, "playlist.m3u.new")
+        compact.bufferedWriter().use { M3uParser.write(playlist, it) }
+        if (!compact.renameTo(cacheFile)) {
+            compact.copyTo(cacheFile, overwrite = true)
+            compact.delete()
         }
         playlist
     }

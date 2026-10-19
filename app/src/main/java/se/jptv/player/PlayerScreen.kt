@@ -719,7 +719,6 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         }
         SleepTimer(
             vm = vm,
-            now = now,
             onSleep = {
                 exo.pause()
                 vm.back()
@@ -1252,19 +1251,24 @@ private fun infoSection(vm: AppViewModel, done: () -> Unit): PanelSection = Pane
     ),
 )
 
-/** Stänger av när tiden är ute; varnar den sista minuten. */
+/** Stänger av när tiden är ute; varnar den sista minuten. Har en egen klocka, så resten av skärmen slipper rita om. */
 @Composable
-private fun SleepTimer(vm: AppViewModel, now: Long, onSleep: () -> Unit, modifier: Modifier = Modifier) {
+private fun SleepTimer(vm: AppViewModel, onSleep: () -> Unit, modifier: Modifier = Modifier) {
     val at = vm.sleepAt ?: return
-    val left = at - now
-    if (left <= 0) {
-        LaunchedEffect(at) {
-            vm.sleepAt = null
-            onSleep()
+    var left by remember(at) { mutableLongStateOf(at - System.currentTimeMillis()) }
+    val currentOnSleep by rememberUpdatedState(onSleep)
+    LaunchedEffect(at) {
+        while (true) {
+            left = at - System.currentTimeMillis()
+            if (left <= 0) {
+                vm.sleepAt = null
+                currentOnSleep()
+                break
+            }
+            delay(if (left > 65_000) minOf(left - 60_000, 30_000) else 1_000)
         }
-        return
     }
-    if (left <= 60_000) Chip("Sovtimern stänger av om ${left / 1000} s", modifier)
+    if (left in 1..60_000) Chip("Sovtimern stänger av om ${left / 1000} s", modifier)
 }
 
 private val SUBTITLE_LANGUAGES = listOf(
@@ -1559,8 +1563,13 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
     var index by remember { mutableIntStateOf(request.index.coerceIn(0, request.channels.lastIndex)) }
     var previousKey by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var bannerUntil by remember { mutableLongStateOf(0L) }
+    var bannerToken by remember { mutableIntStateOf(0) }
+    var bannerVisible by remember { mutableStateOf(true) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var firstTune by remember { mutableStateOf(true) }
+    /** Kanalen som faktiskt skickats till spelaren (kan släpa efter vid snabb zappning). */
+    var playingKey by remember { mutableStateOf<String?>(null) }
+    var recordedKey by remember { mutableStateOf<String?>(null) }
     var retries by remember { mutableIntStateOf(0) }
     var listOpen by remember { mutableStateOf(false) }
     var optionsOpen by remember { mutableStateOf(false) }
@@ -1573,14 +1582,18 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
     val channel = channels[index]
 
     fun showBanner() {
-        bannerUntil = System.currentTimeMillis() + 5_000
+        now = System.currentTimeMillis()
+        bannerToken++
     }
 
     fun switchTo(newChannels: List<Channel>, newIndex: Int) {
         if (newChannels.isEmpty()) return
-        previousKey = channels.getOrNull(index)?.key
+        val target = newIndex.coerceIn(0, newChannels.lastIndex)
+        val currentKey = channels.getOrNull(index)?.key
+        // "Förra kanalen" ska bara ändras när kanalen verkligen byts.
+        if (newChannels[target].key != currentKey) previousKey = currentKey
         channels = newChannels
-        index = newIndex.coerceIn(0, newChannels.lastIndex)
+        index = target
     }
 
     /** Hoppa till en kanal via nummer eller nyckel; utanför gruppen byts listan till hela spellistan. */
@@ -1619,6 +1632,12 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                 if (playbackState == Player.STATE_READY) {
                     error = null
                     retries = 0
+                    // Till "Senaste" först när kanalen faktiskt spelar, inte för varje kanal man zappar förbi.
+                    val key = playingKey
+                    if (key != null && key != recordedKey) {
+                        recordedKey = key
+                        channels.firstOrNull { it.key == key }?.let { vm.onChannelTuned(it) }
+                    }
                 }
                 // IPTV-strömmar stänger ibland anslutningen; ExoPlayer ser det som "slut". Anslut igen.
                 if (playbackState == Player.STATE_ENDED) {
@@ -1655,21 +1674,33 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
         }
     }
 
-    // Ny kanal vald -> starta den.
+    // Ny kanal vald -> starta den. Vid snabb zappning (håll ▲/▼) ansluts bara kanalen man stannar på:
+    // många leverantörer tillåter en ström åt gången och spärrar vid för många anslutningar.
     LaunchedEffect(channel.key) {
         error = null
         retries = 0
         showBanner()
-        vm.onChannelTuned(channel)
+        vm.focusKeys["live_channel"] = channel.key
+        if (!firstTune) delay(350)
+        firstTune = false
+        playingKey = channel.key
         exo.setMediaSource(liveSource(channel))
         exo.prepare()
         exo.play()
     }
 
+    // Banner i fem sekunder efter varje kanalbyte eller knapptryck.
+    LaunchedEffect(bannerToken) {
+        bannerVisible = true
+        delay(5_000)
+        bannerVisible = false
+    }
+
+    // Klockan för guiden behöver inte gå oftare än så; hela skärmen ritas om vid varje tick.
     LaunchedEffect(Unit) {
         while (true) {
+            delay(15_000)
             now = System.currentTimeMillis()
-            delay(500)
         }
     }
 
@@ -1709,9 +1740,12 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                                 when {
                                     okLong -> optionsOpen = true
                                     error != null -> {
+                                        // Ny källa: prepare() gör inget om strömmen redan har tagit slut.
                                         retries = 0
                                         error = null
+                                        exo.setMediaSource(liveSource(channel))
                                         exo.prepare()
+                                        exo.play()
                                     }
                                     else -> listOpen = true
                                 }
@@ -1765,7 +1799,7 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
             },
     ) {
         VideoSurface(exo, vm.videoScale)
-        if ((now < bannerUntil || error != null) && !listOpen && !optionsOpen) {
+        if ((bannerVisible || error != null) && !listOpen && !optionsOpen) {
             ChannelBanner(
                 vm = vm,
                 channel = channel,
@@ -1780,7 +1814,6 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
         }
         SleepTimer(
             vm = vm,
-            now = now,
             onSleep = { vm.back() },
             modifier = Modifier.align(Alignment.TopCenter).padding(32.dp),
         )
