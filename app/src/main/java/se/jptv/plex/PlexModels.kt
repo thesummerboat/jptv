@@ -188,7 +188,8 @@ data class PlexItem(
             videoCodec?.uppercase(), audioCodec?.uppercase()).joinToString(" · ")
 }
 
-data class PlexHomeRow(val title: String, val items: List<PlexItem>)
+/** labels: egen text under affischen per ratingKey, t.ex. "3 nya avsnitt". */
+data class PlexHomeRow(val title: String, val items: List<PlexItem>, val labels: Map<String, String> = emptyMap())
 
 /** En visning i Plex tittarhistorik. showKey är satt för avsnitt. */
 data class PlexHistoryEntry(val ratingKey: String, val type: String, val showKey: String?, val viewedAt: Long)

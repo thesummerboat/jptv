@@ -387,7 +387,7 @@ private fun HomeRow(
                         val key = homeKey(row.title, item.ratingKey)
                         PosterCard(
                             title = item.displayTitle,
-                            subtitle = vm.posterSubtitle(item),
+                            subtitle = row.labels[item.ratingKey] ?: vm.posterSubtitle(item),
                             imageUrl = vm.plex.imageUrl(item.thumb),
                             progress = item.progress,
                             watched = item.watched,
@@ -511,6 +511,15 @@ private fun ItemMenu(vm: AppViewModel, item: PlexItem, inContinueWatching: Boole
                     vm.open(Screen.Episodes(show))
                 }, modifier = Modifier.fillMaxWidth()) {
                     Text("Gå till serien")
+                }
+            }
+            val shuffleShow = if (item.type == "show") item else item.showContainer()
+            if (shuffleShow != null) {
+                OutlinedButton(onClick = {
+                    onClose()
+                    vm.playShuffle(shuffleShow)
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Spela slumpvis")
                 }
             }
             OutlinedButton(onClick = {
