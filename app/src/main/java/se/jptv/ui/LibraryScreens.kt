@@ -122,7 +122,7 @@ fun SectionScreen(vm: AppViewModel, section: PlexSection) {
                     itemsIndexed(items, key = { _, item -> item.ratingKey }) { i, item ->
                         PosterCard(
                             title = item.displayTitle,
-                            subtitle = item.subtitle,
+                            subtitle = vm.posterSubtitle(item),
                             imageUrl = vm.plex.imageUrl(item.thumb),
                             progress = item.progress,
                             watched = item.watched || (item.type == "show" && !item.hasUnwatched && (item.childCount ?: 0) > 0),
@@ -234,6 +234,7 @@ fun EpisodesScreen(vm: AppViewModel, container: PlexItem) {
                     itemsIndexed(episodes, key = { i, ep -> "${i}_${ep.ratingKey}" }) { i, ep ->
                         EpisodeRow(
                             episode = ep,
+                            imdb = vm.imdbText(ep),
                             onClick = { vm.play(ep) },
                             onLongClick = { vm.open(Screen.Details(ep)) },
                             modifier = Modifier
@@ -254,7 +255,13 @@ fun EpisodesScreen(vm: AppViewModel, container: PlexItem) {
 }
 
 @Composable
-private fun EpisodeRow(episode: PlexItem, onClick: () -> Unit, onLongClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun EpisodeRow(
+    episode: PlexItem,
+    imdb: String?,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val code = if (episode.episode != null) "${episode.episode}." else ""
     ListItem(
         selected = false,
@@ -266,6 +273,7 @@ private fun EpisodeRow(episode: PlexItem, onClick: () -> Unit, onLongClick: () -
         },
         supportingContent = {
             val parts = buildList {
+                imdb?.let { add(it) }
                 if (episode.durationMs > 0) add(formatDuration(episode.durationMs))
                 if (episode.viewOffsetMs > 0) add("${formatTime(episode.viewOffsetMs)} sett")
                 else if (episode.watched) add("Sett ✓")

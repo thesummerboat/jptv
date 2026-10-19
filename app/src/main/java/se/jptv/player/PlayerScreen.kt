@@ -5,10 +5,12 @@ import android.net.Uri
 import android.view.KeyEvent
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -17,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,6 +33,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -40,6 +44,8 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -263,6 +269,19 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     var needsExactSelection by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
 
+    // Automatisk bildfrekvens: från Plex före start, annars uppmätt från de första bildrutorna.
+    var switchingMode by remember { mutableStateOf(false) }
+    var fpsHandled by remember { mutableStateOf(false) }
+    var measuredFps by remember { mutableStateOf<Float?>(null) }
+    val fpsMeter = remember { FpsMeter { measuredFps = it } }
+
+    // Spolning: ◀/▶ flyttar en markör med förhandsbild; hoppet görs när man släpper (eller trycker OK).
+    var scrubTarget by remember { mutableStateOf<Long?>(null) }
+    val thumbs = remember(item.partId, item.hasPreviews) {
+        val partId = item.partId
+        if (item.hasPreviews && partId != null) PreviewThumbnails(context, vm.plex, partId) else null
+    }
+
     // Manuell undertextsynk: förskjutning per undertext och den synkade kopian i cachen.
     var syncTarget by remember { mutableStateOf<PlexStream?>(null) }
     val subOffsets = remember { mutableStateMapOf<Long, Long>() }
@@ -441,6 +460,18 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         if (exo.playbackState == Player.STATE_ENDED) vm.back()
     }
 
+    fun scrubBy(deltaMs: Long) {
+        val base = scrubTarget ?: exo.currentPosition
+        val max = if (exo.duration > 0) exo.duration - 2_000 else Long.MAX_VALUE
+        scrubTarget = (base + deltaMs).coerceIn(0L, max.coerceAtLeast(0L))
+    }
+
+    fun commitScrub() {
+        val target = scrubTarget ?: return
+        scrubTarget = null
+        exo.seekTo(target)
+    }
+
     DisposableEffect(exo) {
         val listener = object : Player.Listener {
             override fun onPlayerError(e: PlaybackException) {
@@ -490,8 +521,11 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
             }
         }
         exo.addListener(listener)
+        exo.setVideoFrameMetadataListener(fpsMeter)
         onDispose {
             exo.removeListener(listener)
+            exo.clearVideoFrameMetadataListener(fpsMeter)
+            DisplayModes.release()
             val pos = exo.currentPosition
             val dur = if (exo.duration > 0) exo.duration else item.durationMs
             val transcodeSession = if (transcoding) session else null
@@ -542,6 +576,16 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         }
         item = meta
         startAt = if (request.fromStart) 0L else meta.viewOffsetMs
+        // Byt bildfrekvens innan bilden startar, så att det svarta bytet inte syns mitt i.
+        val fps = meta.streams.firstOrNull { it.type == 1 }?.frameRate
+        if (fps != null && fps > 0f) {
+            fpsHandled = true
+            if (DisplayModes.needsSwitch(fps)) {
+                switchingMode = true
+                DisplayModes.switchTo(fps)
+                switchingMode = false
+            }
+        }
         applyTrackPreferences(exo, meta)
         if (!loadDirect(startAt)) switchToTranscode(startAt)
         started = true
@@ -577,6 +621,46 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
             ticks++
             delay(500)
         }
+    }
+
+    // Plex visste inte bildfrekvensen: byt efter mätningen, med pausad bild under bytet.
+    LaunchedEffect(measuredFps) {
+        val fps = measuredFps ?: return@LaunchedEffect
+        if (fpsHandled) return@LaunchedEffect
+        fpsHandled = true
+        if (DisplayModes.needsSwitch(fps)) {
+            val wasPlaying = exo.playWhenReady
+            exo.pause()
+            switchingMode = true
+            DisplayModes.switchTo(fps)
+            switchingMode = false
+            if (wasPlaying) exo.play()
+        }
+    }
+
+    // Hoppa när man har slutat trycka en stund.
+    LaunchedEffect(scrubTarget) {
+        if (scrubTarget == null) return@LaunchedEffect
+        delay(1_000)
+        commitScrub()
+    }
+
+    DisposableEffect(thumbs) {
+        onDispose { thumbs?.close() }
+    }
+
+    // Börja hämta förhandsbilderna i bakgrunden när uppspelningen kommit igång.
+    LaunchedEffect(thumbs) {
+        val t = thumbs ?: return@LaunchedEffect
+        delay(8_000)
+        runCatching { t.frame(exo.currentPosition) }
+    }
+
+    val previewKey = scrubTarget?.let { it / 2_000 }
+    val preview by produceState<ImageBitmap?>(null, previewKey) {
+        val target = scrubTarget
+        val t = thumbs
+        value = if (target == null || t == null) null else runCatching { t.frame(target) }.getOrNull() ?: value
     }
 
     // Nedräkning till nästa avsnitt.
@@ -615,6 +699,8 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         }
     }
 
+    BackHandler(enabled = scrubTarget != null && !panelOpen) { scrubTarget = null }
+
     BackHandler(enabled = panelOpen || cardVisible) {
         when {
             panel == VodPanel.SEARCH || panel == VodPanel.SYNC -> panel = VodPanel.TRACKS
@@ -637,6 +723,10 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                 if (native.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
                 val code = native.keyCode
                 val handled = when {
+                    isOk(code) && scrubTarget != null -> {
+                        commitScrub()
+                        true
+                    }
                     isOk(code) && introActive && intro != null -> {
                         exo.seekTo(intro.endMs)
                         true
@@ -655,15 +745,11 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                     }
                     code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_MEDIA_REWIND -> {
                         // Håll inne för att spola snabbare.
-                        val step = if (native.repeatCount > 10) 60_000 else 10_000
-                        exo.seekTo((exo.currentPosition - step).coerceAtLeast(0))
+                        scrubBy(if (native.repeatCount > 10) -60_000L else -10_000L)
                         true
                     }
                     code == KeyEvent.KEYCODE_DPAD_RIGHT || code == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                        val step = if (native.repeatCount > 10) 120_000 else 30_000
-                        val target = exo.currentPosition + step
-                        val max = if (exo.duration > 0) exo.duration - 2_000 else target
-                        exo.seekTo(minOf(target, max))
+                        scrubBy(if (native.repeatCount > 10) 120_000L else 30_000L)
                         true
                     }
                     code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_CAPTIONS -> {
@@ -695,10 +781,13 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     ) {
         VideoSurface(exo, vm.videoScale)
         if (!started) MessageBox("Startar…")
-        if ((overlayVisible || !playing) && !panelOpen && !cardVisible) {
+        if (switchingMode) MessageBox("Anpassar bildfrekvensen…")
+        if ((overlayVisible || !playing || scrubTarget != null) && !panelOpen && !cardVisible) {
             VodOverlay(
                 title = item.displayTitle,
                 subtitle = item.subtitle,
+                scrubTarget = scrubTarget,
+                preview = preview,
                 position = position,
                 duration = duration,
                 playing = playing,
@@ -928,6 +1017,8 @@ private fun Chip(text: String, modifier: Modifier = Modifier) {
 private fun VodOverlay(
     title: String,
     subtitle: String?,
+    scrubTarget: Long?,
+    preview: ImageBitmap?,
     position: Long,
     duration: Long,
     playing: Boolean,
@@ -935,7 +1026,8 @@ private fun VodOverlay(
     sleep: String?,
     modifier: Modifier = Modifier,
 ) {
-    val fraction = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
+    val shown = scrubTarget ?: position
+    val fraction = if (duration > 0) (shown.toFloat() / duration).coerceIn(0f, 1f) else 0f
     Column(
         modifier
             .fillMaxWidth()
@@ -947,6 +1039,44 @@ private fun VodOverlay(
             Text(subtitle, color = JptvColors.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Spacer(Modifier.height(14.dp))
+        if (scrubTarget != null) {
+            // Förhandsbild och tid ovanför markören på tidslinjen.
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val bubble = if (preview != null) 256.dp else 180.dp
+                val raw = maxWidth * fraction - bubble / 2
+                val x = when {
+                    raw < 0.dp -> 0.dp
+                    raw > maxWidth - bubble -> maxWidth - bubble
+                    else -> raw
+                }
+                Column(
+                    Modifier
+                        .offset(x = x)
+                        .width(bubble),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    if (preview != null) {
+                        Image(
+                            bitmap = preview,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .width(bubble)
+                                .height(144.dp)
+                                .background(Color.Black, MaterialTheme.shapes.small),
+                        )
+                        Spacer(Modifier.height(6.dp))
+                    }
+                    val delta = scrubTarget - position
+                    Text(
+                        "${formatTime(scrubTarget)}  (${if (delta >= 0) "+" else "−"}${formatTime(kotlin.math.abs(delta))})",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = JptvColors.Accent,
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
         Box(
             Modifier
                 .fillMaxWidth()
@@ -982,7 +1112,8 @@ private fun VodOverlay(
         }
         Spacer(Modifier.height(6.dp))
         Text(
-            "OK paus · ◀ −10 s · ▶ +30 s (håll för snabbare) · ▲ ljud & undertexter · ▼ sovtimer, bild & info",
+            if (scrubTarget != null) "Släpp för att hoppa · OK hoppa direkt · Tillbaka avbryt"
+            else "OK paus · ◀ −10 s · ▶ +30 s (håll för snabbare) · ▲ ljud & undertexter · ▼ sovtimer, bild & info",
             color = JptvColors.TextDim,
             style = MaterialTheme.typography.bodySmall,
         )
@@ -1570,6 +1701,9 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
     /** Kanalen som faktiskt skickats till spelaren (kan släpa efter vid snabb zappning). */
     var playingKey by remember { mutableStateOf<String?>(null) }
     var recordedKey by remember { mutableStateOf<String?>(null) }
+    // Automatisk bildfrekvens för live: mäts på varje ny kanal; byter bara om kanalen kräver ett annat läge.
+    var liveFps by remember { mutableStateOf<Float?>(null) }
+    val liveFpsMeter = remember { FpsMeter { liveFps = it } }
     var retries by remember { mutableIntStateOf(0) }
     var listOpen by remember { mutableStateOf(false) }
     var optionsOpen by remember { mutableStateOf(false) }
@@ -1652,10 +1786,18 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
             }
         }
         exo.addListener(listener)
+        exo.setVideoFrameMetadataListener(liveFpsMeter)
         onDispose {
             exo.removeListener(listener)
+            exo.clearVideoFrameMetadataListener(liveFpsMeter)
+            DisplayModes.release()
             exo.release()
         }
+    }
+
+    LaunchedEffect(liveFps) {
+        val fps = liveFps ?: return@LaunchedEffect
+        if (DisplayModes.needsSwitch(fps)) DisplayModes.switchTo(fps)
     }
 
     // Hem-knappen: stoppa strömmen (den tar en anslutning hos leverantören), starta igen vid återkomst.
@@ -1684,6 +1826,7 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
         if (!firstTune) delay(350)
         firstTune = false
         playingKey = channel.key
+        liveFpsMeter.reset()
         exo.setMediaSource(liveSource(channel))
         exo.prepare()
         exo.play()

@@ -102,7 +102,7 @@ fun HomeScreen(vm: AppViewModel) {
                 Spacer(Modifier.height(16.dp))
             }
 
-            FocusedInfo(focusedItem)
+            FocusedInfo(vm, focusedItem)
 
             val error = vm.homeError
             when {
@@ -156,16 +156,38 @@ private fun homeKey(row: String, id: String) = "$row|$id"
 
 /** Titel och handling för kortet som har fokus, ovanför raderna. */
 @Composable
-private fun FocusedInfo(item: PlexItem?) {
+private fun FocusedInfo(vm: AppViewModel, item: PlexItem?) {
+    // Logotypen hämtas en kort stund efter att fokus stannat, så att snabb bläddring inte ger en massa anrop.
+    var logo by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(item?.ratingKey) {
+        logo = item?.logo
+        if (item != null && logo == null && item.showKey != null) {
+            kotlinx.coroutines.delay(300)
+            logo = vm.showLogo(item)
+        }
+    }
     Column(
         Modifier
-            .height(96.dp)
+            .height(112.dp)
             .width(820.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         if (item != null) {
-            Text(item.displayTitle, style = MaterialTheme.typography.headlineSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            val line = listOfNotNull(item.subtitle, item.summary).joinToString("  ·  ")
-            Text(line, color = JptvColors.TextDim, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            TitleLogo(
+                logoUrl = vm.plex.rawImageUrl(logo),
+                title = item.displayTitle,
+                maxHeight = 48.dp,
+                maxWidth = 320.dp,
+                textStyle = MaterialTheme.typography.headlineSmall,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Badges(listOfNotNull(vm.imdbText(item)) + item.badges)
+                item.subtitle?.let {
+                    Spacer(Modifier.width(12.dp))
+                    Text(it, color = JptvColors.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            item.summary?.let { Text(it, color = JptvColors.TextDim, maxLines = 2, overflow = TextOverflow.Ellipsis) }
         }
     }
 }
@@ -242,7 +264,7 @@ private fun HomeRows(
                         val key = homeKey(row.title, item.ratingKey)
                         PosterCard(
                             title = item.displayTitle,
-                            subtitle = item.subtitle,
+                            subtitle = vm.posterSubtitle(item),
                             imageUrl = vm.plex.imageUrl(item.thumb),
                             progress = item.progress,
                             watched = item.watched,

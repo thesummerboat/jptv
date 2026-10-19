@@ -261,7 +261,9 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
 
     private suspend fun items(path: String): List<PlexItem> {
         val s = srv()
-        val mc = getJson("${s.uri}$path", s.token).getJSONObject("MediaContainer")
+        // includeGuids: IMDb-id för varje titel, så att IMDb-betyget kan visas.
+        val sep = if (path.contains('?')) '&' else '?'
+        val mc = getJson("${s.uri}$path${sep}includeGuids=1", s.token).getJSONObject("MediaContainer")
         // Långa serier och stora bibliotek: tolka utanför huvudtråden.
         return withContext(Dispatchers.Default) { metadataArray(mc) }
     }
@@ -284,7 +286,7 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
     suspend fun search(query: String): List<PlexSearchHub> {
         val s = srv()
         val q = URLEncoder.encode(query, "UTF-8")
-        val mc = getJson("${s.uri}/hubs/search?query=$q&limit=20&includeCollections=0", s.token)
+        val mc = getJson("${s.uri}/hubs/search?query=$q&limit=20&includeCollections=0&includeGuids=1", s.token)
             .getJSONObject("MediaContainer")
         val hubs = mc.optJSONArray("Hub") ?: return emptyList()
         return (0 until hubs.length()).mapNotNull { i ->
@@ -370,6 +372,12 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
                 title = s.optStringOrNull("extendedDisplayTitle") ?: s.optStringOrNull("displayTitle") ?: "Spår ${i + 1}",
                 selected = s.optBoolean("selected"),
                 key = s.optStringOrNull("key"),
+                frameRate = s.optDoubleOrNull("frameRate")?.toFloat(),
+                doviProfile = s.optIntOrNull("DOVIProfile"),
+                doviPresent = s.optBoolean("DOVIPresent", false),
+                colorTrc = s.optStringOrNull("colorTrc"),
+                height = s.optIntOrNull("height"),
+                channels = s.optIntOrNull("channels"),
             )
         }
         val markerArr = o.optJSONArray("Marker")
@@ -383,6 +391,18 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
         val genres = if (genreArr == null) emptyList() else (0 until genreArr.length()).mapNotNull { i ->
             genreArr.optJSONObject(i)?.optStringOrNull("tag")
         }
+        val imageArr = o.optJSONArray("Image")
+        val logo = if (imageArr == null) null else (0 until imageArr.length())
+            .mapNotNull { imageArr.optJSONObject(it) }
+            .firstOrNull { it.optString("type") == "clearLogo" }
+            ?.optStringOrNull("url")
+        // IMDb-id: nya agenter lägger det i Guid-listan ("imdb://tt0111161"), gamla i guid-adressen.
+        val guidArr = o.optJSONArray("Guid")
+        val guids = buildList {
+            if (guidArr != null) for (i in 0 until guidArr.length()) guidArr.optJSONObject(i)?.optStringOrNull("id")?.let { add(it) }
+            o.optStringOrNull("guid")?.let { add(it) }
+        }
+        val imdbId = guids.firstNotNullOfOrNull { imdbRegex.find(it)?.value }
         val showKey = o.optStringOrNull("grandparentRatingKey")
             ?: if (type == "season") o.optStringOrNull("parentRatingKey") else null
         return PlexItem(
@@ -411,7 +431,34 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
             contentRating = o.optStringOrNull("contentRating"),
             genres = genres,
             childCount = o.optIntOrNull("leafCount") ?: o.optIntOrNull("childCount"),
+            logo = logo,
+            ratings = parseRatings(o),
+            audioChannels = media?.optIntOrNull("audioChannels"),
+            hasPreviews = part?.optStringOrNull("indexes") == "sd",
+            imdbId = imdbId,
         )
+    }
+
+    /** Betyg: Plex nyare Rating-lista, annars de äldre fälten rating/audienceRating. */
+    private fun parseRatings(o: JSONObject): List<PlexRating> {
+        val raw = mutableListOf<Pair<String, Double>>()
+        val arr = o.optJSONArray("Rating")
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val r = arr.optJSONObject(i) ?: continue
+                val image = r.optStringOrNull("image") ?: continue
+                val value = r.optDoubleOrNull("value") ?: continue
+                raw += image to value
+            }
+        } else {
+            val critic = o.optDoubleOrNull("rating")
+            val criticImage = o.optStringOrNull("ratingImage")
+            if (critic != null && criticImage != null) raw += criticImage to critic
+            val audience = o.optDoubleOrNull("audienceRating")
+            val audienceImage = o.optStringOrNull("audienceRatingImage")
+            if (audience != null && audienceImage != null) raw += audienceImage to audience
+        }
+        return RatingFormat.format(raw)
     }
 
     /** Full information om en titel: spår, markörer för intro/eftertexter och aktuell position. */
@@ -455,6 +502,43 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
     }
 
     // ---------- Bilder och uppspelning ----------
+
+    /** Bilden som den är, utan omskalning (för logotyper med genomskinlig bakgrund). */
+    fun rawImageUrl(path: String?): String? {
+        val s = server ?: return null
+        if (path.isNullOrBlank()) return null
+        val sep = if (path.contains('?')) '&' else '?'
+        return "${s.uri}$path${sep}X-Plex-Token=${s.token}"
+    }
+
+    /** Hämtar en fil från servern, t.ex. en förhandsbild. null om servern svarar med fel. */
+    suspend fun fetchBytes(path: String): ByteArray? {
+        val url = rawImageUrl(path) ?: return null
+        val req = Request.Builder().url(url).plexHeaders(server?.token).get().build()
+        val resp = http.newCall(req).await()
+        try {
+            return withContext(Dispatchers.IO) { if (resp.isSuccessful) resp.body?.bytes() else null }
+        } finally {
+            resp.close()
+        }
+    }
+
+    /** Laddar ner en (stor) fil från servern direkt till disk. false om servern svarar med fel. */
+    suspend fun downloadToFile(path: String, target: java.io.File): Boolean {
+        val url = rawImageUrl(path) ?: return false
+        val req = Request.Builder().url(url).plexHeaders(server?.token).get().build()
+        val resp = http.newCall(req).await()
+        try {
+            return withContext(Dispatchers.IO) {
+                if (!resp.isSuccessful) return@withContext false
+                val body = resp.body ?: return@withContext false
+                body.byteStream().use { input -> target.outputStream().use { input.copyTo(it, 64 * 1024) } }
+                true
+            }
+        } finally {
+            resp.close()
+        }
+    }
 
     /** Låter servern skala ner affischen, så att svagare TV-apparater slipper stora bilder. */
     fun imageUrl(path: String?, width: Int = 300, height: Int = 450): String? {
@@ -549,6 +633,7 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
 
     companion object {
         const val PRODUCT = "JPTV"
+        private val imdbRegex = Regex("""tt\d{5,10}""")
     }
 }
 
@@ -559,6 +644,9 @@ private fun JSONObject.optStringOrNull(key: String): String? =
 
 private fun JSONObject.optIntOrNull(key: String): Int? =
     if (has(key) && !isNull(key)) optInt(key) else null
+
+private fun JSONObject.optDoubleOrNull(key: String): Double? =
+    if (has(key) && !isNull(key)) optDouble(key).takeIf { !it.isNaN() } else null
 
 private fun JSONObject.optLongOrNull(key: String): Long? =
     if (has(key) && !isNull(key)) optLong(key) else null
