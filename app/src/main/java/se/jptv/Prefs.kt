@@ -83,6 +83,11 @@ class Prefs(context: Context) {
         get() = sp.getInt("nav_sound", 1)
         set(value) { sp.edit().putInt("nav_sound", value).apply() }
 
+    /** Tunnlad uppspelning: 0 = auto (på för TV med ett skärmläge), 1 = på, 2 = av. */
+    var tunneling: Int
+        get() = sp.getInt("tunneling", 0)
+        set(value) { sp.edit().putInt("tunneling", value).apply() }
+
     /** Byt TV:ns bildfrekvens efter filmen/kanalen. */
     var autoFrameRate: Boolean
         get() = sp.getBoolean("auto_frame_rate", true)

@@ -70,6 +70,7 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -120,14 +121,21 @@ fun PlayerScreen(vm: AppViewModel, request: PlayRequest) {
     }
 }
 
+/**
+ * tunneling: bilden går direkt till TV:ns videochip, som själv sköter bildtakten mot panelen.
+ * Ger jämnare 24p på TV-apparater med inbyggd app (t.ex. TCL), där appen inte kan byta skärmläge.
+ */
 @OptIn(UnstableApi::class)
 @Composable
-private fun rememberExoPlayer(): ExoPlayer {
+private fun rememberExoPlayer(tunneling: Boolean = false): ExoPlayer {
     val context = LocalContext.current
     return remember {
         // Decoder fallback: om hårdvaruavkodaren vägrar provas nästa, vilket hjälper på svagare TV-apparater.
         val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
-        ExoPlayer.Builder(context, renderers).build().apply {
+        val selector = DefaultTrackSelector(context).apply {
+            setParameters(buildUponParameters().setTunnelingEnabled(tunneling))
+        }
+        ExoPlayer.Builder(context, renderers).setTrackSelector(selector).build().apply {
             setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
@@ -239,7 +247,7 @@ private enum class VodPanel { NONE, TRACKS, SEARCH, SYNC, OPTIONS }
 @Composable
 private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     val context = LocalContext.current
-    val exo = rememberExoPlayer()
+    val exo = rememberExoPlayer(tunneling = vm.useTunneling())
     var session by remember { mutableStateOf(UUID.randomUUID().toString()) }
     val scope = rememberCoroutineScope()
     val focus = remember { FocusRequester() }
@@ -1645,6 +1653,8 @@ private fun streamInfoLines(exo: ExoPlayer, mode: String, contentFps: Float?): L
     DisplayModes.currentModeText()?.let { add("Skärm: $it") }
     DisplayModes.lastDecision?.let { add("Bildfrekvens: $it") }
     DisplayModes.modesSummary()?.let { add("TV:ns lägen: $it") }
+    val tunneled = (exo.trackSelector as? DefaultTrackSelector)?.parameters?.tunnelingEnabled == true
+    add("Tunnlad uppspelning: " + if (tunneled) "på" else "av")
     add(String.format(Locale.US, "Buffert: %.1f s", exo.totalBufferedDuration / 1000f))
     exo.videoDecoderCounters?.let { add("Tappade bildrutor: ${it.droppedBufferCount}") }
 }
@@ -1707,7 +1717,7 @@ private fun StillWatchingCard(onContinue: () -> Unit, onStop: () -> Unit, modifi
 @OptIn(UnstableApi::class)
 @Composable
 private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
-    val exo = rememberExoPlayer()
+    val exo = rememberExoPlayer(tunneling = vm.useTunneling())
     val focus = remember { FocusRequester() }
 
     var channels by remember { mutableStateOf(request.channels) }
