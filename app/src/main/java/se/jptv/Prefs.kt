@@ -55,6 +55,16 @@ class Prefs(context: Context) {
         get() = sp.getString("recents", null)?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
         set(value) { sp.edit().putString("recents", value.joinToString("\n")).apply() }
 
+    /** Plex-bibliotek som inte ska synas i appen (t.ex. ett 4K-bibliotek). */
+    var hiddenSections: Set<String>
+        get() = sp.getStringSet("hidden_sections", emptySet())?.toSet() ?: emptySet()
+        set(value) { sp.edit().putStringSet("hidden_sections", value).apply() }
+
+    /** Favoritbibliotek: först i menyn och med flest rader på hemskärmen. */
+    var favoriteSections: Set<String>
+        get() = sp.getStringSet("favorite_sections", emptySet())?.toSet() ?: emptySet()
+        set(value) { sp.edit().putStringSet("favorite_sections", value).apply() }
+
     var hiddenGroups: Set<String>
         get() = sp.getStringSet("hidden_groups", emptySet())?.toSet() ?: emptySet()
         set(value) { sp.edit().putStringSet("hidden_groups", value).apply() }

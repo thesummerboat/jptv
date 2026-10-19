@@ -9,9 +9,12 @@ Egen TV-app för Android TV / Google TV (Nvidia Shield, TCL m.fl.) som samlar Pl
 | Del | Vad den gör |
 | --- | --- |
 | Plex-inloggning | Appen visar en kod, du skriver in den på [plex.tv/link](https://plex.tv/link). Servern hittas automatiskt, lokal adress först. |
-| Hemskärm | Live nu, Fortsätt titta och nyligen tillagt. Håll inne OK på en titel för meny (detaljer, markera sedd, ta bort från Fortsätt titta, gå till serien). Klocka i hörnet. |
-| Bibliotek | Rutnät med sortering (A–Ö, tillagt, år, betyg) och filter för osett. Serier visas med säsongsflikar; hela säsonger kan markeras som sedda. **Skanna** ber Plex leta efter nya filer (ett bibliotek, eller alla under Inställningar) och laddar om när servern är klar. |
+| Hemskärm | Live nu, Fortsätt titta, Nytt per bibliotek, **Topplista IMDb**, Plex egna rader (högst betyg, nyligen släppta, återupptäck, mer i genre …) och **Bläddra efter genre**. Håll inne OK på en titel för meny. Logotyp, märken och IMDb-betyg för titeln som har fokus. |
+| Bibliotek | Rutnät med **genre** eller **samlingar**, sortering (A–Ö, nytt, år, IMDb) och filter för osett. Bibliotek kan döljas (t.ex. 4K) eller bli ★ favoriter under Inställningar. Serier visas med säsongsflikar; hela säsonger kan markeras som sedda. **Skanna** ber Plex leta efter nya filer (ett bibliotek, eller alla under Inställningar) och laddar om när servern är klar. |
 | Sök | Söker samtidigt i Plex, bland kanalerna och i TV-guiden. |
+| Betyg och märken | IMDb-betyg på filmer, serier och avsnitt (från Plex eller IMDb:s öppna betygsfil, hämtas en gång i veckan). RT och TMDB när Plex har dem. Märken för 4K, Dolby Vision, HDR10, Atmos och 5.1/7.1. Plex logotyper i stället för titeltext. |
+| Trailers | ▶ Trailer på detaljsidan och i serievyn när Plex har en (lokal fil eller Plex egna med Plex Pass). Påverkar inte Fortsätt titta. |
+| Bild | **Automatisk bildfrekvens**: TV:n byter till 23,976/24/25/50/59,94 Hz efter filmen eller kanalen. Spolning med förhandsbild när Plex har gjort index-bilder. |
 | Uppspelning | **Direct Play** först. Klarar TV:n inte filen – t.ex. DTS-ljud på TCL – byter appen automatiskt till Plex-omkodning (H.264 + AAC). Hoppa över intro, nästa avsnitt vid eftertexterna och "Tittar du fortfarande?" efter tre avsnitt i rad. |
 | Ljud och undertexter | Valet sparas i Plex och per serie, så nästa avsnitt startar med samma språk. **Sök undertexter** hämtar från internet via din Plex-server (OpenSubtitles m.fl.). Externa .srt kan synkas ±0,1 s åt gången. |
 | Alternativ | Sovtimer (15–120 min eller "när det här är slut"), bildformat (anpassa/fyll/zooma) och teknisk info (upplösning, codec, HDR, bithastighet, buffert). |
@@ -24,7 +27,7 @@ Egen TV-app för Android TV / Google TV (Nvidia Shield, TCL m.fl.) som samlar Pl
 | --- | --- | --- |
 | OK | Paus / spela (hoppar över intro när det visas) | Kanallista (eller försök igen vid fel) |
 | Håll inne OK | – | Alternativ: favorit, ljud, undertext, sovtimer, bildformat, info |
-| ◀ / ▶ | −10 s / +30 s (håll inne för snabbare) | Förra kanalen / kanalinfo |
+| ◀ / ▶ | Spola −10 s / +30 s med förhandsbild, hoppar när du släpper (håll inne för snabbare) | Förra kanalen / kanalinfo |
 | ▲ | Ljud och undertexter | Nästa kanal |
 | ▼ | Alternativ: sovtimer, bildformat, info | Föregående kanal |
 | Siffror | – | Kanalnummer |
@@ -59,7 +62,6 @@ Kotlin · Jetpack Compose for TV · Media3/ExoPlayer · OkHttp · Coil. Plex-API
 
 ## Nästa steg
 
-- Förhandsbilder när man spolar (Plex index-bilder)
 - Påminnelser från TV-guiden, timeshift/catch-up där leverantören stöder det
 - Flera profiler, multiview
 - Automatisk undertextsynk
