@@ -34,13 +34,15 @@ import androidx.tv.material3.Button
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.OutlinedButton
 import androidx.tv.material3.Text
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import se.jptv.AppViewModel
 import se.jptv.BuildConfig
+import se.jptv.iptv.IptvUrls
 
 @Composable
 fun SettingsScreen(vm: AppViewModel) {
     var url by remember { mutableStateOf(vm.prefs.m3uUrl ?: "") }
-    var fieldFocused by remember { mutableStateOf(false) }
+    var epgUrl by remember { mutableStateOf(vm.prefs.epgUrl ?: "") }
     val fieldFocus = remember { FocusRequester() }
     val loadFocus = remember { FocusRequester() }
     // Tomt fält: börja i fältet. Annars på knappen, så att tangentbordet inte dyker upp i onödan.
@@ -61,24 +63,11 @@ fun SettingsScreen(vm: AppViewModel) {
             "Adress till din M3U-lista. Fungerar även med Xtream-länkar (get.php?…&type=m3u_plus).",
             color = JptvColors.TextDim,
         )
-        BasicTextField(
+        UrlField(
             value = url,
             onValueChange = { url = it },
-            singleLine = true,
-            textStyle = TextStyle(color = JptvColors.Text, fontSize = 20.sp),
-            cursorBrush = SolidColor(JptvColors.Accent),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = { vm.loadPlaylist(url) }),
-            modifier = Modifier
-                .width(900.dp)
-                .focusRequester(fieldFocus)
-                .onFocusChanged { fieldFocused = it.isFocused }
-                .border(
-                    width = 2.dp,
-                    color = if (fieldFocused) JptvColors.Accent else JptvColors.SurfaceHigh,
-                    shape = MaterialTheme.shapes.small,
-                )
-                .padding(horizontal = 16.dp, vertical = 14.dp),
+            onDone = { vm.loadPlaylist(url) },
+            modifier = Modifier.focusRequester(fieldFocus),
         )
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(
@@ -95,6 +84,29 @@ fun SettingsScreen(vm: AppViewModel) {
         val playlist = vm.playlist
         Text(
             vm.iptvStatus ?: if (playlist != null) "${playlist.channels.size} kanaler i ${playlist.groups.size} grupper" else "Ingen spellista laddad.",
+            color = JptvColors.TextDim,
+        )
+
+        Spacer(Modifier.height(8.dp))
+        Text("TV-guide (XMLTV)", style = MaterialTheme.typography.titleMedium)
+        val guessed = remember(vm.playlist) { IptvUrls.guessEpgUrl(vm.prefs.m3uUrl, vm.playlist) }
+        Text(
+            if (guessed != null) {
+                "Lämna tomt för att använda guiden från din leverantör (${guessed.toHttpUrlOrNull()?.host ?: "hittad automatiskt"})."
+            } else {
+                "Klistra in adressen till leverantörens XMLTV-guide (.xml eller .xml.gz)."
+            },
+            color = JptvColors.TextDim,
+        )
+        UrlField(value = epgUrl, onValueChange = { epgUrl = it }, onDone = { vm.setEpgUrl(epgUrl) })
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Button(onClick = { vm.setEpgUrl(epgUrl) }, enabled = !vm.epgLoading && vm.playlist != null) {
+                Text(if (vm.epgLoading) "Hämtar…" else "Spara och hämta guide")
+            }
+        }
+        val epg = vm.epg
+        Text(
+            vm.epgStatus ?: if (epg != null) "Guide för ${epg.channelCount} kanaler, hämtad ${clock(epg.loadedAt)}." else "Ingen guide laddad.",
             color = JptvColors.TextDim,
         )
 
@@ -128,6 +140,34 @@ fun SettingsScreen(vm: AppViewModel) {
         Text("JPTV ${BuildConfig.VERSION_NAME}", color = JptvColors.TextDim, style = MaterialTheme.typography.bodySmall)
     }
     LaunchedEffect(Unit) {
-        runCatching { if (startInField) fieldFocus.requestFocus() else loadFocus.requestFocus() }
+        if (startInField) fieldFocus.requestWhenReady() else loadFocus.requestWhenReady()
     }
+}
+
+@Composable
+private fun UrlField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    onDone: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var focused by remember { mutableStateOf(false) }
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        singleLine = true,
+        textStyle = TextStyle(color = JptvColors.Text, fontSize = 20.sp),
+        cursorBrush = SolidColor(JptvColors.Accent),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = { onDone() }),
+        modifier = modifier
+            .width(900.dp)
+            .onFocusChanged { focused = it.isFocused }
+            .border(
+                width = 2.dp,
+                color = if (focused) JptvColors.Accent else JptvColors.SurfaceHigh,
+                shape = MaterialTheme.shapes.small,
+            )
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+    )
 }

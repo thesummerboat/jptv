@@ -65,6 +65,35 @@ class M3uParserTest {
     }
 
     @Test
+    fun numbersChannelsInListOrder() {
+        val p = M3uParser.parse(sample)
+        assertEquals(listOf(1, 2, 3), p.channels.map { it.number })
+        assertEquals("C More Hockey", p.byNumber(2)?.name)
+        assertEquals("SVT1", p.channels[0].tvgName)
+    }
+
+    @Test
+    fun emptyGroupTitleFallsBackToExtgrp() {
+        val p = M3uParser.parse("#EXTM3U\n#EXTINF:-1 group-title=\"\",Kanal\n#EXTGRP:Sport\nhttp://x/1.ts\n")
+        assertEquals("Sport", p.channels[0].group)
+    }
+
+    @Test
+    fun kodiStyleHeadersAreSplitFromUrl() {
+        val p = M3uParser.parse("#EXTINF:-1,Kanal\nhttp://x/live.m3u8|User-Agent=Mozilla/5.0&Referer=http://ref.example/\n")
+        val ch = p.channels.single()
+        assertEquals("http://x/live.m3u8", ch.url)
+        assertEquals("Mozilla/5.0", ch.userAgent)
+        assertEquals("http://ref.example/", ch.referrer)
+    }
+
+    @Test
+    fun parsesFromLineSequence() {
+        val p = M3uParser.parse(sample.lineSequence())
+        assertEquals(3, p.channels.size)
+    }
+
+    @Test
     fun missingGroupFallsBackToOvrigt() {
         val p = M3uParser.parse("#EXTM3U\n#EXTINF:-1 tvg-name=\"Kanal X\",\nhttp://x/1.ts\n")
         assertEquals(1, p.channels.size)

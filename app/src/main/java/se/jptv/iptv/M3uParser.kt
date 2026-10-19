@@ -8,11 +8,21 @@ data class Channel(
     val tvgId: String?,
     val userAgent: String?,
     val referrer: String?,
-)
+    /** Kanalnummer = plats i hela listan (1, 2, 3 …). Används för sifferknapparna på fjärren. */
+    val number: Int = 0,
+    val tvgName: String? = null,
+) {
+    /** Stabil nyckel för favoriter och senaste kanaler. */
+    val key: String get() = url
+}
 
 data class Playlist(val channels: List<Channel>, val epgUrl: String?) {
     /** Grupperna i den ordning de först förekommer i listan. */
     val groups: List<String> by lazy { channels.map { it.group }.distinct() }
+
+    val byKey: Map<String, Channel> by lazy { channels.associateBy { it.key } }
+
+    fun byNumber(number: Int): Channel? = channels.getOrNull(number - 1)
 }
 
 /**
@@ -24,7 +34,10 @@ object M3uParser {
     private val attrRegex = Regex("""([A-Za-z0-9_-]+)="([^"]*)"""")
     private val vodExtensions = setOf("mkv", "mp4", "avi", "mov", "wmv", "m4v")
 
-    fun parse(text: String, liveOnly: Boolean = true): Playlist {
+    fun parse(text: String, liveOnly: Boolean = true): Playlist = parse(text.lineSequence(), liveOnly)
+
+    /** Läser rad för rad, så att även listor på 100 MB går att läsa utan att hela filen ligger i minnet. */
+    fun parse(lines: Sequence<String>, liveOnly: Boolean = true): Playlist {
         val channels = ArrayList<Channel>()
         var epgUrl: String? = null
         var name: String? = null
@@ -33,7 +46,7 @@ object M3uParser {
         var userAgent: String? = null
         var referrer: String? = null
 
-        text.lineSequence().forEach { raw ->
+        lines.forEach { raw ->
             val line = raw.trim()
             when {
                 line.isEmpty() -> Unit
@@ -61,17 +74,29 @@ object M3uParser {
                 }
                 line.startsWith("#") -> Unit
                 else -> {
-                    val url = line
+                    // Kodi-format: "url|User-Agent=...&Referer=..." -> separata fält.
+                    val url = line.substringBefore('|')
+                    if (line.contains('|')) {
+                        for (part in line.substringAfter('|').split('&')) {
+                            val k = part.substringBefore('=').trim().lowercase()
+                            val v = part.substringAfter('=', "").trim()
+                            if (v.isEmpty()) continue
+                            if (k == "user-agent") userAgent = userAgent ?: v
+                            if (k == "referer" || k == "referrer") referrer = referrer ?: v
+                        }
+                    }
                     if (!liveOnly || isLive(url)) {
                         val n = name?.takeIf { it.isNotBlank() } ?: attrs["tvg-name"]?.takeIf { it.isNotBlank() } ?: url
                         channels += Channel(
                             name = n,
                             url = url,
-                            group = (attrs["group-title"] ?: extGroup)?.trim()?.takeIf { it.isNotBlank() } ?: "Övrigt",
+                            group = (attrs["group-title"]?.takeIf { it.isNotBlank() } ?: extGroup)?.trim()?.takeIf { it.isNotBlank() } ?: "Övrigt",
                             logo = attrs["tvg-logo"]?.takeIf { it.isNotBlank() },
                             tvgId = attrs["tvg-id"]?.takeIf { it.isNotBlank() },
                             userAgent = userAgent ?: attrs["user-agent"]?.takeIf { it.isNotBlank() },
                             referrer = referrer,
+                            number = channels.size + 1,
+                            tvgName = attrs["tvg-name"]?.takeIf { it.isNotBlank() },
                         )
                     }
                     name = null

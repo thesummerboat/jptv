@@ -103,7 +103,7 @@ class Updater(private val context: Context, private val http: OkHttpClient) {
     }
 
     /** Skickar APK:n till Androids installerare. Resultatet kommer till [InstallResultReceiver]. */
-    fun install(apk: File) {
+    suspend fun install(apk: File) = withContext(Dispatchers.IO) {
         val installer = context.packageManager.packageInstaller
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
             setAppPackageName(context.packageName)

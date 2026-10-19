@@ -8,6 +8,23 @@ data class PlexServer(val name: String, val uri: String, val token: String)
 
 data class PlexSection(val key: String, val title: String, val type: String)
 
+/** Ett spår i filen. type: 1 = video, 2 = ljud, 3 = undertext. */
+data class PlexStream(
+    val id: Long,
+    val type: Int,
+    val codec: String?,
+    val languageCode: String?,
+    val title: String,
+    val selected: Boolean,
+    /** Satt för externa undertexter (t.ex. en .srt bredvid filen) som hämtas separat. */
+    val key: String?,
+) {
+    val isExternalSubtitle: Boolean get() = type == 3 && key != null
+}
+
+/** Intro- och eftertextsmarkörer som Plex-servern har hittat. */
+data class PlexMarker(val type: String, val startMs: Long, val endMs: Long)
+
 data class PlexItem(
     val ratingKey: String,
     val type: String,
@@ -26,7 +43,28 @@ data class PlexItem(
     val videoCodec: String?,
     val audioCodec: String?,
     val resolution: String?,
+    /** Seriens ratingKey för avsnitt och säsonger. */
+    val showKey: String? = null,
+    val streams: List<PlexStream> = emptyList(),
+    val markers: List<PlexMarker> = emptyList(),
+    val contentRating: String? = null,
+    val genres: List<String> = emptyList(),
+    val childCount: Int? = null,
 ) {
+    val intro: PlexMarker? get() = markers.firstOrNull { it.type == "intro" }
+
+    val credits: PlexMarker? get() = markers.firstOrNull { it.type == "credits" }
+
+    /** En minimal serie att öppna avsnittslistan med, från ett avsnitt eller en säsong. */
+    fun showContainer(): PlexItem? {
+        val key = showKey ?: return null
+        return copy(
+            ratingKey = key, type = "show", title = showTitle ?: title, showTitle = null,
+            season = null, episode = null, summary = null, thumb = thumb, partKey = null,
+            streams = emptyList(), markers = emptyList(), viewOffsetMs = 0, durationMs = 0,
+        )
+    }
+
     val isPlayable: Boolean get() = type == "movie" || type == "episode"
 
     val isContainer: Boolean get() = type == "show" || type == "season"

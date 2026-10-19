@@ -24,6 +24,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.ExperimentalTvMaterial3Api
@@ -40,7 +41,7 @@ import se.jptv.plex.PlexSection
 @Composable
 fun SectionScreen(vm: AppViewModel, section: PlexSection) {
     val result by produceState<Result<List<PlexItem>>?>(initialValue = null, section.key) {
-        value = runCatching { vm.plex.all(section.key) }
+        value = runCatching { vm.sectionItems(section.key) }
     }
     val firstFocus = remember { FocusRequester() }
 
@@ -57,7 +58,13 @@ fun SectionScreen(vm: AppViewModel, section: PlexSection) {
             items == null -> MessageBox("Kunde inte hämta: ${result?.exceptionOrNull()?.message}")
             items.isEmpty() -> MessageBox("Biblioteket är tomt.")
             else -> {
+                val memoryKey = "section_${section.key}"
+                val remembered = remember { vm.focusKeys[memoryKey] }
+                val focusIndex = remember(items) {
+                    items.indexOfFirst { it.ratingKey == remembered }.coerceAtLeast(0)
+                }
                 LazyVerticalGrid(
+                    state = vm.gridState(memoryKey),
                     columns = GridCells.Adaptive(PosterWidth + 18.dp),
                     verticalArrangement = Arrangement.spacedBy(24.dp),
                     horizontalArrangement = Arrangement.spacedBy(18.dp),
@@ -71,11 +78,17 @@ fun SectionScreen(vm: AppViewModel, section: PlexSection) {
                             progress = item.progress,
                             watched = item.watched,
                             onClick = { vm.select(item) },
-                            modifier = if (i == 0) Modifier.focusRequester(firstFocus) else Modifier,
+                            modifier = Modifier
+                                .onFocusChanged { if (it.hasFocus) vm.focusKeys[memoryKey] = item.ratingKey }
+                                .then(if (i == focusIndex) Modifier.focusRequester(firstFocus) else Modifier),
                         )
                     }
                 }
-                LaunchedEffect(items) { runCatching { firstFocus.requestFocus() } }
+                LaunchedEffect(items) {
+                    val grid = vm.gridState(memoryKey)
+                    if (grid.layoutInfo.visibleItemsInfo.none { it.index == focusIndex }) grid.scrollToItem(focusIndex)
+                    firstFocus.requestWhenReady()
+                }
             }
         }
     }
@@ -107,32 +120,48 @@ fun EpisodesScreen(vm: AppViewModel, container: PlexItem) {
             episodes == null -> MessageBox("Kunde inte hämta: ${result?.exceptionOrNull()?.message}")
             episodes.isEmpty() -> MessageBox("Inga avsnitt.")
             else -> {
-                // Börja på första avsnittet som inte är sett.
-                val startIndex = episodes.indexOfFirst { !it.watched }.coerceAtLeast(0)
+                // Tillbaka till senast valda avsnitt, annars första som inte är sett.
+                val memoryKey = "episodes_${container.ratingKey}"
+                val remembered = remember { vm.focusKeys[memoryKey] }
+                val startIndex = remember(episodes) {
+                    episodes.indexOfFirst { it.ratingKey == remembered }.takeIf { it >= 0 }
+                        ?: episodes.indexOfFirst { !it.watched }.coerceAtLeast(0)
+                }
                 LazyColumn(
+                    state = vm.listState(memoryKey),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     contentPadding = PaddingValues(bottom = 48.dp),
                 ) {
                     itemsIndexed(episodes, key = { i, ep -> "${i}_${ep.ratingKey}" }) { i, ep ->
                         EpisodeRow(
                             episode = ep,
-                            onClick = { vm.open(Screen.Player(PlayRequest.Vod(ep))) },
-                            modifier = if (i == startIndex) Modifier.focusRequester(firstFocus) else Modifier,
+                            onClick = { vm.play(ep) },
+                            onLongClick = { vm.open(Screen.Details(ep)) },
+                            modifier = Modifier
+                                .onFocusChanged { if (it.hasFocus) vm.focusKeys[memoryKey] = ep.ratingKey }
+                                .then(if (i == startIndex) Modifier.focusRequester(firstFocus) else Modifier),
                         )
                     }
                 }
-                LaunchedEffect(episodes) { runCatching { firstFocus.requestFocus() } }
+                LaunchedEffect(episodes) {
+                    val list = vm.listState(memoryKey)
+                    if (list.layoutInfo.visibleItemsInfo.none { it.index == startIndex }) {
+                        list.scrollToItem((startIndex - 2).coerceAtLeast(0))
+                    }
+                    firstFocus.requestWhenReady()
+                }
             }
         }
     }
 }
 
 @Composable
-private fun EpisodeRow(episode: PlexItem, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun EpisodeRow(episode: PlexItem, onClick: () -> Unit, onLongClick: () -> Unit, modifier: Modifier = Modifier) {
     val code = if (episode.season != null && episode.episode != null) "S${episode.season}E${episode.episode}" else ""
     ListItem(
         selected = false,
         onClick = onClick,
+        onLongClick = onLongClick,
         modifier = modifier,
         headlineContent = {
             Text("$code  ${episode.title}".trim(), maxLines = 1, overflow = TextOverflow.Ellipsis)

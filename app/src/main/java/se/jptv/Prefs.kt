@@ -36,4 +36,22 @@ class Prefs(context: Context) {
     var lastChannelUrl: String?
         get() = sp.getString("last_channel_url", null)
         set(value) { sp.edit().putString("last_channel_url", value).apply() }
+
+    /** Egen guide-adress. Tom = gissas från spellistan. */
+    var epgUrl: String?
+        get() = sp.getString("epg_url", null)
+        set(value) { sp.edit().putString("epg_url", value).apply() }
+
+    var playlistLoadedAt: Long
+        get() = sp.getLong("playlist_loaded_at", 0L)
+        set(value) { sp.edit().putLong("playlist_loaded_at", value).apply() }
+
+    var favorites: Set<String>
+        get() = sp.getStringSet("favorites", emptySet())?.toSet() ?: emptySet()
+        set(value) { sp.edit().putStringSet("favorites", value).apply() }
+
+    /** Senast tittade kanaler, nyast först. */
+    var recents: List<String>
+        get() = sp.getString("recents", null)?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
+        set(value) { sp.edit().putString("recents", value.joinToString("\n")).apply() }
 }
