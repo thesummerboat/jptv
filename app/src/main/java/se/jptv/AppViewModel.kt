@@ -181,13 +181,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         prefs.heroTrailers = enabled
     }
 
-    var themeMusic by mutableStateOf(prefs.themeMusic)
+    /** Ledmotivets volym: 0 = av, 1 = lågt, 2 = mellan. */
+    var themeLevel by mutableStateOf(prefs.themeLevel)
         private set
 
-    fun changeThemeMusic(enabled: Boolean) {
-        themeMusic = enabled
-        prefs.themeMusic = enabled
-        if (!enabled) se.jptv.ui.ThemePlayer.stop(fade = true)
+    val themeMusic: Boolean get() = themeLevel > 0
+
+    fun cycleThemeLevel() {
+        val next = (themeLevel + 1) % 3
+        themeLevel = next
+        prefs.themeLevel = next
+        se.jptv.ui.ThemePlayer.level = next
+        if (next == 0) se.jptv.ui.ThemePlayer.stop(fade = true)
     }
 
     /** Trailer per film/serie (null = har ingen), så att samma titel inte frågas om igen. */
@@ -314,6 +319,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     init {
         se.jptv.player.DisplayModes.enabled = prefs.autoFrameRate
         se.jptv.ui.NavSounds.level = prefs.navSound
+        se.jptv.ui.ThemePlayer.level = prefs.themeLevel
     }
 
     var navSound by mutableStateOf(prefs.navSound)

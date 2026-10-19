@@ -44,7 +44,10 @@ import se.jptv.plex.PlexItem
  * seriesidan. Ett objekt i appen, så att tonen kan klinga av även efter att skärmen är borta.
  */
 object ThemePlayer {
-    private const val VOLUME = 0.4f
+    /** 1 = lågt, 2 = mellan (från Inställningar). */
+    var level: Int = 1
+
+    private val VOLUME: Float get() = if (level >= 2) 0.3f else 0.15f
 
     /** Vad ledmotivet gjorde senast, för Inställningar (felsökning). */
     var status by mutableStateOf<String?>(null)

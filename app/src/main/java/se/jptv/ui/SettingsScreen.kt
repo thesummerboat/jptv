@@ -213,8 +213,14 @@ fun SettingsScreen(vm: AppViewModel) {
             OutlinedButton(onClick = { vm.changeHeroTrailers(!vm.heroTrailers) }) {
                 Text(if (vm.heroTrailers) "Trailer på hemskärmen: PÅ" else "Trailer på hemskärmen: AV")
             }
-            OutlinedButton(onClick = { vm.changeThemeMusic(!vm.themeMusic) }) {
-                Text(if (vm.themeMusic) "Ledmotiv på seriesidan: PÅ" else "Ledmotiv på seriesidan: AV")
+            OutlinedButton(onClick = { vm.cycleThemeLevel() }) {
+                Text(
+                    "Ledmotiv på seriesidan: " + when (vm.themeLevel) {
+                        1 -> "Lågt"
+                        2 -> "Mellan"
+                        else -> "Av"
+                    },
+                )
             }
             OutlinedButton(onClick = { vm.changePipEnabled(!vm.pipEnabled) }) {
                 Text(if (vm.pipEnabled) "Bild-i-bild för live-TV: PÅ" else "Bild-i-bild för live-TV: AV")
