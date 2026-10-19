@@ -136,8 +136,14 @@ fun SettingsScreen(vm: AppViewModel) {
             color = JptvColors.TextDim,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedButton(onClick = { vm.scanLibrary(null) }, enabled = !vm.scanning && uri != null) {
+                Text(if (vm.scanning) "Skannar…" else "Skanna alla bibliotek")
+            }
             OutlinedButton(onClick = { vm.connectAndLoad(rediscover = true) }) { Text("Sök server igen") }
             OutlinedButton(onClick = { vm.logout() }) { Text("Logga ut från Plex") }
+        }
+        vm.scanStatus?.let {
+            Text(it, color = if (vm.scanning) JptvColors.Accent else JptvColors.TextDim)
         }
 
         Spacer(Modifier.height(16.dp))

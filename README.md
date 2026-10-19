@@ -10,7 +10,7 @@ Egen TV-app för Android TV / Google TV (Nvidia Shield, TCL m.fl.) som samlar Pl
 | --- | --- |
 | Plex-inloggning | Appen visar en kod, du skriver in den på [plex.tv/link](https://plex.tv/link). Servern hittas automatiskt, lokal adress först. |
 | Hemskärm | Live nu, Fortsätt titta och nyligen tillagt. Håll inne OK på en titel för meny (detaljer, markera sedd, ta bort från Fortsätt titta, gå till serien). Klocka i hörnet. |
-| Bibliotek | Rutnät med sortering (A–Ö, tillagt, år, betyg) och filter för osett. Serier visas med säsongsflikar; hela säsonger kan markeras som sedda. |
+| Bibliotek | Rutnät med sortering (A–Ö, tillagt, år, betyg) och filter för osett. Serier visas med säsongsflikar; hela säsonger kan markeras som sedda. **Skanna** ber Plex leta efter nya filer (ett bibliotek, eller alla under Inställningar) och laddar om när servern är klar. |
 | Sök | Söker samtidigt i Plex, bland kanalerna och i TV-guiden. |
 | Uppspelning | **Direct Play** först. Klarar TV:n inte filen – t.ex. DTS-ljud på TCL – byter appen automatiskt till Plex-omkodning (H.264 + AAC). Hoppa över intro, nästa avsnitt vid eftertexterna och "Tittar du fortfarande?" efter tre avsnitt i rad. |
 | Ljud och undertexter | Valet sparas i Plex och per serie, så nästa avsnitt startar med samma språk. **Sök undertexter** hämtar från internet via din Plex-server (OpenSubtitles m.fl.). Externa .srt kan synkas ±0,1 s åt gången. |
