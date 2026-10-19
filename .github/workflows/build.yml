@@ -1,0 +1,68 @@
+name: Bygg APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Packa upp signeringsnyckeln
+        env:
+          JPTV_SIGNING_PASSWORD: ${{ secrets.JPTV_SIGNING_PASSWORD }}
+        run: |
+          if [ -z "$JPTV_SIGNING_PASSWORD" ]; then
+            echo "::error::Hemligheten JPTV_SIGNING_PASSWORD saknas. Lägg till den under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+            -in app/jptv.keystore.enc -out "$RUNNER_TEMP/jptv.keystore" \
+            -pass env:JPTV_SIGNING_PASSWORD
+          echo "JPTV_KEYSTORE=$RUNNER_TEMP/jptv.keystore" >> "$GITHUB_ENV"
+
+      - name: Testa och bygg
+        env:
+          JPTV_SIGNING_PASSWORD: ${{ secrets.JPTV_SIGNING_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace testDebugUnitTest assembleRelease
+
+      - name: Döp om APK
+        run: cp app/build/outputs/apk/release/app-release.apk jptv.apk
+
+      - name: Ta bort nyckeln från maskinen
+        if: always()
+        run: rm -f "$RUNNER_TEMP/jptv.keystore"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jptv-apk
+          path: jptv.apk
+
+      # Samma filnamn i varje release, så att länken .../releases/latest/download/jptv.apk alltid
+      # pekar på senaste versionen. Appens uppdaterare letar efter just det namnet.
+      - name: Publicera som release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.${{ github.run_number }}
+          name: JPTV 0.1.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          files: jptv.apk
+          body: |
+            Bygge ${{ github.run_number }} från ${{ github.sha }}.
+            Har du JPTV installerad uppdaterar den sig själv. Annars: se README.
