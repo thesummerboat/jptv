@@ -96,6 +96,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun back(): Boolean {
         if (stack.size <= 1) return false
+        // Ut ur spelaren: svart direkt, innan menyn ritas, medan TV:n byter tillbaka frekvens.
+        if (stack.last() is Screen.Player) se.jptv.player.DisplayModes.beginBlackout()
         stack.removeAt(stack.lastIndex)
         return true
     }

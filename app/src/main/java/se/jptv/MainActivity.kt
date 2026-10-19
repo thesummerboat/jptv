@@ -79,7 +79,9 @@ fun JptvApp(vm: AppViewModel = viewModel()) {
     Box(
         Modifier
             .fillMaxSize()
-            .background(JptvColors.Background),
+            .background(JptvColors.Background)
+            // Medan TV:n byter frekvens är skärmen svart; fjärren väntar så länge.
+            .onPreviewKeyEvent { se.jptv.player.DisplayModes.blackout },
     ) {
         val screen = vm.current
         // key() ger varje skärm färskt tillstånd när den öppnas.
@@ -106,6 +108,9 @@ fun JptvApp(vm: AppViewModel = viewModel()) {
                 is Screen.Player -> PlayerScreen(vm, screen.request)
             }
             }
+        }
+        if (se.jptv.player.DisplayModes.blackout) {
+            Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black))
         }
     }
 }
