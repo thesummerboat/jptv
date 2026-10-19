@@ -107,6 +107,12 @@ data class PlexItem(
     val primaryExtraKey: String? = null,
     /** Extramaterialets typ (1 = trailer) för klipp. */
     val extraType: Int? = null,
+    /** Egenskaper för rekommendationer: "g:Action", "d:Christopher Nolan", "a:…", "c:Sverige", "y:1990" … */
+    val tags: List<String> = emptyList(),
+    /** Tidpunkter i millisekunder. */
+    val addedAt: Long = 0L,
+    val lastViewedAt: Long = 0L,
+    val viewCount: Int = 0,
 ) {
     /** Märken som 4K, Dolby Vision, Atmos och 5.1, från filens spår (eller grovt från listdata). */
     val badges: List<String>
@@ -183,3 +189,6 @@ data class PlexItem(
 }
 
 data class PlexHomeRow(val title: String, val items: List<PlexItem>)
+
+/** En visning i Plex tittarhistorik. showKey är satt för avsnitt. */
+data class PlexHistoryEntry(val ratingKey: String, val type: String, val showKey: String?, val viewedAt: Long)

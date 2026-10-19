@@ -309,6 +309,29 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
         }
     }
 
+    /**
+     * Din tittarhistorik från servern: varje visning med datum, från alla enheter.
+     * accountID=1 är serverns ägare, så andra som delar servern inte räknas in.
+     */
+    suspend fun watchHistory(limit: Int = 3000): List<PlexHistoryEntry> {
+        val s = srv()
+        val mc = getJson(
+            "${s.uri}/status/sessions/history/all?sort=viewedAt:desc&accountID=1" +
+                "&X-Plex-Container-Start=0&X-Plex-Container-Size=$limit",
+            s.token,
+        ).getJSONObject("MediaContainer")
+        val arr = mc.optJSONArray("Metadata") ?: return emptyList()
+        return withContext(Dispatchers.Default) {
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val key = o.optStringOrNull("ratingKey") ?: return@mapNotNull null
+                val showKey = o.optStringOrNull("grandparentRatingKey")
+                    ?: o.optStringOrNull("grandparentKey")?.substringAfterLast('/')
+                PlexHistoryEntry(key, o.optString("type"), showKey, (o.optLongOrNull("viewedAt") ?: 0L) * 1000)
+            }
+        }
+    }
+
     /** Trailers och annat extramaterial för en titel; trailers först. */
     suspend fun trailers(item: PlexItem): List<PlexItem> {
         val extras = runCatching { items("/library/metadata/${item.ratingKey}/extras") }.getOrDefault(emptyList())
@@ -457,6 +480,16 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
             val end = m.optLongOrNull("endTimeOffset") ?: return@mapNotNull null
             PlexMarker(m.optString("type"), start, end, final = m.optBoolean("final", false))
         }
+        fun tagList(name: String, prefix: String, limit: Int): List<String> {
+            val arr = o.optJSONArray(name) ?: return emptyList()
+            return (0 until minOf(arr.length(), limit)).mapNotNull { i ->
+                arr.optJSONObject(i)?.optStringOrNull("tag")?.let { "$prefix:$it" }
+            }
+        }
+        val year = o.optIntOrNull("year")
+        val tags = tagList("Genre", "g", 8) + tagList("Director", "d", 3) + tagList("Writer", "w", 2) +
+            tagList("Role", "a", 6) + tagList("Country", "c", 2) +
+            listOfNotNull(o.optStringOrNull("studio")?.let { "s:$it" }, year?.let { "y:${it / 10 * 10}" })
         val genreArr = o.optJSONArray("Genre")
         val genres = if (genreArr == null) emptyList() else (0 until genreArr.length()).mapNotNull { i ->
             genreArr.optJSONObject(i)?.optStringOrNull("tag")
@@ -509,6 +542,10 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
             sectionKey = o.optStringOrNull("librarySectionID"),
             primaryExtraKey = o.optStringOrNull("primaryExtraKey"),
             extraType = o.optIntOrNull("extraType"),
+            tags = tags,
+            addedAt = (o.optLongOrNull("addedAt") ?: 0L) * 1000,
+            lastViewedAt = (o.optLongOrNull("lastViewedAt") ?: 0L) * 1000,
+            viewCount = o.optIntOrNull("viewCount") ?: 0,
         )
     }
 
