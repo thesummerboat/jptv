@@ -654,11 +654,11 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
     }
 
     /** Låter servern skala ner affischen, så att svagare TV-apparater slipper stora bilder. */
-    fun imageUrl(path: String?, width: Int = 300, height: Int = 450): String? {
+    fun imageUrl(path: String?, width: Int = 300, height: Int = 450, token: String? = null): String? {
         val s = server ?: return null
         if (path.isNullOrBlank()) return null
         val enc = URLEncoder.encode(path, "UTF-8")
-        return "${s.uri}/photo/:/transcode?width=$width&height=$height&minSize=1&upscale=1&url=$enc&X-Plex-Token=${s.token}"
+        return "${s.uri}/photo/:/transcode?width=$width&height=$height&minSize=1&upscale=1&url=$enc&X-Plex-Token=${token ?: s.token}"
     }
 
     /** Direct Play: filen spelas som den är, servern kodar inte om något. */
@@ -672,7 +672,14 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
         return "${s.uri}$key${sep}X-Plex-Token=${s.token}"
     }
 
-    private fun transcodeQuery(item: PlexItem, session: String): String {
+    private fun transcodeQuery(
+        item: PlexItem,
+        session: String,
+        maxKbps: Int = 20000,
+        resolution: String = "1920x1080",
+        offsetSec: Long = 0,
+        token: String? = null,
+    ): String {
         val s = srv()
         val params = linkedMapOf(
             "path" to "/library/metadata/${item.ratingKey}",
@@ -684,14 +691,14 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
             "directStream" to "1",
             "directStreamAudio" to "0",
             "videoQuality" to "100",
-            "maxVideoBitrate" to "20000",
-            "videoResolution" to "1920x1080",
-            "offset" to "0",
+            "maxVideoBitrate" to maxKbps.toString(),
+            "videoResolution" to resolution,
+            "offset" to offsetSec.toString(),
             // Vald undertext (enligt Plex) bränns in i bilden vid omkodning.
             "subtitles" to "burn",
             "session" to session,
             "X-Plex-Session-Identifier" to session,
-            "X-Plex-Token" to s.token,
+            "X-Plex-Token" to (token ?: s.token),
             "X-Plex-Client-Identifier" to clientId,
             "X-Plex-Product" to PRODUCT,
             // Webbläsarprofilen ger H.264 + AAC, som alla TV-apparater klarar.
@@ -705,13 +712,40 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
      * Reserv när TV:n inte klarar filen (vanligt på TCL: DTS-ljud eller ovanliga format).
      * Servern kodar om till HLS med H.264 och AAC.
      */
-    suspend fun prepareTranscode(item: PlexItem, session: String): String {
+    suspend fun prepareTranscode(
+        item: PlexItem,
+        session: String,
+        maxKbps: Int = 20000,
+        resolution: String = "1920x1080",
+        offsetSec: Long = 0,
+        /** Annan token i adressen, t.ex. en tillfällig för Chromecast. */
+        token: String? = null,
+    ): String {
         val s = srv()
-        val q = transcodeQuery(item, session)
+        val q = transcodeQuery(item, session, maxKbps, resolution, offsetSec, token)
         // Samma profil (Chrome) för beslut och start: skickas bara i adressen, inte som header.
         fireBare("${s.uri}/video/:/transcode/universal/decision?$q")
         return "${s.uri}/video/:/transcode/universal/start.m3u8?$q"
     }
+
+    /**
+     * Tillfällig token (giltig ett par dygn) för adresser som lämnas till en annan enhet, t.ex. en
+     * Chromecast på hotellet, så att kontots riktiga token aldrig hamnar där.
+     */
+    suspend fun transientToken(): String? {
+        val s = server ?: return null
+        return try {
+            getJson("${s.uri}/security/token?type=delegation&scope=all", s.token)
+                .getJSONObject("MediaContainer").optStringOrNull("token")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** true om servern nås på hemmanätet (lokal adress), false hemifrån (publik adress eller relä). */
+    fun serverIsLocal(): Boolean = server?.uri?.let { PlexAddress.isLocal(it) } ?: false
 
     suspend fun stopTranscode(session: String) {
         val s = server ?: return
