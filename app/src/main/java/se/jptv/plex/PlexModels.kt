@@ -115,6 +115,10 @@ data class PlexItem(
     val viewCount: Int = 0,
     /** Seriens ledmotiv, t.ex. "/library/metadata/123/theme/1700000000" (även för säsonger och avsnitt). */
     val theme: String? = null,
+    /** Sorteringstitel från Plex (t.ex. "Matrix, The"), för bokstavshoppet i biblioteket. */
+    val titleSort: String? = null,
+    /** Avsnittets egen bild (16:9), medan thumb är seriens affisch. */
+    val still: String? = null,
 ) {
     /** Märken som 4K, Dolby Vision, Atmos och 5.1, från filens spår (eller grovt från listdata). */
     val badges: List<String>

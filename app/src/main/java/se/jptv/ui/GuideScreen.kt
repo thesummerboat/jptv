@@ -3,6 +3,8 @@ package se.jptv.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -140,6 +142,16 @@ fun GuideScreen(vm: AppViewModel, group: String) {
                             },
                             onPlay = { vm.playChannel(channels, i) },
                             playing = vm.pip?.channel?.key == ch.key,
+                            reminded = { p -> vm.hasReminder(ch, p.start) },
+                            // Håll OK på ett program som inte har börjat: påminnelse när det börjar.
+                            onRemind = { p ->
+                                val on = vm.toggleReminder(ch, p)
+                                focusedText = if (on) {
+                                    "🔔 Påminnelse satt: ${clock(p.start)} ${p.title} på ${ch.name}"
+                                } else {
+                                    "Påminnelsen borttagen: ${clock(p.start)} ${p.title}"
+                                }
+                            },
                         )
                     }
                 }
@@ -199,6 +211,8 @@ private fun GuideRow(
     onPlay: () -> Unit,
     /** Kanalen spelar i bild-i-bild-rutan. */
     playing: Boolean = false,
+    reminded: (Programme) -> Boolean = { false },
+    onRemind: (Programme) -> Unit = {},
 ) {
     Row(
         Modifier
@@ -247,9 +261,10 @@ private fun GuideRow(
                     val x = dpPerMinute * ((start - windowStart) / MINUTE).toFloat()
                     val w = dpPerMinute * ((end - start) / MINUTE).toFloat()
                     GuideCell(
-                        title = p.title,
+                        title = (if (reminded(p)) "🔔 " else "") + p.title,
                         time = clock(p.start),
                         live = now in p.start until p.stop,
+                        onLongClick = if (p.start > now) ({ onRemind(p) }) else null,
                         modifier = Modifier
                             .offset(x = x)
                             .width(w)
@@ -273,8 +288,13 @@ private fun GuideCell(
     modifier: Modifier,
     onFocus: () -> Unit,
     onClick: () -> Unit,
+    /** Håll inne OK (t.ex. påminnelse). */
+    onLongClick: (() -> Unit)? = null,
 ) {
     var focused by remember { mutableStateOf(false) }
+    // OK: kort tryck spelar, håll inne = onLongClick. Avgörs när knappen släpps (som i spelaren).
+    var okDown by remember { mutableStateOf(false) }
+    var longDone by remember { mutableStateOf(false) }
     Box(
         modifier
             .fillMaxHeight()
@@ -283,7 +303,32 @@ private fun GuideCell(
                 focused = it.isFocused
                 if (it.isFocused) onFocus()
             }
-            .clickable(onClick = onClick)
+            .focusable()
+            .onKeyEvent { ev ->
+                val n = ev.nativeKeyEvent
+                val ok = n.keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
+                    n.keyCode == android.view.KeyEvent.KEYCODE_ENTER ||
+                    n.keyCode == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER
+                if (!ok) return@onKeyEvent false
+                when (n.action) {
+                    android.view.KeyEvent.ACTION_DOWN -> {
+                        if (n.repeatCount == 0) {
+                            okDown = true
+                            longDone = false
+                        } else if (!longDone && okDown && onLongClick != null) {
+                            longDone = true
+                            onLongClick()
+                        }
+                        true
+                    }
+                    android.view.KeyEvent.ACTION_UP -> {
+                        if (okDown && !longDone) onClick()
+                        okDown = false
+                        true
+                    }
+                    else -> false
+                }
+            }
             .background(
                 when {
                     focused -> JptvColors.Accent

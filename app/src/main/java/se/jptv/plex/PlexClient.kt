@@ -547,6 +547,8 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
             lastViewedAt = (o.optLongOrNull("lastViewedAt") ?: 0L) * 1000,
             viewCount = o.optIntOrNull("viewCount") ?: 0,
             theme = o.optStringOrNull("theme") ?: o.optStringOrNull("parentTheme") ?: o.optStringOrNull("grandparentTheme"),
+            titleSort = o.optStringOrNull("titleSort"),
+            still = if (type == "episode") o.optStringOrNull("thumb") else null,
         )
     }
 

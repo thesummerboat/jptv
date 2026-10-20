@@ -60,6 +60,20 @@ sealed interface PlayRequest {
     data class Live(val channels: List<Channel>, val index: Int) : PlayRequest
 }
 
+/** Påminnelse från guiden: ett program som ska börja på en kanal. */
+data class Reminder(val channelKey: String, val start: Long, val title: String, val channelName: String) {
+    fun encode(): String = listOf(channelKey, start.toString(), title, channelName)
+        .joinToString("\t") { it.replace('\t', ' ').replace('\n', ' ') }
+
+    companion object {
+        fun decode(line: String): Reminder? {
+            val p = line.split('\t')
+            if (p.size < 4) return null
+            return Reminder(p[0], p[1].toLongOrNull() ?: return null, p[2], p[3])
+        }
+    }
+}
+
 class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     val prefs = Prefs(app)
@@ -1278,6 +1292,64 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun channelsForGuide(group: String): List<Channel> {
         val pl = playlist ?: return emptyList()
         return if (group == GROUP_SEARCH) pl.channels.filter { it.group !in hiddenGroups } else channelsForGroup(group)
+    }
+
+    // ---------- Påminnelser från guiden ----------
+
+    var reminders by mutableStateOf(prefs.reminders.mapNotNull { Reminder.decode(it) })
+        private set
+
+    /** Påminnelsen som visas just nu (programmet har börjat). */
+    var dueReminder by mutableStateOf<Reminder?>(null)
+        private set
+
+    fun hasReminder(channel: Channel, start: Long): Boolean =
+        reminders.any { it.channelKey == channel.key && it.start == start }
+
+    /** Sätter eller tar bort en påminnelse; true om den nu är satt. */
+    fun toggleReminder(channel: Channel, programme: se.jptv.iptv.Programme): Boolean {
+        val exists = hasReminder(channel, programme.start)
+        reminders = if (exists) {
+            reminders.filterNot { it.channelKey == channel.key && it.start == programme.start }
+        } else {
+            reminders + Reminder(channel.key, programme.start, programme.title, "${channel.number} ${channel.name}")
+        }
+        prefs.reminders = reminders.map { it.encode() }
+        return !exists
+    }
+
+    /** Körs var 15:e sekund: visar det som har börjat (upp till tio minuter sent), glömmer äldre. */
+    private fun checkReminders() {
+        val now = System.currentTimeMillis()
+        val (started, waiting) = reminders.partition { it.start <= now + 15_000 }
+        if (started.isEmpty()) return
+        reminders = waiting
+        prefs.reminders = waiting.map { it.encode() }
+        if (dueReminder == null) dueReminder = started.lastOrNull { now < it.start + 10 * 60_000 }
+    }
+
+    fun dismissReminder() {
+        dueReminder = null
+    }
+
+    /** "Byt kanal" i påminnelsen: kanalen i helskärm, i sin grupp så att ▲▼ fungerar. */
+    fun playReminder(reminder: Reminder) {
+        dueReminder = null
+        val ch = playlist?.byKey?.get(reminder.channelKey) ?: return
+        val group = channelsForGroup(ch.group)
+        val index = group.indexOfFirst { it.key == ch.key }
+        val request = if (index >= 0) PlayRequest.Live(group, index) else PlayRequest.Live(listOf(ch), 0)
+        closePip()
+        if (current is Screen.Player) replaceTop(Screen.Player(request)) else open(Screen.Player(request))
+    }
+
+    init {
+        viewModelScope.launch {
+            while (true) {
+                checkReminders()
+                delay(15_000)
+            }
+        }
     }
 
     fun playChannel(channels: List<Channel>, index: Int) {
