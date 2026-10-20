@@ -84,4 +84,25 @@ class RecommenderTest {
         assertTrue(Recommender.forYou(model, "movie", now).isEmpty())
         assertTrue(Recommender.seeds(model, now).isEmpty())
     }
+
+    @Test
+    fun dailyMixVariesByDayButNotWithinADay() {
+        val ids = (1..40).map { "id$it" }
+        val monday = Recommender.dailyMix(ids, day = 20_000)
+        assertEquals(monday, Recommender.dailyMix(ids, day = 20_000))
+        val tuesday = Recommender.dailyMix(ids, day = 20_001)
+        assertFalse(monday == tuesday)
+        assertEquals(25, monday.size)
+        assertEquals(monday.size, monday.toSet().size)
+        assertTrue(monday.all { it in ids })
+        // Viktat mot toppen: i snitt hamnar de bästa oftare med än de sämsta.
+        var top = 0
+        var bottom = 0
+        for (d in 0L until 200L) {
+            val mix = Recommender.dailyMix(ids, d, take = 10)
+            top += mix.count { it in ids.take(10) }
+            bottom += mix.count { it in ids.takeLast(10) }
+        }
+        assertTrue("topp $top, botten $bottom", top > bottom * 2)
+    }
 }

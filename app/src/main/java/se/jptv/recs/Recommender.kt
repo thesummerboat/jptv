@@ -119,6 +119,30 @@ object Recommender {
     fun signal(model: Model, type: String): Int = model.items.values.count { it.type == type && it.engagement > 0f }
 
     /** "Rekommenderat för dig": osedda titlar av en typ. */
+    /**
+     * Variation från dag till dag: de bästa förslagen dras om viktat mot toppen (bäst har störst chans),
+     * samma ordning hela dagen. day = dagnummer (t.ex. tid / 86 400 000).
+     */
+    fun dailyMix(ids: List<String>, day: Long, pool: Int = 40, take: Int = 25): List<String> {
+        val remaining = ids.take(pool).withIndex().toMutableList()
+        val rnd = java.util.Random(day * 7919 + remaining.size)
+        val out = ArrayList<String>(minOf(take, remaining.size))
+        while (out.size < take && remaining.isNotEmpty()) {
+            val weights = remaining.map { 1.0 / (it.index + 3) }
+            var r = rnd.nextDouble() * weights.sum()
+            var pick = remaining.lastIndex
+            for ((i, w) in weights.withIndex()) {
+                r -= w
+                if (r <= 0) {
+                    pick = i
+                    break
+                }
+            }
+            out += remaining.removeAt(pick).value
+        }
+        return out
+    }
+
     fun forYou(model: Model, type: String, now: Long, limit: Int = 20): List<String> {
         val own = model.profiles[type].orEmpty()
         val all = model.profiles["all"].orEmpty()

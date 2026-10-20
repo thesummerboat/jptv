@@ -1018,11 +1018,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val list = ids.mapNotNull { byId[it] }
             if (list.size >= 5) rows += PlexHomeRow(title, list)
         }
+        // Nya förslag varje dag: de bästa 40 dras om viktat mot toppen.
+        val today = now / day
         if (se.jptv.recs.Recommender.signal(model, "movie") >= 3) {
-            row("Rekommenderat för dig · Filmer", se.jptv.recs.Recommender.forYou(model, "movie", now))
+            val ranked = se.jptv.recs.Recommender.forYou(model, "movie", now, limit = 40)
+            row("Rekommenderat för dig · Filmer", se.jptv.recs.Recommender.dailyMix(ranked, today))
         }
         if (se.jptv.recs.Recommender.signal(model, "show") >= 2) {
-            row("Rekommenderat för dig · Serier", se.jptv.recs.Recommender.forYou(model, "show", now))
+            val ranked = se.jptv.recs.Recommender.forYou(model, "show", now, limit = 40)
+            row("Rekommenderat för dig · Serier", se.jptv.recs.Recommender.dailyMix(ranked, today))
         }
         for (seed in se.jptv.recs.Recommender.seeds(model, now)) {
             val title = byId[seed]?.title ?: continue
