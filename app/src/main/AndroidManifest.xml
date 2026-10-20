@@ -27,8 +27,7 @@
             android:name=".MainActivity"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
             android:exported="true"
-            android:launchMode="singleTask"
-            android:screenOrientation="landscape">
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -39,5 +38,10 @@
         <receiver
             android:name=".update.InstallResultReceiver"
             android:exported="false" />
+
+        <!-- Casting från telefonen: Googles vanliga mottagare (Default Media Receiver). -->
+        <meta-data
+            android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
+            android:value="se.jptv.mobile.CastOptionsProvider" />
     </application>
 </manifest>

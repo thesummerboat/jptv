@@ -40,11 +40,24 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        se.jptv.player.DisplayModes.attach(this)
-        se.jptv.ui.NavSounds.init(this)
+        // Samma app på TV och telefon: TV:n får fjärrkontrollsgränssnittet, telefonen pekgränssnittet.
+        val uiMode = getSystemService(android.app.UiModeManager::class.java)
+        val isTv = uiMode?.currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION ||
+            packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
+        if (isTv) {
+            se.jptv.player.DisplayModes.attach(this)
+            se.jptv.ui.NavSounds.init(this)
+        } else {
+            // Telefonen visar statusfältet utom i spelaren.
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN)
+        }
         setContent {
-            JptvTheme {
-                JptvApp()
+            if (isTv) {
+                JptvTheme {
+                    JptvApp()
+                }
+            } else {
+                se.jptv.mobile.MobileApp()
             }
         }
     }

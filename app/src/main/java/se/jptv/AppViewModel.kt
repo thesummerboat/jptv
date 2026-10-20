@@ -126,6 +126,34 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
+    /** Telefonens flikar: börja om från en skärm. */
+    fun resetTo(screen: Screen) {
+        cameBack = false
+        stack.clear()
+        stack.add(screen)
+    }
+
+    // ---------- Telefonen: kvalitet hemifrån ----------
+
+    var remoteQuality by mutableStateOf(prefs.remoteQuality)
+        private set
+
+    fun changeRemoteQuality(value: Int) {
+        remoteQuality = value
+        prefs.remoteQuality = value
+    }
+
+    /** Bithastighet (kbit/s) och upplösning för omkodning hemifrån; null = originalfilen. */
+    fun remoteStream(): Pair<Int, String>? = REMOTE_QUALITIES.getOrNull(remoteQuality)?.second
+
+    /** Telefonen bytte nät (t.ex. hemifrån till hotellet): leta upp servern igen om den inte svarar. */
+    fun reconnectIfNeeded() {
+        val s = plex.server ?: return
+        viewModelScope.launch {
+            if (!plex.isReachable(s.uri, s.token)) connectAndLoad(rediscover = true)
+        }
+    }
+
     /** Byter ut översta skärmen, t.ex. när nästa avsnitt tar över efter det förra. */
     fun replaceTop(screen: Screen) {
         if (screen is Screen.Player && screen.request is PlayRequest.Vod) closePip()
@@ -1382,5 +1410,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         const val GROUP_FAVORITES = "★ Favoriter"
         const val GROUP_RECENTS = "Senaste"
         const val GROUP_SEARCH = "Sök kanal"
+
+        /** Kvalitetsval för telefonen och casting hemifrån. */
+        val REMOTE_QUALITIES: List<Pair<String, Pair<Int, String>?>> = listOf(
+            "Original" to null,
+            "8 Mbit 1080p" to (8000 to "1920x1080"),
+            "4 Mbit 720p" to (4000 to "1280x720"),
+            "2 Mbit 720p" to (2000 to "1280x720"),
+            "1 Mbit 480p" to (1000 to "854x480"),
+        )
     }
 }

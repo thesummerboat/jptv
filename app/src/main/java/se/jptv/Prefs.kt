@@ -93,6 +93,14 @@ class Prefs(context: Context) {
         get() = sp.getInt("tunneling", 0)
         set(value) { sp.edit().putInt("tunneling", value).apply() }
 
+    /**
+     * Telefonen och casting hemifrån: 0 = original, 1 = 8 Mbit 1080p, 2 = 4 Mbit 720p,
+     * 3 = 2 Mbit 720p, 4 = 1 Mbit 480p.
+     */
+    var remoteQuality: Int
+        get() = sp.getInt("remote_quality", 1)
+        set(value) { sp.edit().putInt("remote_quality", value).apply() }
+
     /** Ljudlös trailer bakom hemskärmens stora ruta. */
     var heroTrailers: Boolean
         get() = sp.getBoolean("hero_trailers", true)

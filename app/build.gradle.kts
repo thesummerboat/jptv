@@ -83,6 +83,9 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.tv:tv-material:1.0.0")
+    // Telefonen: vanliga Material 3-komponenter för pekskärm.
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
 
@@ -90,6 +93,10 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:$media3")
     implementation("androidx.media3:media3-exoplayer-hls:$media3")
     implementation("androidx.media3:media3-ui:$media3")
+    // Casta från telefonen till Chromecast/Google TV (t.ex. hotell-TV).
+    implementation("androidx.media3:media3-cast:$media3")
+    implementation("androidx.mediarouter:mediarouter:1.7.0")
+    implementation("com.google.android.gms:play-services-cast-framework:21.5.0")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
