@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -241,8 +242,9 @@ private fun PosterGrid(
             columns = GridCells.Adaptive(PosterWidth + 18.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp),
             horizontalArrangement = Arrangement.spacedBy(18.dp),
-            contentPadding = PaddingValues(top = 6.dp, bottom = 48.dp),
-            modifier = Modifier.weight(1f),
+            // Luft runt rutnätet så att affischen med fokus inte klipps; flyttat tillbaka i linje med rubriken.
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 48.dp),
+            modifier = Modifier.weight(1f).offset(x = (-12).dp),
         ) {
             // Nyckel på id, så att fokus stannar på samma titel när listan laddas om efter en skanning.
             itemsIndexed(items, key = { _, item -> item.ratingKey }) { i, item ->
