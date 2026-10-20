@@ -667,7 +667,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         hubRows = hubs.flatten().map { it.copy(items = visible(it.items)) }.filter { it.items.size >= 3 }
         rebuildHome()
         homeLoadedAt = System.currentTimeMillis()
-        loadGenreShortcuts(shown)
+        // Genrerna visas nu som kategorier i varje bibliotek, inte på hemskärmen.
+        genreShortcuts = emptyList()
         saveHomeCache()
         refreshLibraryIndex()
     }
@@ -764,13 +765,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun genres(sectionKey: String): List<se.jptv.plex.PlexFilterOption> =
         genreCache[sectionKey] ?: plex.genres(sectionKey).also { genreCache[sectionKey] = it }
 
-    private suspend fun loadGenreShortcuts(shown: List<PlexSection>) {
-        val picks = listOfNotNull(shown.firstOrNull { it.type == "movie" }, shown.firstOrNull { it.type == "show" })
-        genreShortcuts = picks.mapNotNull { s ->
-            val g = runCatching { genres(s.key) }.getOrDefault(emptyList())
-            if (g.isEmpty()) null else s to g
-        }
-    }
 
     // ---------- Hela biblioteket: IMDb-topplistor och rekommendationer ----------
 

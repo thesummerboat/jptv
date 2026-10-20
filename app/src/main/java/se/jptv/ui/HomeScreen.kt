@@ -340,32 +340,11 @@ private fun HomeRows(
                 }
             }
         }
-        // Bläddra efter genre: efter Fortsätt titta och Nytt, före resten av raderna.
         val lead = vm.homeLeadRows.coerceAtMost(rows.size)
         val leadStart = index
         index += lead
         itemsIndexed(rows.take(lead), key = { r, _ -> rowKey(rows, r) }) { r, row ->
             HomeRow(vm, rows, r, row, focusKey, focusRequester, onFocused, onLongPress, rowSpec, pin(leadStart + r))
-        }
-        vm.genreShortcuts.forEach { (section, genres) ->
-            val pinAt = index++
-            item(key = "genres_${section.key}") {
-                Column(pin(pinAt)) {
-                    Text("Bläddra i ${section.title}", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(8.dp))
-                    CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec) {
-                    LazyRow(
-                        state = vm.rememberListState("home_genres_${section.key}"),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        contentPadding = PaddingValues(end = 48.dp, top = 6.dp, bottom = 6.dp),
-                    ) {
-                        itemsIndexed(genres, key = { _, g -> g.id }) { _, g ->
-                            OutlinedButton(onClick = { vm.open(Screen.Section(section, g)) }) { Text(g.title) }
-                        }
-                    }
-                    }
-                }
-            }
         }
         val restStart = index
         itemsIndexed(rows.drop(lead), key = { r, _ -> rowKey(rows, r + lead) }) { r, row ->
