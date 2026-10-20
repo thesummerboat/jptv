@@ -228,7 +228,7 @@ fun SettingsScreen(vm: AppViewModel) {
         }
         Text(
             "Bild-i-bild: Tillbaka från en kanal lämnar den i ett hörn medan du bläddrar (samma ström, aldrig två). " +
-                "OK på en annan kanal byter i rutan, OK igen (eller ▶‖) = helskärm. Tillbaka på hemskärmen eller Stopp stänger.",
+                "OK på en annan kanal byter i rutan, OK igen (eller ▶‖) = helskärm. Håll inne Tillbaka (eller Meny ≡) stänger rutan.",
             color = JptvColors.TextDim,
             style = MaterialTheme.typography.bodySmall,
         )

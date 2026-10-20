@@ -248,7 +248,7 @@ private fun ChannelBrowser(vm: AppViewModel) {
                     }
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "OK på en annan kanal byter här. OK igen (eller ▶‖) = helskärm. Tillbaka på hemskärmen stänger.",
+                        "OK på en annan kanal byter här. OK igen (eller ▶‖) = helskärm. Håll inne Tillbaka = stäng rutan.",
                         color = JptvColors.TextDim,
                         style = MaterialTheme.typography.labelSmall,
                     )

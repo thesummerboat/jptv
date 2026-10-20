@@ -69,7 +69,7 @@ fun PipSlot(vm: AppViewModel, modifier: Modifier) {
     }
 }
 
-/** Kanalen i ett hörn medan man bläddrar. ▶‖ = helskärm; Stopp eller Tillbaka på hemskärmen stänger. */
+/** Kanalen i ett hörn medan man bläddrar. ▶‖ = helskärm; håll Tillbaka, Meny, Stopp eller Tillbaka på hemskärmen stänger. */
 @Composable
 fun BoxScope.PipWindow(vm: AppViewModel, session: LiveSession) {
     val slot = vm.pipSlot
@@ -138,10 +138,10 @@ fun BoxScope.PipWindow(vm: AppViewModel, session: LiveSession) {
         if (slot == null) {
             val ch = session.channel
             Text(
-                "${ch.number}  ${ch.name}  ·  ▶‖ helskärm",
+                "${ch.number}  ${ch.name}\n▶‖ helskärm · håll Tillbaka = stäng",
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.White,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
                     .align(Alignment.BottomStart)
