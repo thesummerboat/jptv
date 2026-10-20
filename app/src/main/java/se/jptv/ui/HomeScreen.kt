@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -288,6 +289,9 @@ private val HERO_HEIGHT = 250.dp
 private val HeroShadow = TextShadow
 private val HOME_POSTER = 64.dp
 
+/** Utrymme vid radens kant för det förstorade kortet med fokus. */
+private val EdgeRoom = 12.dp
+
 @Composable
 private fun UpdateBanner(text: String, busy: Boolean, onUpdate: () -> Unit) {
     Row(
@@ -345,7 +349,10 @@ private fun HomeRows(
                     LazyRow(
                         state = vm.rememberListState("home_row_live"),
                         horizontalArrangement = Arrangement.spacedBy(18.dp),
-                        contentPadding = PaddingValues(end = 48.dp, top = 6.dp, bottom = 6.dp),
+                        // Luft runt raden så att kortet med fokus (förstorat, med ram) inte klipps i kanten;
+                        // raden flyttas lika mycket åt vänster så att den står kvar i linje med texten.
+                        contentPadding = PaddingValues(start = EdgeRoom, end = 48.dp, top = 10.dp, bottom = 10.dp),
+                        modifier = Modifier.offset(x = -EdgeRoom),
                     ) {
                         itemsIndexed(liveNow, key = { _, ch -> ch.key }) { i, ch ->
                             val key = homeKey(LIVE_ROW, ch.key)
@@ -410,7 +417,9 @@ private fun HomeRow(
                 LazyRow(
                     state = vm.rememberListState("home_row_${rowKey(rows, r)}"),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    contentPadding = PaddingValues(end = 48.dp, top = 6.dp, bottom = 6.dp),
+                    // Luft så att affischen med fokus inte klipps i vänsterkanten (se raden ovan).
+                    contentPadding = PaddingValues(start = EdgeRoom, end = 48.dp, top = 10.dp, bottom = 10.dp),
+                    modifier = Modifier.offset(x = -EdgeRoom),
                 ) {
                     itemsIndexed(items, key = { _, item -> item.ratingKey }) { _, item ->
                         val key = homeKey(row.title, item.ratingKey)
