@@ -35,6 +35,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.foundation.focusGroup
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
@@ -387,7 +389,9 @@ private fun pickFeatured(rows: List<PlexHomeRow>): List<PlexItem> {
         rows.filter { it.title.startsWith("Topplista") || it.title.startsWith("Eftersom") }.flatMap { it.items } +
             rows.filter { it.title != CONTINUE_ROW }.flatMap { it.items },
     )
-    return (mixed + fallback).distinctBy { it.ratingKey }.take(5)
+    // Fem av de femton bästa, nya varje gång sidan öppnas, så att det inte alltid är samma.
+    val pool = (mixed + fallback).distinctBy { it.ratingKey }.take(15)
+    return pool.shuffled().take(5)
 }
 
 private fun homeKey(row: String, id: String) = "$row|$id"
@@ -415,7 +419,14 @@ private fun FocusedInfo(
         Modifier
             .height(HERO_HEIGHT)
             .width(680.dp)
-            .clipToBounds(),
+            // Klipp bara överkanten (för lång text får inte gå upp i menyn); knappen med fokus
+            // förstoras och får sticka ut nedåt och åt sidorna.
+            .drawWithContent {
+                clipRect(left = -40f, top = 0f, right = size.width + 40f, bottom = size.height + 40f) {
+                    this@drawWithContent.drawContent()
+                }
+            }
+            .padding(bottom = 6.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.Bottom),
     ) {
         when {
