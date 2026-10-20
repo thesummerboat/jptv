@@ -198,7 +198,8 @@ fun MobileLogin(vm: AppViewModel) {
 
 @Composable
 fun MobileHome(vm: AppViewModel) {
-    val liveNow = remember(vm.playlist, vm.favorites, vm.recents) { vm.liveNowChannels() }
+    // Live-TV har sin egen flik och visas inte på startsidan.
+    val liveNow = emptyList<Channel>()
     val rows = vm.homeRows
     when {
         vm.homeError != null && rows.isEmpty() && liveNow.isEmpty() ->
