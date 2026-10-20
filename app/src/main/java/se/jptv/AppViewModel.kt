@@ -902,7 +902,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val now = System.currentTimeMillis()
         sectionRowsCache[section.key]?.let { (at, rows) -> if (now - at < 30 * 60_000L) return rows }
         val key = section.key
-        fun inSection(item: PlexItem) = item.sectionKey == null || item.sectionKey == key
+        val all = libraryItems[key] ?: runCatching { plex.all(key) }.getOrDefault(emptyList())
+        // Bara det som ligger i just det här biblioteket. Titlar från bibliotekslistan saknar ofta
+        // bibliotekets nummer, så de känns igen på sitt id; annars på typen (film eller serie).
+        val ids = all.mapTo(HashSet()) { it.ratingKey }
+        val types = if (section.type == "show") setOf("show", "season", "episode") else setOf(section.type)
+        fun inSection(item: PlexItem): Boolean = when {
+            item.sectionKey != null -> item.sectionKey == key
+            ids.isNotEmpty() -> item.ratingKey in ids || (item.type in setOf("season", "episode") && item.showKey in ids)
+            else -> item.type in types
+        }
         val rows = mutableListOf<PlexHomeRow>()
         homeRows.firstOrNull { it.title == "Fortsätt titta" }?.let { r ->
             val items = r.items.filter { it.sectionKey == key }
@@ -923,11 +932,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val title = if (r.title.startsWith("Rekommenderat för dig")) "Rekommenderat för dig" else r.title
             rows += r.copy(title = title, items = items)
         }
-        val all = libraryItems[key] ?: runCatching { plex.all(key) }.getOrDefault(emptyList())
         val top = imdbTop(section, all)
         if (top.size >= 5) rows += PlexHomeRow("Topplista IMDb", top)
         val hubs = runCatching { plex.sectionHubs(key) }.getOrDefault(emptyList())
-            .map { it.copy(items = visible(it.items)) }
+            .map { it.copy(items = visible(it.items).filter { item -> inSection(item) }) }
             .filter { it.items.size >= 3 }
         rows += hubs
         val byGenre = withContext(kotlinx.coroutines.Dispatchers.Default) {
