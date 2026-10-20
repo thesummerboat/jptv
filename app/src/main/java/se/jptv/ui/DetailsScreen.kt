@@ -156,6 +156,8 @@ fun Backdrop(
     imageAlpha: Float = 1f,
     /** Video bakom bilden (trailer på hemskärmen); syns när bilden tonas bort. */
     video: (@Composable () -> Unit)? = null,
+    /** Var nedtoningen mot botten börjar (0 = överst, 0,45 = strax under mitten). */
+    fadeFrom: Float = 0f,
 ) {
     Box(modifier.fillMaxSize()) {
         if (video != null) {
@@ -196,7 +198,11 @@ fun Backdrop(
             Modifier
                 .fillMaxSize()
                 .background(
-                    Brush.verticalGradient(listOf(JptvColors.Background.copy(alpha = 0f), JptvColors.Background)),
+                    Brush.verticalGradient(
+                        0f to JptvColors.Background.copy(alpha = 0f),
+                        fadeFrom to JptvColors.Background.copy(alpha = 0f),
+                        1f to JptvColors.Background,
+                    ),
                 ),
         )
     }

@@ -62,6 +62,8 @@ fun HomeScreen(vm: AppViewModel) {
     val itemFocus = remember { FocusRequester() }
     var focusedItem by remember { mutableStateOf<PlexItem?>(null) }
     var focusedChannel by remember { mutableStateOf<Channel?>(null) }
+    /** Radens etikett för kortet med fokus (t.ex. "3 nya avsnitt"); affischerna har ingen text. */
+    var focusedLabel by remember { mutableStateOf<String?>(null) }
     var menuFor by remember { mutableStateOf<Pair<PlexItem, Boolean>?>(null) }
     // Kom tillbaka till samma kort som sist, om det finns kvar.
     val rememberedKey = remember { vm.focusKeys["home"] }
@@ -88,6 +90,8 @@ fun HomeScreen(vm: AppViewModel) {
         Backdrop(
             url = vm.plex.imageUrl(focusedItem?.art, 1280, 720),
             imageAlpha = imageAlpha,
+            // Bakgrunden syns ända ner till raderna; mörknar först längre ner.
+            fadeFrom = 0.45f,
             video = { HeroTrailer(vm, focusedItem, enabled = menuFor == null, state = trailer) },
         )
         Column(
@@ -129,7 +133,7 @@ fun HomeScreen(vm: AppViewModel) {
             }
 
             Row {
-                Box(Modifier.weight(1f)) { FocusedInfo(vm, focusedItem, focusedChannel) }
+                Box(Modifier.weight(1f)) { FocusedInfo(vm, focusedItem, focusedChannel, focusedLabel) }
                 // Bild-i-bild: kanalen i den stora rutans högra hörn.
                 if (vm.pip != null) {
                     Spacer(Modifier.width(16.dp))
@@ -156,8 +160,9 @@ fun HomeScreen(vm: AppViewModel) {
                     liveNow = liveNow,
                     focusKey = if (rememberedExists) rememberedKey else null,
                     focusRequester = itemFocus,
-                    onFocused = { key, item ->
+                    onFocused = { key, item, label ->
                         focusedItem = item
+                        focusedLabel = label
                         if (item != null) focusedChannel = null
                         vm.focusKeys["home"] = key
                     },
@@ -191,7 +196,7 @@ private fun homeKey(row: String, id: String) = "$row|$id"
 
 /** Stor ruta överst: logotyp, märken och handling för kortet som har fokus (eller kanalen). */
 @Composable
-private fun FocusedInfo(vm: AppViewModel, item: PlexItem?, channel: Channel?) {
+private fun FocusedInfo(vm: AppViewModel, item: PlexItem?, channel: Channel?, label: String?) {
     // Logotypen hämtas en kort stund efter att fokus stannat, så att snabb bläddring inte ger en massa anrop.
     var logo by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(item?.ratingKey) {
@@ -218,6 +223,10 @@ private fun FocusedInfo(vm: AppViewModel, item: PlexItem?, channel: Channel?) {
                     textStyle = MaterialTheme.typography.headlineMedium,
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    label?.let {
+                        Text(it, color = JptvColors.Accent, style = MaterialTheme.typography.titleSmall, maxLines = 1)
+                        Spacer(Modifier.width(12.dp))
+                    }
                     Badges(listOfNotNull(vm.imdbText(item)) + item.badges)
                     val meta = listOfNotNull(
                         item.subtitle,
@@ -258,8 +267,8 @@ private fun FocusedInfo(vm: AppViewModel, item: PlexItem?, channel: Channel?) {
     }
 }
 
-private val HERO_HEIGHT = 196.dp
-private val HOME_POSTER = 104.dp
+private val HERO_HEIGHT = 250.dp
+private val HOME_POSTER = 64.dp
 
 @Composable
 private fun UpdateBanner(text: String, busy: Boolean, onUpdate: () -> Unit) {
@@ -285,7 +294,7 @@ private fun HomeRows(
     liveNow: List<Channel>,
     focusKey: String?,
     focusRequester: FocusRequester,
-    onFocused: (String, PlexItem?) -> Unit,
+    onFocused: (String, PlexItem?, String?) -> Unit,
     onChannelFocused: (Channel) -> Unit,
     onLongPress: (PlexItem, Boolean) -> Unit,
 ) {
@@ -328,7 +337,7 @@ private fun HomeRows(
                                 modifier = Modifier
                                     .onFocusChanged {
                                         if (it.hasFocus) {
-                                            onFocused(key, null)
+                                            onFocused(key, null, null)
                                             onChannelFocused(ch)
                                         }
                                     }
@@ -368,7 +377,7 @@ private fun HomeRow(
     row: PlexHomeRow,
     focusKey: String?,
     focusRequester: FocusRequester,
-    onFocused: (String, PlexItem?) -> Unit,
+    onFocused: (String, PlexItem?, String?) -> Unit,
     onLongPress: (PlexItem, Boolean) -> Unit,
     rowSpec: BringIntoViewSpec,
     modifier: Modifier = Modifier,
@@ -381,22 +390,25 @@ private fun HomeRow(
                 val items = remember(row) { row.items.distinctBy { it.ratingKey } }
                 LazyRow(
                     state = vm.rememberListState("home_row_${rowKey(rows, r)}"),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                     contentPadding = PaddingValues(end = 48.dp, top = 6.dp, bottom = 6.dp),
                 ) {
                     itemsIndexed(items, key = { _, item -> item.ratingKey }) { _, item ->
                         val key = homeKey(row.title, item.ratingKey)
+                        val label = row.labels[item.ratingKey]
                         PosterCard(
                             title = item.displayTitle,
-                            subtitle = row.labels[item.ratingKey] ?: vm.posterSubtitle(item),
-                            imageUrl = vm.plex.imageUrl(item.thumb),
+                            subtitle = null,
+                            imageUrl = vm.plex.imageUrl(item.thumb, 160, 240),
                             progress = item.progress,
                             watched = item.watched,
                             onClick = { vm.select(item) },
                             onLongClick = { onLongPress(item, row.title == CONTINUE_ROW) },
                             width = HOME_POSTER,
+                            // Små affischer utan text: titeln och allt annat står i den stora rutan.
+                            showText = false,
                             modifier = Modifier
-                                .onFocusChanged { if (it.hasFocus) onFocused(key, item) }
+                                .onFocusChanged { if (it.hasFocus) onFocused(key, item, label) }
                                 .then(if (key == focusKey) Modifier.focusRequester(focusRequester) else Modifier),
                         )
                     }
