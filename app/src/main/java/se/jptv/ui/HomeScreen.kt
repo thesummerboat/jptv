@@ -328,16 +328,17 @@ private fun HomeRows(
     LazyColumn(
         state = listState,
         modifier = Modifier.padding(top = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(22.dp),
-        // Utrymme under sista raden, så att även den kan läggas överst.
-        contentPadding = PaddingValues(bottom = 400.dp),
+        // Varje rad är lika hög som listan: bara raden med fokus syns, ingen titt på raden under.
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+        // Raderna fyller höjden, så även den sista kan läggas överst utan extra utrymme.
+        contentPadding = PaddingValues(bottom = 0.dp),
     ) {
         // Radernas plats i listan räknas om varje gång listan byggs.
         var index = 0
         if (liveNow.isNotEmpty()) {
             val pinAt = index++
             item(key = "live_now") {
-                Column(pin(pinAt)) {
+                Column(pin(pinAt).fillParentMaxHeight()) {
                     Text(if (vm.favorites.isEmpty()) "Senaste kanaler" else "Live nu", style = MaterialTheme.typography.titleMedium.copy(shadow = HeroShadow))
                     Spacer(Modifier.height(8.dp))
                     CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec) {
@@ -371,11 +372,11 @@ private fun HomeRows(
         val leadStart = index
         index += lead
         itemsIndexed(rows.take(lead), key = { r, _ -> rowKey(rows, r) }) { r, row ->
-            HomeRow(vm, rows, r, row, focusKey, focusRequester, onFocused, onLongPress, rowSpec, pin(leadStart + r))
+            HomeRow(vm, rows, r, row, focusKey, focusRequester, onFocused, onLongPress, rowSpec, pin(leadStart + r).fillParentMaxHeight())
         }
         val restStart = index
         itemsIndexed(rows.drop(lead), key = { r, _ -> rowKey(rows, r + lead) }) { r, row ->
-            HomeRow(vm, rows, r + lead, row, focusKey, focusRequester, onFocused, onLongPress, rowSpec, pin(restStart + r))
+            HomeRow(vm, rows, r + lead, row, focusKey, focusRequester, onFocused, onLongPress, rowSpec, pin(restStart + r).fillParentMaxHeight())
         }
     }
     }
