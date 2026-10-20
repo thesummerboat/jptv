@@ -65,6 +65,70 @@ private const val CONTINUE_ROW = "Fortsätt titta"
 
 @Composable
 fun HomeScreen(vm: AppViewModel) {
+    val liveNow = remember(vm.playlist, vm.favorites, vm.recents) { vm.liveNowChannels() }
+    RowsBrowser(
+        vm = vm,
+        memory = "home",
+        rows = vm.homeRows,
+        liveNow = liveNow,
+        loading = vm.homeLoading,
+        error = vm.homeError,
+        loadingText = "Hämtar från ${vm.serverName ?: "Plex"}…",
+        emptyText = "Inget att visa ännu från Plex.",
+        onRetry = { vm.connectAndLoad(rediscover = true) },
+        onRefresh = { vm.refreshHome() },
+        showUpdate = true,
+        topBar = { topFocus -> HomeTopBar(vm, topFocus) },
+    )
+}
+
+/** Menyn överst på hemskärmen: Live-TV, biblioteken, Sök och Inställningar. */
+@Composable
+private fun HomeTopBar(vm: AppViewModel, topFocus: FocusRequester) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(end = 48.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("JPTV", style = MaterialTheme.typography.headlineMedium, color = JptvColors.Accent)
+        Spacer(Modifier.width(16.dp))
+        Button(onClick = { vm.open(Screen.LiveTv) }, modifier = Modifier.focusRequester(topFocus)) {
+            Text("Live-TV")
+        }
+        vm.visibleSections.forEach { section ->
+            OutlinedButton(onClick = { vm.open(Screen.Section(section)) }) {
+                Text(if (section.key in vm.favoriteSections) "★ ${section.title}" else section.title)
+            }
+        }
+        OutlinedButton(onClick = { vm.open(Screen.Search) }) { Text("Sök") }
+        OutlinedButton(onClick = { vm.open(Screen.Settings) }) { Text("Inställningar") }
+        Spacer(Modifier.weight(1f))
+        Clock()
+    }
+}
+
+/**
+ * Stor ruta överst och rader med affischer under, där bara raden med fokus syns. Används av
+ * hemskärmen och av biblioteken (Filmer, TV-serier …) när man bläddrar.
+ */
+@Composable
+fun RowsBrowser(
+    vm: AppViewModel,
+    /** Nyckel för minnet av fokus och scroll, t.ex. "home" eller "section_1". */
+    memory: String,
+    rows: List<PlexHomeRow>,
+    liveNow: List<Channel>,
+    loading: Boolean,
+    error: String?,
+    loadingText: String,
+    emptyText: String,
+    onRetry: () -> Unit,
+    onRefresh: () -> Unit,
+    showUpdate: Boolean,
+    topBar: @Composable (FocusRequester) -> Unit,
+) {
     val topFocus = remember { FocusRequester() }
     val itemFocus = remember { FocusRequester() }
     var focusedItem by remember { mutableStateOf<PlexItem?>(null) }
@@ -73,12 +137,11 @@ fun HomeScreen(vm: AppViewModel) {
     var focusedLabel by remember { mutableStateOf<String?>(null) }
     var menuFor by remember { mutableStateOf<Pair<PlexItem, Boolean>?>(null) }
     // Kom tillbaka till samma kort som sist, om det finns kvar.
-    val rememberedKey = remember { vm.focusKeys["home"] }
-    val liveNow = remember(vm.playlist, vm.favorites, vm.recents) { vm.liveNowChannels() }
+    val rememberedKey = remember { vm.focusKeys[memory] }
     // Nyckeln bygger på radens namn och titelns id, så den håller även när raderna laddas om.
-    val rememberedExists = remember(vm.homeRows, liveNow) {
+    val rememberedExists = remember(rows, liveNow) {
         rememberedKey != null && (
-            vm.homeRows.any { row -> row.items.any { item -> homeKey(row.title, item.ratingKey) == rememberedKey } } ||
+            rows.any { row -> row.items.any { item -> homeKey(row.title, item.ratingKey) == rememberedKey } } ||
                 liveNow.any { ch -> homeKey(LIVE_ROW, ch.key) == rememberedKey }
             )
     }
@@ -87,7 +150,7 @@ fun HomeScreen(vm: AppViewModel) {
 
     // Utvalt i den stora rutan när inget kort har fokus (t.ex. när appen öppnas): fem rekommendationer
     // som byter av sig själva. Står fokus på knapparna i rutan stannar bytet.
-    val featured = remember(vm.homeRows) { pickFeatured(vm.homeRows) }
+    val featured = remember(rows) { pickFeatured(rows) }
     var featuredIndex by remember { mutableIntStateOf(0) }
     var heroButtonsFocused by remember { mutableStateOf(false) }
     val featuredItem = if (focusedItem == null && focusedChannel == null && featured.isNotEmpty()) {
@@ -128,39 +191,19 @@ fun HomeScreen(vm: AppViewModel) {
                 .fillMaxSize()
                 .padding(start = 48.dp, top = 28.dp),
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(end = 48.dp)
-                    // Fokus i menyn överst: den stora rutan visar det utvalda igen.
-                    .onFocusChanged {
-                        if (it.hasFocus) {
-                            focusedItem = null
-                            focusedChannel = null
-                            focusedLabel = null
-                        }
-                    },
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Text("JPTV", style = MaterialTheme.typography.headlineMedium, color = JptvColors.Accent)
-                Spacer(Modifier.width(16.dp))
-                Button(onClick = { vm.open(Screen.LiveTv) }, modifier = Modifier.focusRequester(topFocus)) {
-                    Text("Live-TV")
-                }
-                vm.visibleSections.forEach { section ->
-                    OutlinedButton(onClick = { vm.open(Screen.Section(section)) }) {
-                        Text(if (section.key in vm.favoriteSections) "★ ${section.title}" else section.title)
+            Box(
+                // Fokus i menyn överst: den stora rutan visar det utvalda igen.
+                Modifier.onFocusChanged {
+                    if (it.hasFocus) {
+                        focusedItem = null
+                        focusedChannel = null
+                        focusedLabel = null
                     }
-                }
-                OutlinedButton(onClick = { vm.open(Screen.Search) }) { Text("Sök") }
-                OutlinedButton(onClick = { vm.open(Screen.Settings) }) { Text("Inställningar") }
-                Spacer(Modifier.weight(1f))
-                Clock()
-            }
+                },
+            ) { topBar(topFocus) }
             Spacer(Modifier.height(12.dp))
 
-            vm.availableUpdate?.let { release ->
+            vm.availableUpdate?.takeIf { showUpdate }?.let { release ->
                 UpdateBanner(
                     text = vm.updateMessage ?: "JPTV ${release.versionName} finns att installera.",
                     busy = vm.updateBusy,
@@ -198,22 +241,22 @@ fun HomeScreen(vm: AppViewModel) {
                 }
             }
 
-            val error = vm.homeError
             when {
-                error != null && liveNow.isEmpty() -> MessageBox(
+                error != null && rows.isEmpty() && liveNow.isEmpty() -> MessageBox(
                     message = error,
                     buttonText = "Försök igen",
-                    onButton = { vm.connectAndLoad(rediscover = true) },
+                    onButton = onRetry,
                 )
-                vm.homeLoading && vm.homeRows.isEmpty() && liveNow.isEmpty() -> MessageBox("Hämtar från ${vm.serverName ?: "Plex"}…")
-                vm.homeRows.isEmpty() && liveNow.isEmpty() -> MessageBox(
-                    message = "Inget att visa ännu från Plex.",
+                loading && rows.isEmpty() && liveNow.isEmpty() -> MessageBox(loadingText)
+                rows.isEmpty() && liveNow.isEmpty() -> MessageBox(
+                    message = emptyText,
                     buttonText = "Uppdatera",
-                    onButton = { vm.refreshHome() },
+                    onButton = onRefresh,
                 )
                 else -> HomeRows(
                     vm = vm,
-                    rows = vm.homeRows,
+                    memory = memory,
+                    rows = rows,
                     liveNow = liveNow,
                     focusKey = if (rememberedExists) rememberedKey else null,
                     focusRequester = itemFocus,
@@ -221,7 +264,7 @@ fun HomeScreen(vm: AppViewModel) {
                         focusedItem = item
                         focusedLabel = label
                         if (item != null) focusedChannel = null
-                        vm.focusKeys["home"] = key
+                        vm.focusKeys[memory] = key
                     },
                     onChannelFocused = { focusedChannel = it },
                     onLongPress = { item, inContinue -> menuFor = item to inContinue },
@@ -238,10 +281,10 @@ fun HomeScreen(vm: AppViewModel) {
             )
         }
     }
-    LaunchedEffect(rememberedExists, vm.homeRows.isNotEmpty()) {
+    LaunchedEffect(rememberedExists, rows.isNotEmpty()) {
         if (initialFocusDone) return@LaunchedEffect
         // Vänta på raderna om vi har ett kort att komma tillbaka till men de inte hunnit laddas.
-        if (!rememberedExists && rememberedKey != null && vm.homeRows.isEmpty() && vm.homeLoading) return@LaunchedEffect
+        if (!rememberedExists && rememberedKey != null && rows.isEmpty() && loading) return@LaunchedEffect
         initialFocusDone = true
         if (rememberedExists) itemFocus.requestWhenReady() else topFocus.requestWhenReady()
     }
@@ -283,8 +326,9 @@ private fun FeaturedActions(vm: AppViewModel, item: PlexItem, index: Int, count:
  */
 private fun pickFeatured(rows: List<PlexHomeRow>): List<PlexItem> {
     fun usable(list: List<PlexItem>) = list.filter { (it.type == "movie" || it.type == "show") && it.art != null && !it.watched }
-    val movies = usable(rows.firstOrNull { it.title.startsWith("Rekommenderat för dig · Filmer") }?.items.orEmpty())
-    val shows = usable(rows.firstOrNull { it.title.startsWith("Rekommenderat för dig · Serier") }?.items.orEmpty())
+    val recs = usable(rows.filter { it.title.startsWith("Rekommenderat för dig") }.flatMap { it.items })
+    val movies = recs.filter { it.type == "movie" }
+    val shows = recs.filter { it.type == "show" }
     val mixed = buildList {
         for (i in 0 until maxOf(movies.size, shows.size)) {
             movies.getOrNull(i)?.let { add(it) }
@@ -292,7 +336,7 @@ private fun pickFeatured(rows: List<PlexHomeRow>): List<PlexItem> {
         }
     }
     val fallback = usable(
-        rows.filter { it.title.startsWith("Topplista") }.flatMap { it.items } +
+        rows.filter { it.title.startsWith("Topplista") || it.title.startsWith("Eftersom") }.flatMap { it.items } +
             rows.filter { it.title != CONTINUE_ROW }.flatMap { it.items },
     )
     return (mixed + fallback).distinctBy { it.ratingKey }.take(5)
@@ -428,6 +472,7 @@ private fun UpdateBanner(text: String, busy: Boolean, onUpdate: () -> Unit) {
 @Composable
 private fun HomeRows(
     vm: AppViewModel,
+    memory: String,
     rows: List<PlexHomeRow>,
     liveNow: List<Channel>,
     focusKey: String?,
@@ -436,7 +481,7 @@ private fun HomeRows(
     onChannelFocused: (Channel) -> Unit,
     onLongPress: (PlexItem, Boolean) -> Unit,
 ) {
-    val listState = vm.rememberListState("home")
+    val listState = vm.rememberListState(memory)
     val scope = rememberCoroutineScope()
     // Raderna (vågrätt) scrollar som vanligt; listan (lodrätt) styrs bara av pin() nedan.
     val rowSpec = LocalBringIntoViewSpec.current
@@ -472,7 +517,7 @@ private fun HomeRows(
                     Spacer(Modifier.height(8.dp))
                     CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec) {
                     LazyRow(
-                        state = vm.rememberListState("home_row_live"),
+                        state = vm.rememberListState("${memory}_row_live"),
                         horizontalArrangement = Arrangement.spacedBy(18.dp),
                         // Luft runt raden så att kortet med fokus (förstorat, med ram) inte klipps i kanten;
                         // raden flyttas lika mycket åt vänster så att den står kvar i linje med texten.
@@ -500,15 +545,9 @@ private fun HomeRows(
                 }
             }
         }
-        val lead = vm.homeLeadRows.coerceAtMost(rows.size)
-        val leadStart = index
-        index += lead
-        itemsIndexed(rows.take(lead), key = { r, _ -> rowKey(rows, r) }) { r, row ->
-            HomeRow(vm, rows, r, row, focusKey, focusRequester, onFocused, onLongPress, rowSpec, pin(leadStart + r).fillParentMaxHeight())
-        }
-        val restStart = index
-        itemsIndexed(rows.drop(lead), key = { r, _ -> rowKey(rows, r + lead) }) { r, row ->
-            HomeRow(vm, rows, r + lead, row, focusKey, focusRequester, onFocused, onLongPress, rowSpec, pin(restStart + r).fillParentMaxHeight())
+        val start = index
+        itemsIndexed(rows, key = { r, _ -> rowKey(rows, r) }) { r, row ->
+            HomeRow(vm, memory, rows, r, row, focusKey, focusRequester, onFocused, onLongPress, rowSpec, pin(start + r).fillParentMaxHeight())
         }
     }
     }
@@ -523,6 +562,7 @@ private object NoAutoScroll : BringIntoViewSpec {
 @Composable
 private fun HomeRow(
     vm: AppViewModel,
+    memory: String,
     rows: List<PlexHomeRow>,
     r: Int,
     row: PlexHomeRow,
@@ -540,7 +580,7 @@ private fun HomeRow(
                 // Nycklar på id (inte plats), så att fokus följer med när ordningen ändras.
                 val items = remember(row) { row.items.distinctBy { it.ratingKey } }
                 LazyRow(
-                    state = vm.rememberListState("home_row_${rowKey(rows, r)}"),
+                    state = vm.rememberListState("${memory}_row_${rowKey(rows, r)}"),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     // Luft så att affischen med fokus inte klipps i vänsterkanten (se raden ovan).
                     contentPadding = PaddingValues(start = EdgeRoom, end = 48.dp, top = 10.dp, bottom = 10.dp),

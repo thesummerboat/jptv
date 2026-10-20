@@ -60,9 +60,93 @@ import se.jptv.plex.PlexFilterOption
 import se.jptv.plex.PlexItem
 import se.jptv.plex.PlexSection
 
-/** Hela biblioteket som rutnät, med genre, samlingar, sortering och filter för osedda. */
+/**
+ * Ett bibliotek (Filmer, TV-serier …). Två lägen: Bläddra – stor ruta och rader med affischer som på
+ * hemskärmen – och Alla titlar – rutnät med kategorier, sortering och bokstavslist. Läget minns per bibliotek.
+ */
 @Composable
 fun SectionScreen(vm: AppViewModel, section: PlexSection, initialGenre: PlexFilterOption? = null) {
+    val modeKey = "section_mode_${section.key}"
+    var browse by remember { mutableStateOf(initialGenre == null && vm.focusKeys[modeKey] != "grid") }
+    if (browse) {
+        SectionBrowse(
+            vm = vm,
+            section = section,
+            onShowAll = { genre ->
+                vm.sectionGenre[section.key] = genre
+                vm.focusKeys[modeKey] = "grid"
+                browse = false
+            },
+        )
+    } else {
+        SectionGrid(
+            vm = vm,
+            section = section,
+            initialGenre = initialGenre,
+            onBrowse = {
+                vm.focusKeys[modeKey] = "browse"
+                browse = true
+            },
+        )
+    }
+}
+
+/** Bläddra i ett bibliotek: utvalt i den stora rutan och rader (nytt, rekommenderat, topplista, genrer …). */
+@Composable
+private fun SectionBrowse(vm: AppViewModel, section: PlexSection, onShowAll: (PlexFilterOption?) -> Unit) {
+    val rows by produceState(vm.cachedSectionRows(section.key), section.key, vm.libraryVersion, vm.homeRows) {
+        value = try {
+            vm.sectionRows(section)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            value ?: emptyList()
+        }
+    }
+    val genres by produceState<List<PlexFilterOption>>(emptyList(), section.key) {
+        value = runCatching { vm.genres(section.key) }.getOrDefault(emptyList())
+    }
+    RowsBrowser(
+        vm = vm,
+        memory = "section_${section.key}",
+        rows = rows.orEmpty(),
+        liveNow = emptyList(),
+        loading = rows == null,
+        error = null,
+        loadingText = "Hämtar ${section.title}…",
+        emptyText = "Inget att visa i ${section.title} ännu.",
+        onRetry = {},
+        onRefresh = { onShowAll(null) },
+        showUpdate = false,
+        topBar = { topFocus ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(end = 48.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                ScreenTitle(section.title)
+                Spacer(Modifier.width(8.dp))
+                Button(onClick = {}, modifier = Modifier.focusRequester(topFocus)) { Text("Bläddra") }
+                OutlinedButton(onClick = { onShowAll(null) }) { Text("Alla titlar") }
+                // Kategorier: OK öppnar rutnätet med den genren.
+                LazyRow(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    contentPadding = PaddingValues(vertical = 4.dp),
+                ) {
+                    itemsIndexed(genres, key = { _, g -> "g_${g.id}" }) { _, g ->
+                        OutlinedButton(onClick = { onShowAll(g) }) { Text(g.title) }
+                    }
+                }
+                Clock()
+            }
+        },
+    )
+}
+
+/** Hela biblioteket som rutnät, med genre, samlingar, sortering och filter för osedda. */
+@Composable
+private fun SectionGrid(vm: AppViewModel, section: PlexSection, initialGenre: PlexFilterOption?, onBrowse: () -> Unit) {
     var sort by remember { mutableStateOf(vm.sectionSort[section.key] ?: LibrarySort.TITLE) }
     var unwatched by remember { mutableStateOf(vm.sectionUnwatched[section.key] ?: false) }
     var genre by remember { mutableStateOf(initialGenre ?: vm.sectionGenre[section.key]) }
@@ -158,6 +242,10 @@ fun SectionScreen(vm: AppViewModel, section: PlexSection, initialGenre: PlexFilt
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             contentPadding = PaddingValues(vertical = 4.dp),
         ) {
+            // Tillbaka till raderna med affischer.
+            item(key = "browse") {
+                OutlinedButton(onClick = onBrowse) { Text("◀ Bläddra") }
+            }
             itemsIndexed(chips, key = { _, c -> c.key }) { _, c ->
                 val selected = c.key == selectedChip
                 val mod = if (selected) Modifier.focusRequester(chipFocus) else Modifier

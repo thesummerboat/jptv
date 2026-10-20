@@ -851,22 +851,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             shown.map { s -> async { s to (runCatching { plex.all(s.key) }.getOrNull() ?: emptyList()) } }.awaitAll()
         }
         val history = runCatching { plex.watchHistory() }.getOrDefault(emptyList())
+        libraryItems = bySection.associate { (s, all) -> s.key to all }
+        sectionRowsCache.clear()
 
         // IMDb-topplistor för favoritbiblioteken (eller alla om inga favoriter).
         val topRows = mutableListOf<PlexHomeRow>()
         for ((s, all) in bySection) {
             if (favoriteSections.isNotEmpty() && s.key !in favoriteSections) continue
-            val minVotes = if (s.type == "movie") 25_000 else 10_000
-            val top = withContext(kotlinx.coroutines.Dispatchers.Default) {
-                all.mapNotNull { item ->
-                    val fromFile = item.imdbId?.let { imdb.lookup(it) }
-                    when {
-                        fromFile != null && fromFile.second >= minVotes -> item to fromFile.first
-                        fromFile == null -> item.ratings.firstOrNull { it.source == "IMDb" }?.let { item to it.value.toFloat() }
-                        else -> null
-                    }
-                }.sortedByDescending { it.second }.take(20).map { it.first }
-            }
+            val top = imdbTop(s, all)
             if (top.size >= 5) topRows += PlexHomeRow("Topplista IMDb · ${s.title}", top)
         }
         imdbTopRows = topRows
@@ -876,6 +868,79 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
         rebuildHome()
         saveHomeCache()
+    }
+
+    /** Bibliotekets bästa enligt IMDb (med tillräckligt många röster), högst 20. */
+    private suspend fun imdbTop(s: PlexSection, all: List<PlexItem>): List<PlexItem> {
+        val minVotes = if (s.type == "movie") 25_000 else 10_000
+        return withContext(kotlinx.coroutines.Dispatchers.Default) {
+            all.mapNotNull { item ->
+                val fromFile = item.imdbId?.let { imdb.lookup(it) }
+                when {
+                    fromFile != null && fromFile.second >= minVotes -> item to fromFile.first
+                    fromFile == null -> item.ratings.firstOrNull { it.source == "IMDb" }?.let { item to it.value.toFloat() }
+                    else -> null
+                }
+            }.sortedByDescending { it.second }.take(20).map { it.first }
+        }
+    }
+
+    // ---------- Biblioteken: rader att bläddra i (som hemskärmen, men för ett bibliotek) ----------
+
+    /** Alla titlar per bibliotek från senaste genomgången (för rader per genre). */
+    private var libraryItems: Map<String, List<PlexItem>> = emptyMap()
+    private val sectionRowsCache = HashMap<String, Pair<Long, List<PlexHomeRow>>>()
+
+    /** Senast byggda rader för biblioteket, så att sidan visas direkt när man kommer tillbaka. */
+    fun cachedSectionRows(sectionKey: String): List<PlexHomeRow>? = sectionRowsCache[sectionKey]?.second
+
+    /**
+     * Rader för ett bibliotek: Fortsätt titta, Nytt, Rekommenderat för dig, Eftersom du såg …,
+     * Topplista IMDb, Plex egna rader och de största genrerna (nyast först).
+     */
+    suspend fun sectionRows(section: PlexSection): List<PlexHomeRow> {
+        val now = System.currentTimeMillis()
+        sectionRowsCache[section.key]?.let { (at, rows) -> if (now - at < 30 * 60_000L) return rows }
+        val key = section.key
+        fun inSection(item: PlexItem) = item.sectionKey == null || item.sectionKey == key
+        val rows = mutableListOf<PlexHomeRow>()
+        homeRows.firstOrNull { it.title == "Fortsätt titta" }?.let { r ->
+            val items = r.items.filter { it.sectionKey == key }
+            if (items.isNotEmpty()) rows += r.copy(items = items)
+        }
+        val newRow = homeRows.firstOrNull { it.title == "Nytt i ${section.title}" } ?: run {
+            val items = runCatching { plex.recentlyAdded(key) }.getOrDefault(emptyList())
+            when {
+                items.isEmpty() -> null
+                section.type == "show" -> groupNewEpisodes("Nytt", items)
+                else -> PlexHomeRow("Nytt", items)
+            }
+        }
+        newRow?.let { rows += it.copy(title = "Nytt") }
+        for (r in recRows) {
+            val items = r.items.filter { inSection(it) }
+            if (items.size < 4) continue
+            val title = if (r.title.startsWith("Rekommenderat för dig")) "Rekommenderat för dig" else r.title
+            rows += r.copy(title = title, items = items)
+        }
+        val all = libraryItems[key] ?: runCatching { plex.all(key) }.getOrDefault(emptyList())
+        val top = imdbTop(section, all)
+        if (top.size >= 5) rows += PlexHomeRow("Topplista IMDb", top)
+        val hubs = runCatching { plex.sectionHubs(key) }.getOrDefault(emptyList())
+            .map { it.copy(items = visible(it.items)) }
+            .filter { it.items.size >= 3 }
+        rows += hubs
+        val byGenre = withContext(kotlinx.coroutines.Dispatchers.Default) {
+            all.flatMap { item -> item.genres.map { g -> g to item } }
+                .groupBy({ it.first }, { it.second })
+                .entries.sortedByDescending { it.value.size }
+                .take(8)
+                .map { (g, items) -> PlexHomeRow(g, items.sortedByDescending { it.addedAt }.take(25)) }
+        }
+        rows += byGenre.filter { it.items.size >= 4 }
+        val result = rows.distinctBy { it.title }
+        sectionRowsCache[key] = now to result
+        return result
     }
 
     private fun buildRecommendations(
