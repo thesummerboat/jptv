@@ -90,8 +90,9 @@ fun HomeScreen(vm: AppViewModel) {
         Backdrop(
             url = vm.plex.imageUrl(focusedItem?.art, 1280, 720),
             imageAlpha = imageAlpha,
-            // Bakgrunden syns ända ner till raderna; mörknar först längre ner.
-            fadeFrom = 0.45f,
+            // Bakgrunden syns ända ner till raderna och fritt till höger; mörkt bara bakom texten.
+            fadeFrom = 0.55f,
+            leftScrimOnly = true,
             video = { HeroTrailer(vm, focusedItem, enabled = menuFor == null, state = trailer) },
         )
         Column(
@@ -235,11 +236,25 @@ private fun FocusedInfo(vm: AppViewModel, item: PlexItem?, channel: Channel?, la
                     ).joinToString("  ·  ")
                     if (meta.isNotEmpty()) {
                         Spacer(Modifier.width(12.dp))
-                        Text(meta, color = JptvColors.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            meta,
+                            color = JptvColors.Text.copy(alpha = 0.75f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodyLarge.copy(shadow = HeroShadow),
+                        )
                     }
                 }
                 item.summary?.let {
-                    Text(it, color = JptvColors.Text.copy(alpha = 0.85f), maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    // Smal spalt med skugga, så att den går att läsa även över ljusa bilder.
+                    Text(
+                        it,
+                        color = JptvColors.Text.copy(alpha = 0.9f),
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodyLarge.copy(shadow = HeroShadow),
+                        modifier = Modifier.width(440.dp),
+                    )
                 }
             }
             channel != null -> {
@@ -268,6 +283,13 @@ private fun FocusedInfo(vm: AppViewModel, item: PlexItem?, channel: Channel?, la
 }
 
 private val HERO_HEIGHT = 250.dp
+
+/** Mjuk skugga bakom texten i den stora rutan, för ljusa bakgrunder. */
+private val HeroShadow = androidx.compose.ui.graphics.Shadow(
+    color = Color.Black.copy(alpha = 0.7f),
+    offset = androidx.compose.ui.geometry.Offset(0f, 2f),
+    blurRadius = 8f,
+)
 private val HOME_POSTER = 64.dp
 
 @Composable
@@ -320,7 +342,7 @@ private fun HomeRows(
             val pinAt = index++
             item(key = "live_now") {
                 Column(pin(pinAt)) {
-                    Text(if (vm.favorites.isEmpty()) "Senaste kanaler" else "Live nu", style = MaterialTheme.typography.titleMedium)
+                    Text(if (vm.favorites.isEmpty()) "Senaste kanaler" else "Live nu", style = MaterialTheme.typography.titleMedium.copy(shadow = HeroShadow))
                     Spacer(Modifier.height(8.dp))
                     CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec) {
                     LazyRow(
@@ -384,7 +406,7 @@ private fun HomeRow(
 ) {
     CompositionLocalProvider(LocalBringIntoViewSpec provides rowSpec) {
             Column(modifier) {
-                Text(row.title, style = MaterialTheme.typography.titleMedium)
+                Text(row.title, style = MaterialTheme.typography.titleMedium.copy(shadow = HeroShadow))
                 Spacer(Modifier.height(8.dp))
                 // Nycklar på id (inte plats), så att fokus följer med när ordningen ändras.
                 val items = remember(row) { row.items.distinctBy { it.ratingKey } }
