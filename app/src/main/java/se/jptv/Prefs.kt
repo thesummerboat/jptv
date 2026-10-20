@@ -50,6 +50,11 @@ class Prefs(context: Context) {
         get() = sp.getStringSet("favorites", emptySet())?.toSet() ?: emptySet()
         set(value) { sp.edit().putStringSet("favorites", value).apply() }
 
+    /** Påminnelser från guiden, en per rad: kanalnyckel, start, titel och kanalnamn med tabb emellan. */
+    var reminders: List<String>
+        get() = sp.getString("reminders", null)?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
+        set(value) { sp.edit().putString("reminders", value.joinToString("\n")).apply() }
+
     /** Senast tittade kanaler, nyast först. */
     var recents: List<String>
         get() = sp.getString("recents", null)?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()

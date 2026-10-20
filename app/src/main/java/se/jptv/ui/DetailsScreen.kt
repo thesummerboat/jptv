@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -55,13 +57,26 @@ fun DetailsScreen(vm: AppViewModel, initial: PlexItem) {
         trailer = runCatching { vm.plex.trailers(item) }.getOrNull()?.firstOrNull()
     }
 
+    // Som hemskärmen: fri bild till höger och trailern ljudlöst i bakgrunden efter några sekunder.
+    val trailerState = remember { TrailerState() }
+    val imageAlpha by animateFloatAsState(
+        targetValue = if (trailerState.showing) 0f else 1f,
+        animationSpec = tween(if (trailerState.showing) 900 else 300),
+        label = "trailer",
+    )
+
     Box(Modifier.fillMaxSize()) {
-        Backdrop(vm.plex.imageUrl(item.art, 1920, 1080))
+        Backdrop(
+            url = vm.plex.imageUrl(item.art, 1920, 1080),
+            imageAlpha = imageAlpha,
+            video = { HeroTrailer(vm, item, enabled = true, state = trailerState) },
+            fadeFrom = 0.5f,
+            leftScrimOnly = true,
+        )
         Column(
             Modifier
-                .align(Alignment.CenterStart)
-                .padding(start = 64.dp, end = 64.dp)
-                .width(900.dp),
+                .align(Alignment.BottomStart)
+                .padding(start = 64.dp, end = 64.dp, bottom = 48.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             if (item.type == "episode") {
@@ -77,16 +92,17 @@ fun DetailsScreen(vm: AppViewModel, initial: PlexItem) {
                         if (item.season != null && item.episode != null) append("Säsong ${item.season} · Avsnitt ${item.episode}  ")
                         append(item.title)
                     },
-                    style = MaterialTheme.typography.displaySmall,
+                    style = MaterialTheme.typography.headlineMedium.copy(shadow = TextShadow),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.width(620.dp),
                 )
             } else {
                 TitleLogo(
                     logoUrl = vm.plex.rawImageUrl(logo),
                     title = item.title,
-                    maxHeight = 140.dp,
-                    maxWidth = 560.dp,
+                    maxHeight = 120.dp,
+                    maxWidth = 480.dp,
                     textStyle = MaterialTheme.typography.displayMedium,
                 )
             }
@@ -99,15 +115,29 @@ fun DetailsScreen(vm: AppViewModel, initial: PlexItem) {
                 item.contentRating?.let { add(it) }
                 if (item.genres.isNotEmpty()) add(item.genres.take(3).joinToString(", "))
             }
-            Text(facts.joinToString("  ·  "), color = JptvColors.TextDim)
+            Text(
+                facts.joinToString("  ·  "),
+                color = JptvColors.Text.copy(alpha = 0.75f),
+                style = MaterialTheme.typography.bodyLarge.copy(shadow = TextShadow),
+            )
 
             val subs = item.streams.filter { it.type == 3 }.mapNotNull { it.languageCode }.distinct()
             if (subs.isNotEmpty()) {
-                Text("Undertexter: ${subs.joinToString(", ")}", color = JptvColors.TextDim, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "Undertexter: ${subs.joinToString(", ")}",
+                    color = JptvColors.Text.copy(alpha = 0.7f),
+                    style = MaterialTheme.typography.bodySmall.copy(shadow = TextShadow),
+                )
             }
 
             item.summary?.let {
-                Text(it, maxLines = 5, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    it,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodyLarge.copy(shadow = TextShadow),
+                    modifier = Modifier.width(560.dp),
+                )
             }
 
             if (item.progress > 0f) {
@@ -219,6 +249,13 @@ fun Backdrop(
         )
     }
 }
+
+/** Mjuk skugga bakom text som ligger över bilder och trailers. */
+val TextShadow = androidx.compose.ui.graphics.Shadow(
+    color = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.7f),
+    offset = androidx.compose.ui.geometry.Offset(0f, 2f),
+    blurRadius = 8f,
+)
 
 fun formatDuration(ms: Long): String {
     val minutes = ms / 60_000

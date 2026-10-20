@@ -154,7 +154,7 @@ internal fun buildExoPlayer(context: Context, tunneling: Boolean): ExoPlayer {
 /** scale: 0 = anpassa, 1 = fyll (sträck), 2 = zooma (beskär). */
 @OptIn(UnstableApi::class)
 @Composable
-internal fun VideoSurface(exo: ExoPlayer, scale: Int) {
+internal fun VideoSurface(exo: ExoPlayer, scale: Int, keepContent: Boolean = false) {
     AndroidView(
         factory = { ctx ->
             PlayerView(ctx).apply {
@@ -162,6 +162,8 @@ internal fun VideoSurface(exo: ExoPlayer, scale: Int) {
                 isFocusable = false
                 isFocusableInTouchMode = false
                 setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                // Live: senaste bilden står kvar vid paus och kanalbyte i stället för svart.
+                setKeepContentOnPlayerReset(keepContent)
                 player = exo
             }
         },
@@ -1007,8 +1009,8 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         }
         error?.let { MessageBox(it) }
     }
-    LaunchedEffect(panel, cardVisible) {
-        if (panel == VodPanel.NONE && !cardVisible) focus.requestWhenReady()
+    LaunchedEffect(panel, cardVisible, vm.dueReminder == null) {
+        if (panel == VodPanel.NONE && !cardVisible && vm.dueReminder == null) focus.requestWhenReady()
     }
 }
 
@@ -1891,12 +1893,130 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
         }
     }
 
+    // ---------- Pausa live ----------
+    // Paus stänger direktströmmen och spelar i stället in kanalen till en fil på TV:n (en anslutning).
+    // Uppspelningen fortsätter ur filen, med ⏪/⏩ ±30 s och "Till live". HLS-kanaler pausas av spelaren själv.
+    val scope = rememberCoroutineScope()
+    var shift by remember { mutableStateOf<LiveRecorder?>(null) }
+    /** Hur långt efter live man är (ms), utöver en pågående paus. */
+    var behindMs by remember { mutableLongStateOf(0L) }
+    /** När pausen började (0 = spelar). */
+    var pausedAt by remember { mutableLongStateOf(0L) }
+    var recordJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+
+    /** Kanalen som faktiskt spelar (läses vid anropet, inte när funktionen skapades). */
+    fun playingChannel(): Channel? = channels.firstOrNull { it.key == playingKey } ?: channels.getOrNull(index)
+
+    fun currentBehind(): Long = behindMs + if (pausedAt != 0L) System.currentTimeMillis() - pausedAt else 0L
+
+    fun pauseLive() {
+        if (pausedAt != 0L) return
+        val ch = playingChannel() ?: return
+        pausedAt = System.currentTimeMillis()
+        exo.pause()
+        if (shift == null && Timeshift.needsRecording(ch)) {
+            // Stäng direktströmmen först och vänta en kort stund, så att det aldrig blir två anslutningar.
+            exo.stop()
+            recordJob = scope.launch {
+                delay(400)
+                shift = Timeshift.start(context, ch)
+            }
+        }
+    }
+
+    fun resumeLive() {
+        if (pausedAt == 0L) return
+        val ch = playingChannel() ?: return
+        behindMs = currentBehind()
+        pausedAt = 0L
+        val rec = shift
+        if (rec == null && Timeshift.needsRecording(ch) && exo.playbackState == Player.STATE_IDLE) {
+            // Pausen var för kort för att hinna spela in: tillbaka till direktströmmen.
+            recordJob?.cancel()
+            behindMs = 0L
+            exo.setMediaSource(liveSource(ch))
+            exo.prepare()
+        } else if (rec != null && exo.playbackState == Player.STATE_IDLE) {
+            // Första gången efter pausen: inspelningen från början, där pausen gjordes.
+            exo.setMediaSource(Timeshift.source(rec, 0L))
+            exo.prepare()
+        }
+        exo.play()
+    }
+
+    fun goLive() {
+        val ch = playingChannel() ?: return
+        recordJob?.cancel()
+        val rec = shift
+        shift = null
+        behindMs = 0L
+        pausedAt = 0L
+        if (rec == null) {
+            // HLS: hoppa fram till kanten av kanalens fönster.
+            if (!Timeshift.needsRecording(ch)) exo.seekToDefaultPosition()
+            exo.play()
+            return
+        }
+        rec.stop()
+        scope.launch {
+            // Inspelningens anslutning stängs först, sedan direktströmmen igen.
+            delay(400)
+            exo.setMediaSource(liveSource(ch))
+            exo.prepare()
+            exo.play()
+        }
+    }
+
+    /** ⏪ (negativt) och ⏩ (positivt) i inspelningen; ⏩ ända fram går till live. */
+    fun seekShift(deltaMs: Long) {
+        val ch = playingChannel() ?: return
+        if (!Timeshift.needsRecording(ch)) {
+            // HLS: spola inom kanalens fönster.
+            val target = currentBehind() - deltaMs
+            if (target < 3_000 && deltaMs > 0) {
+                goLive()
+            } else {
+                exo.seekTo((exo.currentPosition + deltaMs).coerceAtLeast(0L))
+                behindMs = target.coerceAtLeast(0L)
+                if (pausedAt != 0L) pausedAt = System.currentTimeMillis()
+            }
+            return
+        }
+        val rec = shift ?: return
+        val wanted = currentBehind() - deltaMs
+        if (wanted < 3_000 && deltaMs > 0) {
+            goLive()
+            return
+        }
+        val rate = rec.bytesPerSecond
+        val offset = Timeshift.offsetFor(wanted.coerceAtLeast(0L), rec.written, rate) ?: return
+        behindMs = TimeshiftMath.behindFor(offset, rec.written, rate)
+        if (pausedAt != 0L) pausedAt = System.currentTimeMillis()
+        exo.setMediaSource(Timeshift.source(rec, offset))
+        exo.prepare()
+    }
+
+    /** Ny kanal, fel eller när spelaren stängs: inspelningen bort. */
+    fun dropShift() {
+        recordJob?.cancel()
+        shift?.stop()
+        shift = null
+        behindMs = 0L
+        pausedAt = 0L
+    }
+
     DisposableEffect(exo) {
         val listener = object : Player.Listener {
             override fun onPlayerError(e: PlaybackException) {
                 if (e.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
                     exo.seekToDefaultPosition()
                     exo.prepare()
+                    behindMs = 0L
+                    return
+                }
+                // Inspelningen gick inte att läsa: tillbaka till live.
+                if (shift != null) {
+                    goLive()
                     return
                 }
                 // Tillfälliga nätfel: försök igen ett par gånger innan vi visar fel.
@@ -1923,6 +2043,11 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                         channels.firstOrNull { it.key == key }?.let { vm.onChannelTuned(it) }
                     }
                 }
+                // Inspelningen är slut (full eller avbruten): tillbaka till live.
+                if (playbackState == Player.STATE_ENDED && shift != null) {
+                    goLive()
+                    return
+                }
                 // IPTV-strömmar stänger ibland anslutningen; ExoPlayer ser det som "slut". Anslut igen.
                 if (playbackState == Player.STATE_ENDED) {
                     if (retries < 3) {
@@ -1945,8 +2070,10 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
             DisplayModes.release(restore = toMenus)
             // Bild-i-bild: kanalen som faktiskt spelar fortsätter i ett hörn, med samma ström.
             val playingIndex = channels.indexOfFirst { it.key == playingKey }
+            // Pausad eller efter live: ingen bild-i-bild (inspelningen stängs).
             val keep = toMenus && vm.pipEnabled && !stopRequested && !stoppedInBackground &&
-                error == null && playingIndex >= 0
+                error == null && playingIndex >= 0 && shift == null && pausedAt == 0L
+            dropShift()
             if (keep) {
                 vm.startPip(LiveSession(exo, channels, playingIndex, previousKey))
             } else {
@@ -1963,6 +2090,11 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
         stoppedInBackground = true
         exo.stop()
+        // Inspelningen stängs; vid återkomst startar direktströmmen igen.
+        if (shift != null || pausedAt != 0L) {
+            dropShift()
+            playingChannel()?.let { exo.setMediaSource(liveSource(it)) }
+        }
     }
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
         if (stoppedInBackground) {
@@ -1979,6 +2111,7 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
     // Ny kanal vald -> starta den. Vid snabb zappning (håll ▲/▼) ansluts bara kanalen man stannar på:
     // många leverantörer tillåter en ström åt gången och spärrar vid för många anslutningar.
     LaunchedEffect(channel.key) {
+        if (shift != null || pausedAt != 0L) dropShift()
         error = null
         retries = 0
         showBanner()
@@ -2052,6 +2185,7 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                             if (okDown) {
                                 when {
                                     okLong -> optionsOpen = true
+                                    pausedAt != 0L -> resumeLive()
                                     error != null -> {
                                         // Ny källa: prepare() gör inget om strömmen redan har tagit slut.
                                         retries = 0
@@ -2114,11 +2248,53 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                         vm.back()
                         true
                     }
+                    code == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || code == KeyEvent.KEYCODE_SPACE -> {
+                        if (pausedAt != 0L) resumeLive() else pauseLive()
+                        true
+                    }
+                    code == KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                        pauseLive()
+                        true
+                    }
+                    code == KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                        resumeLive()
+                        true
+                    }
+                    code == KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                        seekShift(-30_000)
+                        true
+                    }
+                    code == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                        seekShift(30_000)
+                        true
+                    }
                     else -> false
                 }
             },
     ) {
-        VideoSurface(exo, vm.videoScale)
+        VideoSurface(exo, vm.videoScale, keepContent = true)
+        // Pausad / efter live: hur långt efter, och vilka knappar som gäller.
+        var shiftTick by remember { mutableIntStateOf(0) }
+        LaunchedEffect(pausedAt != 0L || behindMs > 0L) {
+            while (pausedAt != 0L || behindMs > 0L) {
+                shiftTick++
+                delay(1_000)
+            }
+        }
+        if ((pausedAt != 0L || behindMs > 0L) && !listOpen && !optionsOpen) {
+            shiftTick.let { }
+            val behind = formatTime(currentBehind())
+            Chip(
+                if (pausedAt != 0L) {
+                    "⏸ Pausad · −$behind · OK/▶‖ fortsätt" + if (shift != null || !Timeshift.needsRecording(channel)) " · ⏪ ⏩" else ""
+                } else {
+                    "−$behind efter live · ⏪ 30 s · ⏩ 30 s · Till live i alternativen"
+                },
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(32.dp),
+            )
+        }
         if ((bannerVisible || error != null) && !listOpen && !optionsOpen) {
             ChannelBanner(
                 vm = vm,
@@ -2183,7 +2359,27 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                                 showBanner()
                                 close()
                             },
-                        ),
+                            if (pausedAt != 0L) {
+                                PanelOption("Fortsätt") {
+                                    resumeLive()
+                                    close()
+                                }
+                            } else {
+                                PanelOption("Pausa (spelas in på TV:n)") {
+                                    pauseLive()
+                                    close()
+                                }
+                            },
+                        ) + if (pausedAt != 0L || behindMs > 0L) {
+                            listOf(
+                                PanelOption("Till live (−${formatTime(currentBehind())})") {
+                                    goLive()
+                                    close()
+                                },
+                            )
+                        } else {
+                            emptyList()
+                        },
                     ),
                 )
                 if (audio.size > 1) {
@@ -2216,8 +2412,9 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
             )
         }
     }
-    LaunchedEffect(listOpen, optionsOpen) {
-        if (!listOpen && !optionsOpen) focus.requestWhenReady()
+    // Tillbaka till spelaren efter paneler och påminnelsen.
+    LaunchedEffect(listOpen, optionsOpen, vm.dueReminder == null) {
+        if (!listOpen && !optionsOpen && vm.dueReminder == null) focus.requestWhenReady()
     }
 }
 

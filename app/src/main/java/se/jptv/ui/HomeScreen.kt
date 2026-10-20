@@ -284,12 +284,8 @@ private fun FocusedInfo(vm: AppViewModel, item: PlexItem?, channel: Channel?, la
 
 private val HERO_HEIGHT = 250.dp
 
-/** Mjuk skugga bakom texten i den stora rutan, för ljusa bakgrunder. */
-private val HeroShadow = androidx.compose.ui.graphics.Shadow(
-    color = Color.Black.copy(alpha = 0.7f),
-    offset = androidx.compose.ui.geometry.Offset(0f, 2f),
-    blurRadius = 8f,
-)
+/** Skuggan bakom texten i den stora rutan (samma som på detaljsidan). */
+private val HeroShadow = TextShadow
 private val HOME_POSTER = 64.dp
 
 @Composable

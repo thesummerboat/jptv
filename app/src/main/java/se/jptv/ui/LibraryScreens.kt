@@ -46,6 +46,12 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.OutlinedButton
 import androidx.tv.material3.Text
 import kotlinx.coroutines.CancellationException
+import androidx.compose.foundation.layout.size
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.foundation.layout.fillMaxWidth
 import se.jptv.AppViewModel
 import se.jptv.Screen
 import se.jptv.plex.LibrarySort
@@ -184,7 +190,7 @@ fun SectionScreen(vm: AppViewModel, section: PlexSection, initialGenre: PlexFilt
                     else -> "Biblioteket är tomt."
                 },
             )
-            else -> PosterGrid(vm, items, memoryKey)
+            else -> PosterGrid(vm, items, memoryKey, letters = sort == LibrarySort.TITLE && !showCollections)
         }
     }
     // Fokus på den valda kategorin när sidan öppnas (när genrerna har kommit, om en genre är vald).
@@ -209,40 +215,107 @@ private data class CategoryChip(
 
 /** Affischer i rutnät; minns fokus och scroll per lista. */
 @Composable
-private fun PosterGrid(vm: AppViewModel, items: List<PlexItem>, memoryKey: String, focusFirst: Boolean = false) {
+private fun PosterGrid(
+    vm: AppViewModel,
+    items: List<PlexItem>,
+    memoryKey: String,
+    focusFirst: Boolean = false,
+    /** Bokstavslist vid kanten (när listan är sorterad A–Ö). */
+    letters: Boolean = false,
+) {
     val firstFocus = remember { FocusRequester() }
+    val jumpFocus = remember { FocusRequester() }
+    var jumpTarget by remember { mutableIntStateOf(-1) }
     val remembered = remember(memoryKey) { vm.focusKeys[memoryKey] }
     val focusIndex = remember(items) {
         items.indexOfFirst { it.ratingKey == remembered }.let { if (it < 0 && focusFirst) 0 else it }
     }
     val grid = vm.rememberGridState(memoryKey)
-    LazyVerticalGrid(
-        state = grid,
-        columns = GridCells.Adaptive(PosterWidth + 18.dp),
-        verticalArrangement = Arrangement.spacedBy(24.dp),
-        horizontalArrangement = Arrangement.spacedBy(18.dp),
-        contentPadding = PaddingValues(top = 6.dp, bottom = 48.dp),
-    ) {
-        // Nyckel på id, så att fokus stannar på samma titel när listan laddas om efter en skanning.
-        itemsIndexed(items, key = { _, item -> item.ratingKey }) { i, item ->
-            PosterCard(
-                title = item.displayTitle,
-                subtitle = if (item.isCollection) item.childCount?.let { "$it titlar" } else vm.posterSubtitle(item),
-                imageUrl = vm.plex.imageUrl(item.thumb),
-                progress = item.progress,
-                watched = item.watched || (item.type == "show" && !item.hasUnwatched && (item.childCount ?: 0) > 0),
-                onClick = { vm.select(item) },
-                modifier = Modifier
-                    .onFocusChanged { if (it.hasFocus) vm.focusKeys[memoryKey] = item.ratingKey }
-                    .then(if (i == focusIndex) Modifier.focusRequester(firstFocus) else Modifier),
+    val scope = rememberCoroutineScope()
+    // Bokstäverna i listans ordning (Plex sorterar), med första titeln för varje.
+    val index = remember(items, letters) { if (letters) LetterIndex.build(items.map { it.titleSort ?: it.title }) else emptyList() }
+
+    Row(Modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            state = grid,
+            columns = GridCells.Adaptive(PosterWidth + 18.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp),
+            horizontalArrangement = Arrangement.spacedBy(18.dp),
+            contentPadding = PaddingValues(top = 6.dp, bottom = 48.dp),
+            modifier = Modifier.weight(1f),
+        ) {
+            // Nyckel på id, så att fokus stannar på samma titel när listan laddas om efter en skanning.
+            itemsIndexed(items, key = { _, item -> item.ratingKey }) { i, item ->
+                PosterCard(
+                    title = item.displayTitle,
+                    subtitle = if (item.isCollection) item.childCount?.let { "$it titlar" } else vm.posterSubtitle(item),
+                    imageUrl = vm.plex.imageUrl(item.thumb),
+                    progress = item.progress,
+                    watched = item.watched || (item.type == "show" && !item.hasUnwatched && (item.childCount ?: 0) > 0),
+                    onClick = { vm.select(item) },
+                    modifier = Modifier
+                        .onFocusChanged { if (it.hasFocus) vm.focusKeys[memoryKey] = item.ratingKey }
+                        .then(if (i == focusIndex) Modifier.focusRequester(firstFocus) else Modifier)
+                        .then(if (i == jumpTarget) Modifier.focusRequester(jumpFocus) else Modifier),
+                )
+            }
+        }
+        if (index.size > 1) {
+            Spacer(Modifier.width(12.dp))
+            LetterRail(
+                letters = index,
+                // Bläddra i listan: rutnätet följer med. OK: in i rutnätet på första titeln med bokstaven.
+                onFocusLetter = { i -> scope.launch { grid.scrollToItem(i) } },
+                onPickLetter = { i -> jumpTarget = i },
             )
         }
+    }
+    LaunchedEffect(jumpTarget) {
+        if (jumpTarget < 0) return@LaunchedEffect
+        if (grid.layoutInfo.visibleItemsInfo.none { it.index == jumpTarget }) grid.scrollToItem(jumpTarget)
+        jumpFocus.requestWhenReady()
     }
     // Tillbaka till samma affisch som sist; första gången stannar fokus på knapparna ovanför.
     LaunchedEffect(items) {
         if (focusIndex < 0) return@LaunchedEffect
         if (grid.layoutInfo.visibleItemsInfo.none { it.index == focusIndex }) grid.scrollToItem(focusIndex)
         firstFocus.requestWhenReady()
+    }
+}
+
+/** Smal list med bokstäver vid kanten: fokus bläddrar, OK hoppar in i rutnätet. */
+@Composable
+private fun LetterRail(
+    letters: List<Pair<String, Int>>,
+    onFocusLetter: (Int) -> Unit,
+    onPickLetter: (Int) -> Unit,
+) {
+    LazyColumn(
+        modifier = Modifier
+            .width(34.dp)
+            .fillMaxHeight(),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+        contentPadding = PaddingValues(top = 6.dp, bottom = 48.dp),
+    ) {
+        itemsIndexed(letters, key = { _, l -> l.first }) { _, (letter, first) ->
+            androidx.tv.material3.Surface(
+                onClick = { onPickLetter(first) },
+                shape = androidx.tv.material3.ClickableSurfaceDefaults.shape(androidx.compose.foundation.shape.CircleShape),
+                colors = androidx.tv.material3.ClickableSurfaceDefaults.colors(
+                    containerColor = Color.Transparent,
+                    contentColor = JptvColors.TextDim,
+                    focusedContainerColor = JptvColors.Accent,
+                    focusedContentColor = JptvColors.Background,
+                ),
+                modifier = Modifier
+                    .size(30.dp)
+                    .onFocusChanged { if (it.isFocused) onFocusLetter(first) },
+            ) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(letter, style = MaterialTheme.typography.labelLarge)
+                }
+            }
+        }
     }
 }
 
@@ -269,7 +342,10 @@ fun CollectionScreen(vm: AppViewModel, collection: PlexItem) {
     }
 }
 
-/** Serie: säsonger som flikar och avsnitten i vald säsong. En säsong öppnas med den förvald. */
+/**
+ * Seriesidan: logga, betyg och knappar överst, säsongerna till vänster och avsnitten med bild,
+ * längd och handling till höger, så att hela säsongen syns direkt.
+ */
 @Composable
 fun EpisodesScreen(vm: AppViewModel, container: PlexItem) {
     val showKey = if (container.type == "show") container.ratingKey else container.showKey ?: container.ratingKey
@@ -301,130 +377,280 @@ fun EpisodesScreen(vm: AppViewModel, container: PlexItem) {
         }
     }
     val firstFocus = remember { FocusRequester() }
+    val seasonFocus = remember { FocusRequester() }
+    val scope = rememberCoroutineScope()
+    /** Avsnitten får fokus när sidan öppnas och när en säsong väljs med OK, inte när man bläddrar bland säsongerna. */
+    var focusEpisodes by remember { mutableIntStateOf(1) }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .padding(start = 48.dp, top = 28.dp, end = 48.dp),
-    ) {
-        // Seriens trailer och IMDb-betyg i rubriken.
-        val showItem = remember(showKey) { container.copy(type = "show", ratingKey = showKey) }
-        val showMeta by produceState<PlexItem?>(null, showKey) { value = runCatching { vm.plex.metadata(showKey) }.getOrNull() }
-        val trailers by produceState<List<PlexItem>>(emptyList(), showKey) {
-            value = runCatching { vm.plex.trailers(showMeta ?: showItem) }.getOrDefault(emptyList())
-        }
-        // Seriens ledmotiv, lågt, när sidan öppnas.
-        ThemeMusic(vm, showMeta)
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            ScreenTitle(container.showTitle?.takeIf { container.type == "season" } ?: container.title)
-            showMeta?.let { meta -> Badges(listOfNotNull(vm.imdbText(meta)) + meta.ratings.filter { it.source != "IMDb" }.map { it.text }) }
-            Spacer(Modifier.weight(1f))
-            OutlinedButton(onClick = { vm.playShuffle(showItem) }) { Text("Spela slumpvis") }
-            trailers.firstOrNull()?.let { t -> OutlinedButton(onClick = { vm.playTrailer(t) }) { Text("▶ Trailer") } }
-        }
-        container.summary?.takeIf { container.type == "show" }?.let {
-            Spacer(Modifier.height(8.dp))
-            Text(it, maxLines = 2, overflow = TextOverflow.Ellipsis, color = JptvColors.TextDim, modifier = Modifier.width(1000.dp))
-        }
-        Spacer(Modifier.height(14.dp))
+    val showItem = remember(showKey) { container.copy(type = "show", ratingKey = showKey) }
+    val showMeta by produceState<PlexItem?>(null, showKey) { value = runCatching { vm.plex.metadata(showKey) }.getOrNull() }
+    val trailers by produceState<List<PlexItem>>(emptyList(), showKey) {
+        value = runCatching { vm.plex.trailers(showMeta ?: showItem) }.getOrDefault(emptyList())
+    }
+    // Seriens ledmotiv, lågt, när sidan öppnas.
+    ThemeMusic(vm, showMeta)
+    val show = showMeta ?: showItem
+    val episodes = episodesResult?.getOrNull()
+    // Nästa avsnitt i säsongen: påbörjat, annars första osedda, annars första.
+    val nextUp = episodes?.let { eps ->
+        eps.firstOrNull { it.viewOffsetMs > 0 && !it.watched } ?: eps.firstOrNull { !it.watched } ?: eps.firstOrNull()
+    }
+    val showSeasons = seasonList != null && seasonList.size > 1
 
-        if (seasonList != null && seasonList.size > 1) {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(vertical = 4.dp)) {
-                itemsIndexed(seasonList, key = { i, s -> "${i}_${s.ratingKey}" }) { _, s ->
-                    val label = s.title + if (!s.hasUnwatched && (s.childCount ?: 0) > 0) " ✓" else ""
-                    if (s.ratingKey == season?.ratingKey) {
-                        Button(onClick = {}) { Text(label) }
-                    } else {
-                        OutlinedButton(onClick = {
-                            selectedKey = s.ratingKey
-                            vm.focusKeys["season_$showKey"] = s.ratingKey
-                        }) { Text(label) }
-                    }
+    Box(Modifier.fillMaxSize()) {
+        Backdrop(url = vm.plex.imageUrl(show.art ?: container.art, 1920, 1080), fadeFrom = 0.25f)
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(start = 48.dp, top = 28.dp, end = 48.dp),
+        ) {
+            TitleLogo(
+                logoUrl = vm.plex.rawImageUrl(show.logo),
+                title = show.title,
+                maxHeight = 52.dp,
+                maxWidth = 420.dp,
+                textStyle = MaterialTheme.typography.headlineMedium,
+            )
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Badges(listOfNotNull(vm.imdbText(show)) + show.ratings.filter { it.source != "IMDb" }.map { it.text })
+                val seasonCount = seasonList?.count { (it.season ?: 0) > 0 } ?: 0
+                val facts = listOfNotNull(
+                    show.year?.toString(),
+                    when (seasonCount) {
+                        0 -> null
+                        1 -> "1 säsong"
+                        else -> "$seasonCount säsonger"
+                    },
+                    show.genres.take(2).joinToString(", ").ifEmpty { null },
+                    show.contentRating,
+                ).joinToString("  ·  ")
+                if (facts.isNotEmpty()) {
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        facts,
+                        color = JptvColors.Text.copy(alpha = 0.75f),
+                        style = MaterialTheme.typography.bodyLarge.copy(shadow = TextShadow),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
             Spacer(Modifier.height(10.dp))
-        }
-
-        val episodes = episodesResult?.getOrNull()
-        if (season != null && !episodes.isNullOrEmpty()) {
-            val allWatched = episodes.all { it.watched }
-            OutlinedButton(onClick = {
-                vm.setWatched(season, !allWatched) { reload++ }
-            }) { Text(if (allWatched) "Markera säsongen som osedd" else "Markera säsongen som sedd") }
-            Spacer(Modifier.height(10.dp))
-        }
-
-        when {
-            episodesResult == null -> MessageBox("Hämtar avsnitt…")
-            episodes == null -> MessageBox("Kunde inte hämta: ${episodesResult?.exceptionOrNull()?.message}")
-            episodes.isEmpty() -> MessageBox("Inga avsnitt.")
-            else -> {
-                val memoryKey = "episodes_${season?.ratingKey ?: showKey}"
-                val remembered = remember(memoryKey) { vm.focusKeys[memoryKey] }
-                val startIndex = remember(episodes) {
-                    episodes.indexOfFirst { it.ratingKey == remembered }.takeIf { it >= 0 }
-                        ?: episodes.indexOfFirst { !it.watched }.coerceAtLeast(0)
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                nextUp?.let { ep ->
+                    val code = listOfNotNull(ep.season?.let { "S$it" }, ep.episode?.let { "E$it" }).joinToString(" ")
+                    val resume = ep.viewOffsetMs > 0 && !ep.watched
+                    Button(onClick = { vm.play(ep) }) { Text((if (resume) "▶ Fortsätt " else "▶ Spela ") + code) }
                 }
-                val list = vm.rememberListState(memoryKey)
-                LazyColumn(
-                    state = list,
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                    contentPadding = PaddingValues(bottom = 48.dp),
-                ) {
-                    itemsIndexed(episodes, key = { i, ep -> "${i}_${ep.ratingKey}" }) { i, ep ->
-                        EpisodeRow(
-                            episode = ep,
-                            imdb = vm.imdbText(ep),
-                            onClick = { vm.play(ep) },
-                            onLongClick = { vm.open(Screen.Details(ep)) },
-                            modifier = Modifier
-                                .onFocusChanged { if (it.hasFocus) vm.focusKeys[memoryKey] = ep.ratingKey }
-                                .then(if (i == startIndex) Modifier.focusRequester(firstFocus) else Modifier),
-                        )
+                OutlinedButton(onClick = { vm.playShuffle(showItem) }) { Text("Slumpvis") }
+                trailers.firstOrNull()?.let { t -> OutlinedButton(onClick = { vm.playTrailer(t) }) { Text("▶ Trailer") } }
+                if (season != null && !episodes.isNullOrEmpty()) {
+                    val allWatched = episodes.all { it.watched }
+                    OutlinedButton(onClick = { vm.setWatched(season, !allWatched) { reload++ } }) {
+                        Text(if (allWatched) "Markera säsongen osedd" else "Markera säsongen sedd")
                     }
                 }
-                LaunchedEffect(episodes) {
-                    if (list.layoutInfo.visibleItemsInfo.none { it.index == startIndex }) {
-                        list.scrollToItem((startIndex - 2).coerceAtLeast(0))
+            }
+            Spacer(Modifier.height(14.dp))
+
+            Row(Modifier.fillMaxSize()) {
+                if (showSeasons && seasonList != null) {
+                    LazyColumn(
+                        modifier = Modifier
+                            .width(190.dp)
+                            .fillMaxHeight(),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        contentPadding = PaddingValues(bottom = 48.dp),
+                    ) {
+                        itemsIndexed(seasonList, key = { i, s -> "${i}_${s.ratingKey}" }) { _, s ->
+                            val selected = s.ratingKey == season?.ratingKey
+                            val done = !s.hasUnwatched && (s.childCount ?: 0) > 0
+                            val count = s.childCount
+                            ListItem(
+                                selected = selected,
+                                // OK: in i avsnitten. Bara fokus: visa säsongens avsnitt direkt.
+                                onClick = { focusEpisodes++ },
+                                headlineContent = {
+                                    Text(s.title + if (done) "  ✓" else "", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                },
+                                supportingContent = if (count != null) {
+                                    { Text("$count avsnitt", style = MaterialTheme.typography.bodySmall) }
+                                } else {
+                                    null
+                                },
+                                modifier = Modifier
+                                    .onFocusChanged {
+                                        if (it.isFocused && s.ratingKey != season?.ratingKey) {
+                                            selectedKey = s.ratingKey
+                                            vm.focusKeys["season_$showKey"] = s.ratingKey
+                                        }
+                                    }
+                                    .then(if (selected) Modifier.focusRequester(seasonFocus) else Modifier),
+                            )
+                        }
                     }
-                    firstFocus.requestWhenReady()
+                    Spacer(Modifier.width(20.dp))
+                }
+                Box(Modifier.weight(1f)) {
+                    when {
+                        episodesResult == null -> MessageBox("Hämtar avsnitt…")
+                        episodes == null -> MessageBox("Kunde inte hämta: ${episodesResult?.exceptionOrNull()?.message}")
+                        episodes.isEmpty() -> MessageBox("Inga avsnitt.")
+                        else -> {
+                            val memoryKey = "episodes_${season?.ratingKey ?: showKey}"
+                            val remembered = remember(memoryKey) { vm.focusKeys[memoryKey] }
+                            val startIndex = remember(episodes) {
+                                episodes.indexOfFirst { it.ratingKey == remembered }.takeIf { it >= 0 }
+                                    ?: episodes.indexOf(nextUp).coerceAtLeast(0)
+                            }
+                            val list = vm.rememberListState(memoryKey)
+                            LazyColumn(
+                                state = list,
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                contentPadding = PaddingValues(bottom = 48.dp),
+                                modifier = Modifier.onPreviewKeyEvent { ev ->
+                                    // ◀ från ett avsnitt: till den valda säsongen, inte den som råkar ligga bredvid.
+                                    if (showSeasons && ev.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT) {
+                                        if (ev.nativeKeyEvent.action == android.view.KeyEvent.ACTION_DOWN) {
+                                            scope.launch { seasonFocus.requestWhenReady() }
+                                        }
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                },
+                            ) {
+                                itemsIndexed(episodes, key = { i, ep -> "${i}_${ep.ratingKey}" }) { i, ep ->
+                                    EpisodeCard(
+                                        vm = vm,
+                                        episode = ep,
+                                        onClick = { vm.play(ep) },
+                                        onLongClick = { vm.open(Screen.Details(ep)) },
+                                        modifier = Modifier
+                                            .onFocusChanged { if (it.hasFocus) vm.focusKeys[memoryKey] = ep.ratingKey }
+                                            .then(if (i == startIndex) Modifier.focusRequester(firstFocus) else Modifier),
+                                    )
+                                }
+                            }
+                            LaunchedEffect(episodes, focusEpisodes) {
+                                if (focusEpisodes == 0) return@LaunchedEffect
+                                if (list.layoutInfo.visibleItemsInfo.none { it.index == startIndex }) {
+                                    list.scrollToItem((startIndex - 1).coerceAtLeast(0))
+                                }
+                                firstFocus.requestWhenReady()
+                                focusEpisodes = 0
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 }
 
+/** Ett avsnitt: bild (16:9) med hur långt man sett, titel, längd, IMDb och handling. */
 @Composable
-private fun EpisodeRow(
+private fun EpisodeCard(
+    vm: AppViewModel,
     episode: PlexItem,
-    imdb: String?,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val code = if (episode.episode != null) "${episode.episode}." else ""
-    ListItem(
-        selected = false,
+    androidx.tv.material3.Surface(
         onClick = onClick,
         onLongClick = onLongClick,
-        modifier = modifier,
-        headlineContent = {
-            Text("$code  ${episode.title}".trim(), maxLines = 1, overflow = TextOverflow.Ellipsis)
-        },
-        supportingContent = {
-            val parts = buildList {
-                imdb?.let { add(it) }
-                if (episode.durationMs > 0) add(formatDuration(episode.durationMs))
-                if (episode.viewOffsetMs > 0) add("${formatTime(episode.viewOffsetMs)} sett")
-                else if (episode.watched) add("Sett ✓")
-                episode.summary?.let { add(it) }
+        modifier = modifier.fillMaxWidth(),
+        shape = androidx.tv.material3.ClickableSurfaceDefaults.shape(MaterialTheme.shapes.medium),
+        colors = androidx.tv.material3.ClickableSurfaceDefaults.colors(
+            containerColor = Color.Transparent,
+            contentColor = JptvColors.Text,
+            focusedContainerColor = JptvColors.Surface.copy(alpha = 0.92f),
+            focusedContentColor = JptvColors.Text,
+        ),
+        border = androidx.tv.material3.ClickableSurfaceDefaults.border(
+            focusedBorder = androidx.tv.material3.Border(
+                androidx.compose.foundation.BorderStroke(2.dp, JptvColors.Accent),
+            ),
+        ),
+        scale = androidx.tv.material3.ClickableSurfaceDefaults.scale(focusedScale = 1.01f),
+    ) {
+        Row(Modifier.padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(128.dp, 72.dp)
+                    .clip(MaterialTheme.shapes.small)
+                    .background(JptvColors.SurfaceHigh),
+            ) {
+                coil.compose.AsyncImage(
+                    model = vm.plex.imageUrl(episode.still ?: episode.thumb, 320, 180),
+                    contentDescription = null,
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+                if (episode.progress > 0f && !episode.watched) {
+                    Box(
+                        Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .background(JptvColors.Background.copy(alpha = 0.7f)),
+                    ) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth(episode.progress)
+                                .height(4.dp)
+                                .background(JptvColors.Accent),
+                        )
+                    }
+                }
+                if (episode.watched) {
+                    Text(
+                        "✓",
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(4.dp)
+                            .background(JptvColors.Accent, MaterialTheme.shapes.small)
+                            .padding(horizontal = 5.dp),
+                        color = JptvColors.Background,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
             }
-            Text(parts.joinToString(" · "), color = JptvColors.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        },
-        trailingContent = {
-            if (episode.progress > 0f) {
-                Text("Fortsätt", color = JptvColors.Accent, style = MaterialTheme.typography.labelLarge)
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                val code = if (episode.episode != null) "${episode.episode}. " else ""
+                Text(
+                    code + episode.title,
+                    style = MaterialTheme.typography.titleSmall.copy(shadow = TextShadow),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                val facts = buildList {
+                    vm.imdbText(episode)?.let { add(it) }
+                    if (episode.durationMs > 0) add(formatDuration(episode.durationMs))
+                    when {
+                        episode.watched -> add("Sett")
+                        episode.viewOffsetMs > 0 -> add("${formatDuration((episode.durationMs - episode.viewOffsetMs).coerceAtLeast(60_000))} kvar")
+                    }
+                }
+                Text(
+                    facts.joinToString("  ·  "),
+                    color = if (episode.viewOffsetMs > 0 && !episode.watched) JptvColors.Accent else JptvColors.TextDim,
+                    style = MaterialTheme.typography.labelMedium.copy(shadow = TextShadow),
+                    maxLines = 1,
+                )
+                episode.summary?.let {
+                    Text(
+                        it,
+                        color = JptvColors.Text.copy(alpha = 0.8f),
+                        style = MaterialTheme.typography.bodySmall.copy(shadow = TextShadow),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
-        },
-    )
+        }
+    }
 }

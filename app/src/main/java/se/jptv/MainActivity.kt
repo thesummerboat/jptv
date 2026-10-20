@@ -24,6 +24,7 @@ import se.jptv.ui.JptvColors
 import se.jptv.ui.JptvTheme
 import se.jptv.ui.LiveTvScreen
 import se.jptv.ui.LoginScreen
+import se.jptv.ui.ReminderPopup
 import se.jptv.ui.SearchScreen
 import se.jptv.ui.SectionScreen
 import se.jptv.ui.SettingsScreen
@@ -136,6 +137,8 @@ fun JptvApp(vm: AppViewModel = viewModel()) {
         }
         val pip = vm.pip
         if (pip != null && screen !is Screen.Player) PipWindow(vm, pip)
+        // Påminnelse från guiden: programmet har börjat.
+        vm.dueReminder?.let { reminder -> ReminderPopup(vm, reminder) }
         if (se.jptv.player.DisplayModes.blackout) {
             Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black))
         }
