@@ -47,6 +47,8 @@ fun PosterCard(
     modifier: Modifier = Modifier,
     onLongClick: (() -> Unit)? = null,
     width: Dp = PosterWidth,
+    /** Titel och undertext under affischen (av för hemskärmens små affischer). */
+    showText: Boolean = true,
 ) {
     Column(modifier.width(width)) {
         Card(
@@ -110,6 +112,7 @@ fun PosterCard(
                 }
             }
         }
+        if (!showText) return@Column
         Spacer(Modifier.height(8.dp))
         Text(
             text = title,
