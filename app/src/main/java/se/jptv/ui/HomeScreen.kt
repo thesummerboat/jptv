@@ -41,6 +41,7 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Button
@@ -331,7 +332,16 @@ private fun HomeRows(
     CompositionLocalProvider(LocalBringIntoViewSpec provides NoAutoScroll) {
     LazyColumn(
         state = listState,
-        modifier = Modifier.padding(top = 8.dp),
+        modifier = Modifier
+            .padding(top = 8.dp)
+            // Håller man inne ▲/▼ hinner fokus annars hoppa medan raden glider på plats, och det fastnar
+            // mellan två rader. Nästa rad tas först när förflyttningen är klar (ungefär en rad per tryck-repetition).
+            .onPreviewKeyEvent { ev ->
+                val code = ev.nativeKeyEvent.keyCode
+                (code == android.view.KeyEvent.KEYCODE_DPAD_DOWN || code == android.view.KeyEvent.KEYCODE_DPAD_UP) &&
+                    ev.nativeKeyEvent.action == android.view.KeyEvent.ACTION_DOWN &&
+                    listState.isScrollInProgress
+            },
         // Varje rad är lika hög som listan: bara raden med fokus syns, ingen titt på raden under.
         verticalArrangement = Arrangement.spacedBy(0.dp),
         // Raderna fyller höjden, så även den sista kan läggas överst utan extra utrymme.
