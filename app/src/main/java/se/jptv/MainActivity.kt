@@ -84,19 +84,39 @@ private fun navSound(ev: androidx.compose.ui.input.key.KeyEvent): Boolean {
     return false
 }
 
-/** Bild-i-bild: ▶‖ tar kanalen till helskärm, Stopp stänger den. */
+/** Släppet av en långtryckt Tillbaka ska inte också gå tillbaka en skärm. */
+private var swallowBackUp = false
+
+/**
+ * Bild-i-bild: ▶‖ tar kanalen till helskärm. Håll inne Tillbaka, tryck Meny (≡) eller Stopp för att
+ * stänga rutan var man än är; ett vanligt kort Tillbaka går tillbaka som vanligt.
+ */
 private fun pipKey(vm: AppViewModel, ev: androidx.compose.ui.input.key.KeyEvent): Boolean {
-    if (vm.pip == null || vm.current is Screen.Player) return false
     val native = ev.nativeKeyEvent
+    if (native.keyCode == android.view.KeyEvent.KEYCODE_BACK && swallowBackUp) {
+        if (native.action == android.view.KeyEvent.ACTION_UP) swallowBackUp = false
+        return true
+    }
+    if (vm.pip == null || vm.current is Screen.Player) return false
     val down = native.action == android.view.KeyEvent.ACTION_DOWN && native.repeatCount == 0
     return when (native.keyCode) {
         android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, android.view.KeyEvent.KEYCODE_MEDIA_PLAY -> {
             if (down) vm.resumePip()
             true
         }
-        android.view.KeyEvent.KEYCODE_MEDIA_STOP -> {
+        android.view.KeyEvent.KEYCODE_MEDIA_STOP, android.view.KeyEvent.KEYCODE_MENU -> {
             if (down) vm.closePip()
             true
+        }
+        android.view.KeyEvent.KEYCODE_BACK -> {
+            // Håll inne: stäng rutan. Första trycket släpps igenom (vanlig Tillbaka när man släpper).
+            if (native.action == android.view.KeyEvent.ACTION_DOWN && (native.repeatCount > 0 || native.isLongPress)) {
+                vm.closePip()
+                swallowBackUp = true
+                true
+            } else {
+                false
+            }
         }
         else -> false
     }
