@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -59,8 +60,8 @@ fun SectionScreen(vm: AppViewModel, section: PlexSection, initialGenre: PlexFilt
     var unwatched by remember { mutableStateOf(vm.sectionUnwatched[section.key] ?: false) }
     var genre by remember { mutableStateOf(initialGenre ?: vm.sectionGenre[section.key]) }
     var showCollections by remember { mutableStateOf(false) }
-    var pickerOpen by remember { mutableStateOf(false) }
-    val genres by produceState<List<PlexFilterOption>>(emptyList(), section.key) {
+    // null medan genrerna hämtas.
+    val genres by produceState<List<PlexFilterOption>?>(null, section.key) {
         value = runCatching { vm.genres(section.key) }.getOrDefault(emptyList())
     }
     val collections by produceState<List<PlexItem>>(emptyList(), section.key) {
@@ -82,105 +83,129 @@ fun SectionScreen(vm: AppViewModel, section: PlexSection, initialGenre: PlexFilt
         }
         shownVersion = version
     }
-    val filterFocus = remember { FocusRequester() }
     val memoryKey = "section_${section.key}_${sort.name}_${unwatched}_${genre?.id}_$showCollections"
 
-    Box(Modifier.fillMaxSize()) {
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(start = 48.dp, top = 28.dp, end = 48.dp),
-        ) {
-            val items = result?.getOrNull()
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                val what = when {
-                    showCollections -> "samlingar"
-                    else -> listOfNotNull(genre?.title, if (unwatched) "osedda" else null).joinToString(" · ")
-                }
-                ScreenTitle(
-                    section.title,
-                    listOfNotNull(
-                        items?.let { "${it.size} ${if (showCollections) "samlingar" else "titlar"}" },
-                        what.ifEmpty { null },
-                    ).joinToString(" · ").ifEmpty { null },
-                )
-                Spacer(Modifier.weight(1f))
-                OutlinedButton(onClick = { vm.scanLibrary(section) }, enabled = !vm.scanning) {
-                    Text(if (vm.scanning) "Skannar…" else "Skanna")
-                }
-            }
-            Spacer(Modifier.height(10.dp))
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = { pickerOpen = true }, modifier = Modifier.focusRequester(filterFocus)) {
-                    Text(
-                        when {
-                            showCollections -> "Samlingar ▾"
-                            genre != null -> "${genre?.title} ▾"
-                            else -> "Alla genrer ▾"
-                        },
-                    )
-                }
-                if (!showCollections) {
-                    Spacer(Modifier.width(8.dp))
-                    LibrarySort.entries.forEach { option ->
-                        if (option == sort) {
-                            Button(onClick = {}) { Text(option.label) }
-                        } else {
-                            OutlinedButton(onClick = {
-                                sort = option
-                                vm.sectionSort[section.key] = option
-                            }) { Text(option.label) }
-                        }
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    val toggle = {
-                        unwatched = !unwatched
-                        vm.sectionUnwatched[section.key] = unwatched
-                    }
-                    if (unwatched) {
-                        Button(onClick = toggle) { Text("Bara osedda") }
-                    } else {
-                        OutlinedButton(onClick = toggle) { Text("Sedda och osedda") }
-                    }
-                }
-            }
-            vm.scanStatus?.let {
-                Spacer(Modifier.height(6.dp))
-                Text(it, color = if (vm.scanning) JptvColors.Accent else JptvColors.TextDim, style = MaterialTheme.typography.bodySmall)
-            }
-            Spacer(Modifier.height(16.dp))
-            when {
-                result == null -> MessageBox("Hämtar ${section.title}…")
-                items == null -> MessageBox("Kunde inte hämta: ${result?.exceptionOrNull()?.message}")
-                items.isEmpty() -> MessageBox(
-                    when {
-                        showCollections -> "Inga samlingar i det här biblioteket."
-                        unwatched -> "Inget osett här."
-                        genre != null -> "Inget i ${genre?.title}."
-                        else -> "Biblioteket är tomt."
-                    },
-                )
-                else -> PosterGrid(vm, items, memoryKey)
-            }
-        }
-        if (pickerOpen) {
-            FilterPicker(
-                genres = genres,
-                collectionCount = collections.size,
-                selectedGenre = genre,
-                collectionsSelected = showCollections,
-                onPick = { picked, collectionsPicked ->
-                    genre = picked
-                    showCollections = collectionsPicked
-                    vm.sectionGenre[section.key] = picked
-                    pickerOpen = false
-                },
-                onClose = { pickerOpen = false },
-            )
+    // Kategorierna direkt under rubriken: Alla, genrerna och Samlingar.
+    val chips = remember(genres, collections.isNotEmpty()) {
+        buildList {
+            add(CategoryChip("all", "Alla", null, false))
+            genres.orEmpty().forEach { add(CategoryChip("g_${it.id}", it.title, it, false)) }
+            if (collections.isNotEmpty()) add(CategoryChip("collections", "Samlingar", null, true))
         }
     }
-    LaunchedEffect(pickerOpen) { if (!pickerOpen) filterFocus.requestWhenReady() }
+    val selectedChip = when {
+        showCollections -> "collections"
+        genre != null -> "g_${genre?.id}"
+        else -> "all"
+    }
+    val chipFocus = remember { FocusRequester() }
+    val chipList = rememberLazyListState()
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(start = 48.dp, top = 28.dp, end = 48.dp),
+    ) {
+        val items = result?.getOrNull()
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            val what = when {
+                showCollections -> "samlingar"
+                else -> listOfNotNull(genre?.title, if (unwatched) "osedda" else null).joinToString(" · ")
+            }
+            ScreenTitle(
+                section.title,
+                listOfNotNull(
+                    items?.let { "${it.size} ${if (showCollections) "samlingar" else "titlar"}" },
+                    what.ifEmpty { null },
+                ).joinToString(" · ").ifEmpty { null },
+            )
+            Spacer(Modifier.weight(1f))
+            if (!showCollections) {
+                LibrarySort.entries.forEach { option ->
+                    if (option == sort) {
+                        Button(onClick = {}) { Text(option.label) }
+                    } else {
+                        OutlinedButton(onClick = {
+                            sort = option
+                            vm.sectionSort[section.key] = option
+                        }) { Text(option.label) }
+                    }
+                }
+                val toggle = {
+                    unwatched = !unwatched
+                    vm.sectionUnwatched[section.key] = unwatched
+                }
+                if (unwatched) {
+                    Button(onClick = toggle) { Text("Bara osedda") }
+                } else {
+                    OutlinedButton(onClick = toggle) { Text("Bara osedda") }
+                }
+            }
+            OutlinedButton(onClick = { vm.scanLibrary(section) }, enabled = !vm.scanning) {
+                Text(if (vm.scanning) "Skannar…" else "Skanna")
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        LazyRow(
+            state = chipList,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(vertical = 4.dp),
+        ) {
+            itemsIndexed(chips, key = { _, c -> c.key }) { _, c ->
+                val selected = c.key == selectedChip
+                val mod = if (selected) Modifier.focusRequester(chipFocus) else Modifier
+                if (selected) {
+                    Button(onClick = {}, modifier = mod) { Text(c.title) }
+                } else {
+                    OutlinedButton(
+                        onClick = {
+                            genre = c.genre
+                            showCollections = c.collections
+                            vm.sectionGenre[section.key] = c.genre
+                        },
+                        modifier = mod,
+                    ) { Text(c.title) }
+                }
+            }
+        }
+        vm.scanStatus?.let {
+            Spacer(Modifier.height(6.dp))
+            Text(it, color = if (vm.scanning) JptvColors.Accent else JptvColors.TextDim, style = MaterialTheme.typography.bodySmall)
+        }
+        Spacer(Modifier.height(14.dp))
+        when {
+            result == null -> MessageBox("Hämtar ${section.title}…")
+            items == null -> MessageBox("Kunde inte hämta: ${result?.exceptionOrNull()?.message}")
+            items.isEmpty() -> MessageBox(
+                when {
+                    showCollections -> "Inga samlingar i det här biblioteket."
+                    unwatched -> "Inget osett här."
+                    genre != null -> "Inget i ${genre?.title}."
+                    else -> "Biblioteket är tomt."
+                },
+            )
+            else -> PosterGrid(vm, items, memoryKey)
+        }
+    }
+    // Fokus på den valda kategorin när sidan öppnas (när genrerna har kommit, om en genre är vald).
+    var initialFocusDone by remember { mutableStateOf(false) }
+    LaunchedEffect(chips.any { it.key == selectedChip }) {
+        if (initialFocusDone) return@LaunchedEffect
+        val i = chips.indexOfFirst { it.key == selectedChip }
+        if (i < 0) return@LaunchedEffect
+        initialFocusDone = true
+        if (chipList.layoutInfo.visibleItemsInfo.none { it.index == i }) chipList.scrollToItem((i - 2).coerceAtLeast(0))
+        chipFocus.requestWhenReady()
+    }
 }
+
+/** En kategori överst i biblioteket. */
+private data class CategoryChip(
+    val key: String,
+    val title: String,
+    val genre: PlexFilterOption?,
+    val collections: Boolean,
+)
 
 /** Affischer i rutnät; minns fokus och scroll per lista. */
 @Composable
@@ -219,72 +244,6 @@ private fun PosterGrid(vm: AppViewModel, items: List<PlexItem>, memoryKey: Strin
         if (grid.layoutInfo.visibleItemsInfo.none { it.index == focusIndex }) grid.scrollToItem(focusIndex)
         firstFocus.requestWhenReady()
     }
-}
-
-/** Panel för att välja genre eller samlingar. */
-@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
-@Composable
-private fun FilterPicker(
-    genres: List<PlexFilterOption>,
-    collectionCount: Int,
-    selectedGenre: PlexFilterOption?,
-    collectionsSelected: Boolean,
-    onPick: (PlexFilterOption?, Boolean) -> Unit,
-    onClose: () -> Unit,
-) {
-    val selectedFocus = remember { FocusRequester() }
-    androidx.activity.compose.BackHandler { onClose() }
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.6f)),
-        contentAlignment = Alignment.CenterEnd,
-    ) {
-        Column(
-            Modifier
-                .focusProperties { exit = { FocusRequester.Cancel } }
-                .focusGroup()
-                .fillMaxHeight()
-                .width(420.dp)
-                .background(JptvColors.Surface)
-                .padding(start = 24.dp, top = 28.dp, end = 24.dp),
-        ) {
-            Text("Visa", style = MaterialTheme.typography.titleLarge)
-            Spacer(Modifier.height(10.dp))
-            val noneSelected = selectedGenre == null && !collectionsSelected
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp), contentPadding = PaddingValues(bottom = 32.dp)) {
-                item(key = "all") {
-                    ListItem(
-                        selected = noneSelected,
-                        onClick = { onPick(null, false) },
-                        headlineContent = { Text("Alla genrer") },
-                        modifier = if (noneSelected) Modifier.focusRequester(selectedFocus) else Modifier,
-                    )
-                }
-                if (collectionCount > 0) {
-                    item(key = "collections") {
-                        ListItem(
-                            selected = collectionsSelected,
-                            onClick = { onPick(null, true) },
-                            headlineContent = { Text("Samlingar") },
-                            supportingContent = { Text("$collectionCount st") },
-                            modifier = if (collectionsSelected) Modifier.focusRequester(selectedFocus) else Modifier,
-                        )
-                    }
-                }
-                itemsIndexed(genres, key = { i, g -> "g_${i}_${g.id}" }) { _, g ->
-                    val selected = !collectionsSelected && g.id == selectedGenre?.id
-                    ListItem(
-                        selected = selected,
-                        onClick = { onPick(g, false) },
-                        headlineContent = { Text(g.title) },
-                        modifier = if (selected) Modifier.focusRequester(selectedFocus) else Modifier,
-                    )
-                }
-            }
-        }
-    }
-    LaunchedEffect(Unit) { selectedFocus.requestWhenReady() }
 }
 
 /** En samling i Plex (t.ex. "Marvel" eller "Bond") som rutnät. */
