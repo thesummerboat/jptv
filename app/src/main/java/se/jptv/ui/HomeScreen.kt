@@ -65,7 +65,8 @@ private const val CONTINUE_ROW = "Fortsätt titta"
 
 @Composable
 fun HomeScreen(vm: AppViewModel) {
-    val liveNow = remember(vm.playlist, vm.favorites, vm.recents) { vm.liveNowChannels() }
+    // Live-TV har sin egen flik och visas inte på startsidan.
+    val liveNow = emptyList<Channel>()
     RowsBrowser(
         vm = vm,
         memory = "home",
@@ -227,6 +228,8 @@ fun RowsBrowser(
                                     index = featuredIndex % featured.size,
                                     count = featured.size,
                                     onFocus = { heroButtonsFocused = it },
+                                    onPrev = { featuredIndex = (featuredIndex - 1 + featured.size) % featured.size },
+                                    onNext = { featuredIndex = (featuredIndex + 1) % featured.size },
                                 )
                             }
                         } else {
@@ -294,18 +297,56 @@ private const val LIVE_ROW = "live"
 
 /** Knappar för det utvalda i den stora rutan, och prickar för vilken av de fem som visas. */
 @Composable
-private fun FeaturedActions(vm: AppViewModel, item: PlexItem, index: Int, count: Int, onFocus: (Boolean) -> Unit) {
+private fun FeaturedActions(
+    vm: AppViewModel,
+    item: PlexItem,
+    index: Int,
+    count: Int,
+    onFocus: (Boolean) -> Unit,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    // ◀ på första knappen och ▶ på sista bläddrar bland de utvalda; fokus stannar på knappen.
+    var firstFocused by remember { mutableStateOf(false) }
+    var lastFocused by remember { mutableStateOf(false) }
     Row(
-        modifier = Modifier.onFocusChanged { onFocus(it.hasFocus) },
+        modifier = Modifier
+            .onFocusChanged { onFocus(it.hasFocus) }
+            .onPreviewKeyEvent { ev ->
+                val n = ev.nativeKeyEvent
+                if (n.action != android.view.KeyEvent.ACTION_DOWN) return@onPreviewKeyEvent false
+                when {
+                    n.keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT && firstFocused -> {
+                        onPrev()
+                        true
+                    }
+                    n.keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT && lastFocused -> {
+                        onNext()
+                        true
+                    }
+                    else -> false
+                }
+            },
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        if (item.type == "movie") {
-            Button(onClick = { vm.play(item) }) { Text(if (item.viewOffsetMs > 0) "▶ Fortsätt" else "▶ Spela") }
-            OutlinedButton(onClick = { vm.select(item) }) { Text("Mer info") }
-        } else {
-            Button(onClick = { vm.select(item) }) { Text("▶ Till serien") }
-        }
+        // Alltid två knappar på samma plats, så att fokus står kvar när nästa titel visas.
+        val movie = item.type == "movie"
+        Button(
+            onClick = { if (movie) vm.play(item) else vm.select(item) },
+            modifier = Modifier.onFocusChanged { firstFocused = it.isFocused },
+        ) { Text(if (!movie) "▶ Till serien" else if (item.viewOffsetMs > 0) "▶ Fortsätt" else "▶ Spela") }
+        OutlinedButton(
+            onClick = {
+                if (movie) {
+                    vm.select(item)
+                } else {
+                    scope.launch { vm.trailerFor(item)?.let { vm.playTrailer(it) } }
+                }
+            },
+            modifier = Modifier.onFocusChanged { lastFocused = it.isFocused },
+        ) { Text(if (movie) "Mer info" else "Trailer") }
         Spacer(Modifier.width(8.dp))
         for (i in 0 until count) {
             Box(
@@ -315,6 +356,13 @@ private fun FeaturedActions(vm: AppViewModel, item: PlexItem, index: Int, count:
                         if (i == index) JptvColors.Accent else JptvColors.Text.copy(alpha = 0.4f),
                         androidx.compose.foundation.shape.CircleShape,
                     ),
+            )
+        }
+        if (count > 1) {
+            Text(
+                "◀ ▶ bläddra",
+                color = JptvColors.Text.copy(alpha = 0.6f),
+                style = MaterialTheme.typography.labelMedium.copy(shadow = HeroShadow),
             )
         }
     }
@@ -447,7 +495,7 @@ private val HERO_HEIGHT = 250.dp
 
 /** Skuggan bakom texten i den stora rutan (samma som på detaljsidan). */
 private val HeroShadow = TextShadow
-private val HOME_POSTER = 64.dp
+private val HOME_POSTER = 84.dp
 
 /** Utrymme vid radens kant för det förstorade kortet med fokus. */
 private val EdgeRoom = 12.dp
@@ -592,7 +640,7 @@ private fun HomeRow(
                         PosterCard(
                             title = item.displayTitle,
                             subtitle = null,
-                            imageUrl = vm.plex.imageUrl(item.thumb, 160, 240),
+                            imageUrl = vm.plex.imageUrl(item.thumb, 200, 300),
                             progress = item.progress,
                             watched = item.watched,
                             onClick = { vm.select(item) },
