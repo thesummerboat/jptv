@@ -50,6 +50,11 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.OutlinedButton
 import androidx.tv.material3.Text
 import kotlinx.coroutines.launch
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.delay
 import se.jptv.AppViewModel
 import se.jptv.Screen
 import se.jptv.iptv.Channel
@@ -80,8 +85,29 @@ fun HomeScreen(vm: AppViewModel) {
     // Fokus sätts en gång när skärmen öppnas; senare omladdningar ska inte rycka fokus.
     var initialFocusDone by remember { mutableStateOf(false) }
 
+    // Utvalt i den stora rutan när inget kort har fokus (t.ex. när appen öppnas): fem rekommendationer
+    // som byter av sig själva. Står fokus på knapparna i rutan stannar bytet.
+    val featured = remember(vm.homeRows) { pickFeatured(vm.homeRows) }
+    var featuredIndex by remember { mutableIntStateOf(0) }
+    var heroButtonsFocused by remember { mutableStateOf(false) }
+    val featuredItem = if (focusedItem == null && focusedChannel == null && featured.isNotEmpty()) {
+        featured[featuredIndex % featured.size]
+    } else {
+        null
+    }
+    val heroItem = focusedItem ?: featuredItem
+
     // Trailer i bakgrunden: bilden tonas bort när trailern har börjat visas.
     val trailer = remember { TrailerState() }
+    LaunchedEffect(featured, heroButtonsFocused, featuredItem != null) {
+        if (featured.size < 2 || heroButtonsFocused || featuredItem == null) return@LaunchedEffect
+        while (true) {
+            delay(9_000)
+            // Spelar trailern: låt den gå en stund till (högst 25 s) innan nästa.
+            withTimeoutOrNull(25_000) { snapshotFlow { trailer.showing }.first { !it } }
+            featuredIndex = (featuredIndex + 1) % featured.size
+        }
+    }
     val imageAlpha by animateFloatAsState(
         targetValue = if (trailer.showing) 0f else 1f,
         animationSpec = tween(if (trailer.showing) 900 else 300),
@@ -90,12 +116,12 @@ fun HomeScreen(vm: AppViewModel) {
 
     Box(Modifier.fillMaxSize()) {
         Backdrop(
-            url = vm.plex.imageUrl(focusedItem?.art, 1280, 720),
+            url = vm.plex.imageUrl(heroItem?.art, 1280, 720),
             imageAlpha = imageAlpha,
             // Bakgrunden syns ända ner till raderna och fritt till höger; mörkt bara bakom texten.
             fadeFrom = 0.55f,
             leftScrimOnly = true,
-            video = { HeroTrailer(vm, focusedItem, enabled = menuFor == null, state = trailer) },
+            video = { HeroTrailer(vm, heroItem, enabled = menuFor == null, state = trailer) },
         )
         Column(
             Modifier
@@ -105,7 +131,15 @@ fun HomeScreen(vm: AppViewModel) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(end = 48.dp),
+                    .padding(end = 48.dp)
+                    // Fokus i menyn överst: den stora rutan visar det utvalda igen.
+                    .onFocusChanged {
+                        if (it.hasFocus) {
+                            focusedItem = null
+                            focusedChannel = null
+                            focusedLabel = null
+                        }
+                    },
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
@@ -136,7 +170,27 @@ fun HomeScreen(vm: AppViewModel) {
             }
 
             Row {
-                Box(Modifier.weight(1f)) { FocusedInfo(vm, focusedItem, focusedChannel, focusedLabel) }
+                Box(Modifier.weight(1f)) {
+                    FocusedInfo(
+                        vm = vm,
+                        item = heroItem,
+                        channel = focusedChannel,
+                        label = if (featuredItem != null) "Rekommenderat" else focusedLabel,
+                        extra = if (featuredItem != null) {
+                            {
+                                FeaturedActions(
+                                    vm = vm,
+                                    item = featuredItem,
+                                    index = featuredIndex % featured.size,
+                                    count = featured.size,
+                                    onFocus = { heroButtonsFocused = it },
+                                )
+                            }
+                        } else {
+                            null
+                        },
+                    )
+                }
                 // Bild-i-bild: kanalen i den stora rutans högra hörn.
                 if (vm.pip != null) {
                     Spacer(Modifier.width(16.dp))
@@ -195,11 +249,67 @@ fun HomeScreen(vm: AppViewModel) {
 
 private const val LIVE_ROW = "live"
 
+/** Knappar för det utvalda i den stora rutan, och prickar för vilken av de fem som visas. */
+@Composable
+private fun FeaturedActions(vm: AppViewModel, item: PlexItem, index: Int, count: Int, onFocus: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier.onFocusChanged { onFocus(it.hasFocus) },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (item.type == "movie") {
+            Button(onClick = { vm.play(item) }) { Text(if (item.viewOffsetMs > 0) "▶ Fortsätt" else "▶ Spela") }
+            OutlinedButton(onClick = { vm.select(item) }) { Text("Mer info") }
+        } else {
+            Button(onClick = { vm.select(item) }) { Text("▶ Till serien") }
+        }
+        Spacer(Modifier.width(8.dp))
+        for (i in 0 until count) {
+            Box(
+                Modifier
+                    .size(if (i == index) 10.dp else 7.dp)
+                    .background(
+                        if (i == index) JptvColors.Accent else JptvColors.Text.copy(alpha = 0.4f),
+                        androidx.compose.foundation.shape.CircleShape,
+                    ),
+            )
+        }
+    }
+}
+
+/**
+ * Fem titlar att visa i den stora rutan när appen öppnas: rekommendationerna (filmer och serier
+ * varannan), annars topplistor och nytt. Bara osedda med bakgrundsbild.
+ */
+private fun pickFeatured(rows: List<PlexHomeRow>): List<PlexItem> {
+    fun usable(list: List<PlexItem>) = list.filter { (it.type == "movie" || it.type == "show") && it.art != null && !it.watched }
+    val movies = usable(rows.firstOrNull { it.title.startsWith("Rekommenderat för dig · Filmer") }?.items.orEmpty())
+    val shows = usable(rows.firstOrNull { it.title.startsWith("Rekommenderat för dig · Serier") }?.items.orEmpty())
+    val mixed = buildList {
+        for (i in 0 until maxOf(movies.size, shows.size)) {
+            movies.getOrNull(i)?.let { add(it) }
+            shows.getOrNull(i)?.let { add(it) }
+        }
+    }
+    val fallback = usable(
+        rows.filter { it.title.startsWith("Topplista") }.flatMap { it.items } +
+            rows.filter { it.title != CONTINUE_ROW }.flatMap { it.items },
+    )
+    return (mixed + fallback).distinctBy { it.ratingKey }.take(5)
+}
+
 private fun homeKey(row: String, id: String) = "$row|$id"
 
 /** Stor ruta överst: logotyp, märken och handling för kortet som har fokus (eller kanalen). */
 @Composable
-private fun FocusedInfo(vm: AppViewModel, item: PlexItem?, channel: Channel?, label: String?) {
+private fun FocusedInfo(
+    vm: AppViewModel,
+    item: PlexItem?,
+    channel: Channel?,
+    label: String?,
+    /** Knappar under texten (för det utvalda). */
+    extra: (@Composable () -> Unit)? = null,
+) {
     // Logotypen hämtas en kort stund efter att fokus stannat, så att snabb bläddring inte ger en massa anrop.
     var logo by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(item?.ratingKey) {
@@ -252,11 +362,16 @@ private fun FocusedInfo(vm: AppViewModel, item: PlexItem?, channel: Channel?, la
                     Text(
                         it,
                         color = JptvColors.Text.copy(alpha = 0.9f),
-                        maxLines = 3,
+                        // Med knappar under (det utvalda) får handlingen två rader, så att allt ryms.
+                        maxLines = if (extra != null) 2 else 3,
                         overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.bodyLarge.copy(shadow = HeroShadow),
                         modifier = Modifier.width(440.dp),
                     )
+                }
+                extra?.let {
+                    Spacer(Modifier.height(4.dp))
+                    it()
                 }
             }
             channel != null -> {
