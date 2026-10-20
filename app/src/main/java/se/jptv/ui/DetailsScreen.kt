@@ -158,6 +158,8 @@ fun Backdrop(
     video: (@Composable () -> Unit)? = null,
     /** Var nedtoningen mot botten börjar (0 = överst, 0,45 = strax under mitten). */
     fadeFrom: Float = 0f,
+    /** Mörkt bara bakom texten till vänster; bilden syns fritt till höger (hemskärmen). */
+    leftScrimOnly: Boolean = false,
 ) {
     Box(modifier.fillMaxSize()) {
         if (video != null) {
@@ -189,9 +191,19 @@ fun Backdrop(
             Modifier
                 .fillMaxSize()
                 .background(
-                    Brush.horizontalGradient(
-                        listOf(JptvColors.Background, JptvColors.Background.copy(alpha = 0.85f), JptvColors.Background.copy(alpha = 0.35f)),
-                    ),
+                    if (leftScrimOnly) {
+                        Brush.horizontalGradient(
+                            0f to JptvColors.Background.copy(alpha = 0.95f),
+                            0.3f to JptvColors.Background.copy(alpha = 0.8f),
+                            0.5f to JptvColors.Background.copy(alpha = 0.45f),
+                            0.7f to JptvColors.Background.copy(alpha = 0.1f),
+                            1f to JptvColors.Background.copy(alpha = 0f),
+                        )
+                    } else {
+                        Brush.horizontalGradient(
+                            listOf(JptvColors.Background, JptvColors.Background.copy(alpha = 0.85f), JptvColors.Background.copy(alpha = 0.35f)),
+                        )
+                    },
                 ),
         )
         Box(
