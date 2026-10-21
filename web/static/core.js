@@ -66,6 +66,8 @@ JP.icons = {
   shuffle: '<path d="M4 7h3.5c4 0 5 10 9 10H20M4 17h3.5c1.6 0 2.7-1.6 3.6-3.6M14 9.4C14.9 8 15.8 7 17 7h3M17.5 4.5 20 7l-2.5 2.5M17.5 14.5 20 17l-2.5 2.5"/>',
   tv: '<rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 20.5h8"/>',
   guide: '<rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M3 9.5h18M9 9.5v10"/>',
+  panel: '<rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M9.5 4.5v15"/><path d="M5.5 8.5h1.5M5.5 11.5h1.5M5.5 14.5h1.5"/>',
+  eye: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>',
 };
 JP.icon = (name, cls) => JP.svg(JP.icons[name] || '', 'ico ' + (cls || ''));
 

@@ -258,8 +258,9 @@ async def search(request: web.Request):
     if pl:
         ql = q.lower()
         now = int(time.time() * 1000)
+        hidden = set(c["store"].get("hidden_groups", []))
         for ch in pl.channels:
-            if ql in ch.name.lower():
+            if ql in ch.name.lower() and ch.group not in hidden:
                 channels.append(channel_json(c, ch, now))
                 if len(channels) >= 30:
                     break
@@ -432,6 +433,7 @@ async def live_groups(request: web.Request):
     return web.json_response(
         {
             "groups": pl.groups if pl else [],
+            "hidden": [g for g in c["store"].get("hidden_groups", []) if pl and any(x["name"] == g for x in pl.groups)],
             "favorites": len(favs),
             "recent": len(recent),
             "status": c["iptv"].status(),
@@ -449,8 +451,20 @@ def _channels_for(c: dict, q) -> list:
         return [pl.by_id[i] for i in c["store"].get("recent", []) if i in pl.by_id]
     group = q.get("group")
     text = (q.get("q") or "").lower()
-    out = [ch for ch in pl.channels if (not group or ch.group == group) and (not text or text in ch.name.lower())]
-    return out[:3000]
+    if group:
+        return [ch for ch in pl.channels if ch.group == group and (not text or text in ch.name.lower())][:3000]
+    hidden = set(c["store"].get("hidden_groups", []))
+    return [ch for ch in pl.channels if ch.group not in hidden and (not text or text in ch.name.lower())][:3000]
+
+
+@routes.post("/api/live/hidden")
+async def live_hidden(request: web.Request):
+    """Vilka grupper (länder) som döljs. Tar hela listan."""
+    c = ctx(request)
+    b = await body(request)
+    groups = [str(g) for g in b.get("groups", []) if isinstance(g, str)]
+    c["store"].set(hidden_groups=sorted(set(groups)))
+    return web.json_response({"hidden": c["store"].get("hidden_groups", [])})
 
 
 @routes.get("/api/live/channels")

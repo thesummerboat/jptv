@@ -134,9 +134,13 @@
     const pipBtn = h('button', { class: 'p-btn', title: 'Bild i bild – fortsätter när du bläddrar i Plex' }, JP.icon('pip'));
     const fullBtn = h('button', { class: 'p-btn', title: 'Helskärm (F)' }, JP.icon('full'));
     const muteBtn = h('button', { class: 'p-btn', title: 'Ljud av/på (M)' }, JP.icon(video.muted ? 'mute' : 'vol'));
+    const vol = h('input', { type: 'range', min: '0', max: '1', step: '0.02', class: 'p-vol', 'aria-label': 'Volym', title: 'Volym (+/−, eller hjulet över bilden)' });
+    const listsBtn = h('button', { class: 'p-btn', title: 'Dölj/visa grupper och kanaler (L)' }, JP.icon('panel'));
+    const osd = h('div', { class: 'live-osd', hidden: true });
     if (!document.pictureInPictureEnabled) pipBtn.hidden = true;
-    const bar = h('div', { class: 'live-bar' }, h('div', { class: 'live-bar-name' }), h('div', { class: 'p-spacer' }), favBtn, muteBtn, pipBtn, fullBtn);
-    const screen = h('div', { class: 'live-screen' }, slot, overlay, bar);
+    const bar = h('div', { class: 'live-bar' }, h('div', { class: 'live-bar-name' }), h('div', { class: 'p-spacer' }), muteBtn, vol, favBtn, listsBtn, pipBtn, fullBtn);
+    const screen = h('div', { class: 'live-screen' }, slot, overlay, osd, bar);
+    const handle = h('button', { class: 'lists-handle', title: 'Dölj/visa grupper och kanaler (L)', 'aria-label': 'Dölj eller visa listorna' }, JP.icon('left'));
     const info = h('div', { class: 'live-info' });
     const groupList = h('div', { class: 'group-list' });
     const filter = h('input', { type: 'search', class: 'live-filter', placeholder: 'Sök kanal', autocomplete: 'off' });
@@ -145,8 +149,50 @@
     v.el.append(
       h('aside', { class: 'groups' }, filter, groupList),
       h('div', { class: 'channels' }, listHead, list),
-      h('div', { class: 'live-side' }, screen, info));
+      h('div', { class: 'live-side' }, handle, screen, info));
     slot.append(video);
+
+    // Ljudnivå: reglaget, +/− och hjulet över bilden. Sparas i webbläsaren.
+    let osdTimer = null;
+    const showOsd = (text) => {
+      osd.textContent = text;
+      osd.hidden = false;
+      clearTimeout(osdTimer);
+      osdTimer = setTimeout(() => { osd.hidden = true; }, 1100);
+    };
+    const syncVol = () => {
+      vol.value = video.muted ? 0 : video.volume;
+      muteBtn.replaceChildren(JP.icon(video.muted || video.volume === 0 ? 'mute' : 'vol'));
+    };
+    const setVolume = (x, osdToo) => {
+      video.volume = Math.max(0, Math.min(1, Math.round(x * 50) / 50));
+      video.muted = video.volume === 0;
+      if (osdToo) showOsd(video.muted ? 'Ljud av' : `Volym ${Math.round(video.volume * 100)} %`);
+    };
+    syncVol();
+    video.addEventListener('volumechange', syncVol);
+    v.onLeave(() => video.removeEventListener('volumechange', syncVol));
+    vol.addEventListener('input', () => setVolume(+vol.value, false));
+    // Hjulet över bilden: ett hack = 5 %. Pekplattor skickar många små steg, så de räknas ihop.
+    let wheel = 0;
+    screen.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      wheel += e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+      if (Math.abs(wheel) < 40) return;
+      setVolume((video.muted ? 0 : video.volume) + (wheel < 0 ? 0.05 : -0.05), true);
+      wheel = 0;
+    }, { passive: false });
+
+    // Dölj grupperna och kanallistan så att bilden blir stor.
+    const setLists = (show) => {
+      v.el.classList.toggle('lists-hidden', !show);
+      handle.replaceChildren(JP.icon(show ? 'left' : 'right'));
+      listsBtn.classList.toggle('on', !show);
+      JP.store.set('liveLists', show);
+    };
+    setLists(JP.store.get('liveLists', true));
+    handle.addEventListener('click', () => setLists(v.el.classList.contains('lists-hidden')));
+    listsBtn.addEventListener('click', () => setLists(v.el.classList.contains('lists-hidden')));
 
     let channels = [], current = null, group = null, refreshTimer = null;
     const st = await JP.api('/api/live/groups');
@@ -195,7 +241,7 @@
     async function loadList(g, keepScroll) {
       group = g;
       JP.store.set('liveGroup', g);
-      for (const b of groupList.children) b.classList.toggle('on', b.dataset.g === g);
+      for (const b of groupList.querySelectorAll('.group')) b.classList.toggle('on', b.dataset.g === g);
       const qs = g === '★' ? 'fav=1' : g === '⟲' ? 'recent=1' : 'group=' + encodeURIComponent(g);
       const text = filter.value.trim();
       const url = text ? '/api/live/channels?q=' + encodeURIComponent(text) : '/api/live/channels?' + qs;
@@ -210,8 +256,45 @@
     function groupButton(key, label, count) {
       return h('button', { class: 'group', dataset: { g: key }, onclick: () => { filter.value = ''; loadList(key); } }, h('span', null, label), h('span', { class: 'dim' }, count));
     }
-    groupList.append(groupButton('★', '★ Favoriter', st.favorites || ''), groupButton('⟲', 'Senast sedda', st.recent || ''));
-    for (const g of st.groups) groupList.append(groupButton(g.name, g.name, g.count));
+    const hidden = new Set(st.hidden || []);
+    const visibleGroups = () => st.groups.filter((g) => !hidden.has(g.name));
+    function renderGroups() {
+      groupList.replaceChildren(
+        groupButton('★', '★ Favoriter', st.favorites || ''),
+        groupButton('⟲', 'Senast sedda', st.recent || ''),
+        ...visibleGroups().map((g) => groupButton(g.name, g.name, g.count)),
+        h('button', { class: 'group-edit-btn', onclick: editGroups }, JP.icon('eye'), hidden.size ? `Välj grupper · ${hidden.size} dolda` : 'Välj grupper'));
+      for (const b of groupList.querySelectorAll('.group')) b.classList.toggle('on', b.dataset.g === group);
+    }
+    const saveHidden = JP.debounce(() => JP.post('/api/live/hidden', { groups: [...hidden] }).catch((e) => JP.toast(e.message)), 400);
+    function editGroups() {
+      const boxes = [];
+      const setAll = (show) => {
+        for (const g of st.groups) show ? hidden.delete(g.name) : hidden.add(g.name);
+        boxes.forEach((b) => { b.checked = show; });
+        saveHidden();
+      };
+      groupList.replaceChildren(
+        h('div', { class: 'group-edit-head' },
+          h('b', null, 'Visa grupper'),
+          h('span', { class: 'p-spacer' }),
+          h('button', { class: 'link', onclick: () => setAll(true) }, 'Alla'),
+          h('button', { class: 'link', onclick: () => setAll(false) }, 'Inga')),
+        ...st.groups.map((g) => {
+          const box = h('input', { type: 'checkbox', checked: !hidden.has(g.name), onchange: (e) => { e.target.checked ? hidden.delete(g.name) : hidden.add(g.name); saveHidden(); } });
+          boxes.push(box);
+          return h('label', { class: 'group-check' }, box, h('span', null, g.name), h('span', { class: 'dim' }, g.count));
+        }),
+        h('button', { class: 'btn primary small group-done', onclick: () => {
+          renderGroups();
+          if (group && group !== '★' && group !== '⟲' && hidden.has(group)) {
+            const first = visibleGroups()[0];
+            loadList(first ? first.name : '★');
+          }
+        } }, 'Klar'));
+      groupList.scrollTop = 0;
+    }
+    renderGroups();
     filter.addEventListener('input', JP.debounce(() => loadList(group), 250));
 
     async function renderInfo(ch) {
@@ -246,7 +329,10 @@
       JP.toast(r.fav ? 'Tillagd i favoriter' : 'Borttagen från favoriter');
       loadList(group, true);
     });
-    muteBtn.addEventListener('click', () => { video.muted = !video.muted; muteBtn.replaceChildren(JP.icon(video.muted ? 'mute' : 'vol')); });
+    muteBtn.addEventListener('click', () => {
+      if (video.muted && video.volume === 0) video.volume = 0.5;
+      video.muted = !video.muted;
+    });
     fullBtn.addEventListener('click', () => (document.fullscreenElement ? document.exitFullscreen() : screen.requestFullscreen()).catch(() => {}));
     pipBtn.addEventListener('click', () => (document.pictureInPictureElement ? document.exitPictureInPicture() : video.requestPictureInPicture()).catch(() => {}));
     screen.addEventListener('dblclick', () => fullBtn.click());
@@ -265,6 +351,9 @@
       else if (e.key === 'ArrowDown' || e.key === 'PageDown') { e.preventDefault(); step(1); }
       else if (e.key === 'f' || e.key === 'F') fullBtn.click();
       else if (e.key === 'm' || e.key === 'M') muteBtn.click();
+      else if (e.key === '+' || e.key === '=') setVolume((video.muted ? 0 : video.volume) + 0.05, true);
+      else if (e.key === '-' || e.key === '_') setVolume((video.muted ? 0 : video.volume) - 0.05, true);
+      else if (e.key === 'l' || e.key === 'L') setLists(v.el.classList.contains('lists-hidden'));
       else if (e.key === ' ') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
     };
     document.addEventListener('keydown', onKey);
@@ -292,7 +381,9 @@
       startChannel = L.channel;
       startGroup = L.channel.group;
     }
-    if (!startGroup || (startGroup !== '★' && startGroup !== '⟲' && !st.groups.some((g) => g.name === startGroup))) startGroup = st.favorites ? '★' : st.groups[0].name;
+    if (!startGroup || (startGroup !== '★' && startGroup !== '⟲' && !st.groups.some((g) => g.name === startGroup))) {
+      startGroup = st.favorites ? '★' : (visibleGroups()[0] || st.groups[0]).name;
+    }
     await loadList(startGroup);
     if (startChannel) {
       play(startChannel);
@@ -314,11 +405,14 @@
       v.el.append(h('div', { class: 'page' }, h('div', { class: 'empty' }, h('div', { class: 'empty-title' }, 'Ingen guide än'), h('div', { class: 'dim' }, 'Lägg in spellistan under Inställningar.'))));
       return;
     }
+    const hiddenGroups = new Set(st.hidden || []);
+    const shown = st.groups.filter((g) => !hiddenGroups.has(g.name));
+    const groups = shown.length ? shown : st.groups;
     let group = q.get('g') || JP.store.get('guideGroup', null) || JP.store.get('liveGroup', null);
-    if (!group || (group !== '★' && !st.groups.some((g) => g.name === group))) group = st.favorites ? '★' : st.groups[0].name;
+    if (!group || (group !== '★' && !groups.some((g) => g.name === group))) group = st.favorites ? '★' : groups[0].name;
     const select = h('select', { 'aria-label': 'Grupp', onchange: (e) => { JP.store.set('guideGroup', e.target.value); load(e.target.value); } },
       st.favorites ? h('option', { value: '★', selected: group === '★' }, '★ Favoriter') : null,
-      st.groups.map((g) => h('option', { value: g.name, selected: g.name === group }, `${g.name} (${g.count})`)));
+      groups.map((g) => h('option', { value: g.name, selected: g.name === group }, `${g.name} (${g.count})`)));
     const grid = h('div', { class: 'guide' });
     const pop = h('div', { class: 'guide-pop', hidden: true });
     v.el.append(h('div', { class: 'page wide' }, h('div', { class: 'section-title' }, h('h1', null, 'TV-guide'), select, h('a', { class: 'btn small', href: '#/live' }, JP.icon('tv'), 'Live-TV')), grid, pop));
