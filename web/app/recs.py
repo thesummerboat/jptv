@@ -233,5 +233,5 @@ def rec_items(library: list[dict], history: list[dict], now: int) -> list[RecIte
         imdb = next((r["value"] for r in it.get("ratings", []) if r["src"] == "IMDb"), None)
         audience = next((r["value"] for r in it.get("ratings", []) if r["src"] in ("TMDB", "RT publik")), None)
         rating = imdb if imdb is not None else (audience if audience is not None and audience <= 10 else None)
-        out.append(RecItem(key, it["type"], it.get("_tags", []), eng, last, unseen, rating, 0, it.get("addedAt", 0) * 1000))
+        out.append(RecItem(key, it["type"], it.get("_tags", []), eng, last, unseen, rating, it.get("_votes", 0), it.get("addedAt", 0) * 1000))
     return out

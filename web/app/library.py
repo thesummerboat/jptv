@@ -145,7 +145,14 @@ class Library:
             add(f"Eftersom du såg {by_id[seed]['title']}", recs.similar_to(model, seed))
         tops = {}
         for s in sections:
-            rated = [(i, next((r["value"] for r in i.get("ratings", []) if r["src"] == "IMDb"), None)) for i in items[s["key"]]]
+            # Som på TV:n: med röster från IMDb:s fil krävs tillräckligt många, så att smala titlar
+            # med få röster inte toppar listan.
+            min_votes = 25000 if s["type"] == "movie" else 10000
+            rated = [
+                (i, next((r["value"] for r in i.get("ratings", []) if r["src"] == "IMDb"), None))
+                for i in items[s["key"]]
+                if "_votes" not in i or i["_votes"] >= min_votes
+            ]
             rated = sorted((x for x in rated if x[1] is not None), key=lambda x: -x[1])[:20]
             tops[s["key"]] = [i for i, _ in rated]
         self.items = items
