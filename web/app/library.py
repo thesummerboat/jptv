@@ -161,6 +161,24 @@ class Library:
         self.index_at = time.monotonic()
         self._section_cache.clear()
 
+    async def guid_map(self) -> dict[str, str]:
+        """Plex-guid -> nyckel för allt i biblioteket, även det som nyss lagts till (för önskemål)."""
+        await self.ensure_index(wait=5)
+        out: dict[str, str] = {}
+        for lst in self.items.values():
+            for i in lst:
+                if i.get("guid"):
+                    out[i["guid"]] = i["key"]
+        sections = await self._safe(self.plex.sections())
+        recent = await asyncio.gather(*(self._safe(self.plex.recently_added(s["key"], 50)) for s in sections))
+        for lst in recent:
+            for i in lst:
+                if i.get("guid") and i["type"] in ("movie", "show"):
+                    out.setdefault(i["guid"], i["key"])
+                if i.get("showGuid") and i.get("showKey"):
+                    out.setdefault(i["showGuid"], i["showKey"])
+        return out
+
     async def home(self) -> dict:
         sections = await self.plex.sections()
         deck, recent, hubs = await asyncio.gather(

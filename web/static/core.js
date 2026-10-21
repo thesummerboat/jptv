@@ -344,6 +344,9 @@ JP.buildNav = function () {
     nav.append(h('a', { href: '#/live' }, 'Live-TV'));
     nav.append(h('a', { href: '#/guide' }, 'TV-guide'));
   }
+  if (st.plex) {
+    nav.append(h('a', { href: '#/requests' }, 'Önskemål', h('span', { class: 'nav-badge', hidden: !st.requests }, st.requests || '')));
+  }
 };
 
 JP.refreshStatus = async function () {

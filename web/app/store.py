@@ -22,6 +22,11 @@ DEFAULTS = {
     "favorites": [],
     # Grupper (länder) som inte visas i live-TV, guiden och kanalsöket.
     "hidden_groups": [],
+    # Radarr/Sonarr: godkända önskemål skickas dit (valfritt).
+    "radarr_url": "",
+    "radarr_key": "",
+    "sonarr_url": "",
+    "sonarr_key": "",
     "recent": [],
 }
 

@@ -119,6 +119,17 @@ fun SettingsScreen(vm: AppViewModel) {
         })
 
         Spacer(Modifier.height(8.dp))
+        Text("Önskemål", style = MaterialTheme.typography.titleMedium)
+        var webAddress by remember { mutableStateOf(vm.prefs.jptvWebUrl ?: "") }
+        LaunchedEffect(Unit) { vm.webBase(force = true) }
+        Text(
+            vm.webUrl?.let { "JPTV Web hittad på $it. Filmer och serier som saknas i Plex kan önskas från Sök; du godkänner dem under Önskemål i JPTV Web." }
+                ?: "JPTV Web hittades inte. Den letas efter på Plex-serverns adress, port 8099 – skriv adressen här om den ligger någon annanstans.",
+            color = JptvColors.TextDim,
+        )
+        UrlField(value = webAddress, onValueChange = { webAddress = it }, onDone = { vm.changeJptvWebUrl(webAddress) })
+
+        Spacer(Modifier.height(8.dp))
         Text("Live-TV", style = MaterialTheme.typography.titleMedium)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedButton(onClick = { vm.changeStartInLastChannel(!vm.startInLastChannel) }) {

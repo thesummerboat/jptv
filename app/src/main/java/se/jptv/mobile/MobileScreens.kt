@@ -30,6 +30,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
@@ -47,6 +48,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -64,7 +66,9 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import se.jptv.AppViewModel
+import se.jptv.web.WishItem
 import se.jptv.BuildConfig
 import se.jptv.Screen
 import se.jptv.iptv.Channel
@@ -669,8 +673,12 @@ fun MobileDetails(vm: AppViewModel, initial: PlexItem) {
 @Composable
 fun MobileSearch(vm: AppViewModel) {
     var query by remember { mutableStateOf(vm.focusKeys["mobile_search"] ?: "") }
+    // Önskemål som skickats härifrån (status uppdateras utan ny sökning).
+    var updated by remember { mutableStateOf<Map<String, WishItem>>(emptyMap()) }
+    var wishing by remember { mutableStateOf<WishItem?>(null) }
     val results by produceState(AppViewModel.SearchResults(), query) {
         vm.focusKeys["mobile_search"] = query
+        updated = emptyMap()
         if (query.trim().length < 2) {
             value = AppViewModel.SearchResults()
             return@produceState
@@ -704,6 +712,17 @@ fun MobileSearch(vm: AppViewModel) {
                     }
                 }
             }
+            if (results.wishes.isNotEmpty()) {
+                item(key = "wish_title") { RowTitle("Inte i Plex – önska") }
+                item(key = "wish_row") {
+                    LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(results.wishes, key = { "w_${it.guid}" }) { w0 ->
+                            val w = updated[w0.guid] ?: w0
+                            WishTile(w) { wishing = w }
+                        }
+                    }
+                }
+            }
             if (results.channels.isNotEmpty()) {
                 item(key = "channels_title") { RowTitle("Kanaler") }
                 items(results.channels, key = { "ch_${it.key}" }) { ch ->
@@ -730,6 +749,90 @@ fun MobileSearch(vm: AppViewModel) {
             results.error?.let { item(key = "err") { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) } }
         }
     }
+    wishing?.let { w ->
+        WishDialog(vm, w, onClose = { wishing = null }, onUpdated = { updated = updated + (it.guid to it) })
+    }
+}
+
+@Composable
+private fun WishTile(item: WishItem, onClick: () -> Unit) {
+    Column(Modifier.width(110.dp).clickable(onClick = onClick)) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(2f / 3f)
+                .clip(MaterialTheme.shapes.small)
+                .background(CardHigh),
+        ) {
+            AsyncImage(model = item.thumb, contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            Text(
+                item.statusText ?: "☆ Önska",
+                color = if (item.status == null) Bg else Color.White,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(6.dp)
+                    .background(if (item.status == null) Accent else Color.Black.copy(alpha = 0.75f), MaterialTheme.shapes.extraSmall)
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            )
+        }
+        Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+        Text(listOfNotNull(item.year?.toString(), if (item.isShow) "Serie" else "Film").joinToString(" · "), color = Dim, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+/** Önska en titel som saknas i Plex: hamnar under Önskemål i JPTV Web på Unraid. */
+@Composable
+private fun WishDialog(vm: AppViewModel, item: WishItem, onClose: () -> Unit, onUpdated: (WishItem) -> Unit) {
+    var name by remember { mutableStateOf(vm.prefs.wisherName ?: "") }
+    var sending by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text(item.title + (item.year?.let { " ($it)" } ?: "")) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(if (item.isShow) "Serie" else "Film", color = Dim, style = MaterialTheme.typography.labelMedium)
+                item.statusText?.let { Text(it, color = Accent) }
+                item.summary?.let { Text(it, maxLines = 6, overflow = TextOverflow.Ellipsis) }
+                if (item.canWish && message == null) {
+                    OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Vem önskar?") }, singleLine = true)
+                }
+                message?.let { Text(it, color = Accent) }
+            }
+        },
+        confirmButton = {
+            if (item.canWish && message == null) {
+                Button(
+                    enabled = !sending && name.isNotBlank(),
+                    onClick = {
+                        sending = true
+                        vm.changeWisherName(name)
+                        scope.launch {
+                            vm.wish(item, name.trim())
+                                .onSuccess {
+                                    onUpdated(it)
+                                    message = "Önskad! Den syns under Önskemål i JPTV Web på Unraid."
+                                    delay(1800)
+                                    onClose()
+                                }
+                                .onFailure {
+                                    message = it.message ?: "Det gick inte att önska"
+                                    sending = false
+                                }
+                        }
+                    },
+                ) { Text(if (sending) "Skickar…" else if (item.isShow) "Önska serien" else "Önska filmen") }
+            } else {
+                TextButton(onClick = onClose) { Text("Stäng") }
+            }
+        },
+        dismissButton = { if (item.canWish && message == null) TextButton(onClick = onClose) { Text("Avbryt") } },
+    )
 }
 
 // ======================================================================
@@ -754,6 +857,34 @@ fun MobileSettings(vm: AppViewModel) {
             OutlinedButton(onClick = { vm.connectAndLoad(rediscover = true) }) { Text("Anslut igen") }
             OutlinedButton(onClick = { vm.logout() }) { Text("Logga ut") }
         }
+
+        HorizontalDivider()
+        Text("Önskemål", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        var wishName by remember { mutableStateOf(vm.prefs.wisherName ?: "") }
+        var webAddress by remember { mutableStateOf(vm.prefs.jptvWebUrl ?: "") }
+        LaunchedEffect(Unit) { vm.webBase(force = true) }
+        Text(
+            vm.webUrl?.let { "JPTV Web hittad på $it. Det som saknas i Plex kan önskas från Sök." }
+                ?: "JPTV Web hittades inte (fungerar hemma). Skriv adressen om den inte ligger på samma adress som Plex.",
+            color = Dim,
+        )
+        OutlinedTextField(
+            value = wishName,
+            onValueChange = { wishName = it; vm.changeWisherName(it) },
+            label = { Text("Ditt namn på önskemål") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = webAddress,
+            onValueChange = { webAddress = it },
+            label = { Text("JPTV Web-adress (valfritt)") },
+            placeholder = { Text("192.168.1.10:8099") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedButton(onClick = { vm.changeJptvWebUrl(webAddress) }) { Text("Spara adress och leta igen") }
 
         HorizontalDivider()
         Text("Kvalitet hemifrån", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)

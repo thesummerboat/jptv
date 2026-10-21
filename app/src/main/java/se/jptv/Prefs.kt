@@ -33,6 +33,16 @@ class Prefs(context: Context) {
         get() = sp.getString("m3u_url", null)
         set(value) { sp.edit().putString("m3u_url", value).apply() }
 
+    /** Egen adress till JPTV Web på Unraid. Tom = samma adress som Plex, port 8099. */
+    var jptvWebUrl: String?
+        get() = sp.getString("jptv_web_url", null)
+        set(value) { sp.edit().putString("jptv_web_url", value).apply() }
+
+    /** Namnet som står på önskemål från den här enheten. */
+    var wisherName: String?
+        get() = sp.getString("wisher_name", null)
+        set(value) { sp.edit().putString("wisher_name", value).apply() }
+
     var lastChannelUrl: String?
         get() = sp.getString("last_channel_url", null)
         set(value) { sp.edit().putString("last_channel_url", value).apply() }
