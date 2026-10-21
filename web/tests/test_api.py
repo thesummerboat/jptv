@@ -140,6 +140,15 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([c["id"] for c in favs], [chans[0]["id"]])
         found = await self.get("/api/search?q=svt")
         self.assertEqual(len(found["channels"]), 2)
+        # Dolda grupper syns inte i sök, men gruppen går att öppna och favoriter finns kvar.
+        r = await self.client.post("/api/live/hidden", data=json.dumps({"groups": ["Sverige", "Film"]}))
+        self.assertEqual((await r.json())["hidden"], ["Film", "Sverige"])
+        groups = await self.get("/api/live/groups")
+        self.assertEqual(groups["hidden"], ["Film", "Sverige"])
+        self.assertEqual((await self.get("/api/search?q=svt"))["channels"], [])
+        self.assertEqual(await self.get("/api/live/channels?q=svt"), [])
+        self.assertEqual(len(await self.get("/api/live/channels?group=Sverige")), 8)
+        self.assertEqual(len(await self.get("/api/live/channels?fav=1")), 1)
 
 
 if __name__ == "__main__":

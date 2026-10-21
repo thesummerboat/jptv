@@ -18,6 +18,8 @@ DEFAULTS = {
     # Ledmotiv på seriesidor: 0 = av, 1 = lågt, 2 = mellan.
     "theme_level": 1,
     "favorites": [],
+    # Grupper (länder) som inte visas i live-TV, guiden och kanalsöket.
+    "hidden_groups": [],
     "recent": [],
 }
 
