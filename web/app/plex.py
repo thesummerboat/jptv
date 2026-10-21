@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import time
 import uuid
@@ -162,6 +163,9 @@ def slim(o: dict, full: bool = False) -> dict:
         "addedAt": int(o.get("addedAt") or 0),
         "lastViewedAt": int(o.get("lastViewedAt") or 0),
         "imdb": imdb,
+        # Plex egna id (plex://movie/…) – samma i Plex katalog, så att önskemål känns igen i biblioteket.
+        "guid": o.get("guid") if str(o.get("guid") or "").startswith("plex://") else None,
+        "showGuid": o.get("grandparentGuid") or (o.get("parentGuid") if t == "season" else None),
         "studio": o.get("studio"),
         "originallyAvailableAt": o.get("originallyAvailableAt"),
     }
@@ -228,6 +232,10 @@ def metadata_list(mc: dict) -> list[dict]:
 
 
 class Plex:
+    # Plex egen katalog med alla filmer och serier (även sådant som inte finns på servern).
+    DISCOVER = os.environ.get("JPTV_PLEX_DISCOVER", "https://discover.provider.plex.tv")
+    METADATA = os.environ.get("JPTV_PLEX_METADATA", "https://metadata.provider.plex.tv")
+
     def __init__(self, store, http: aiohttp.ClientSession):
         self.store = store
         self.http = http
@@ -376,6 +384,59 @@ class Plex:
         self.forget_cache()
 
     # ------------------------------------------------------------ bibliotek
+
+    # ------------------------------------------------------------ Plex katalog (för önskemål)
+
+    def _account(self) -> str:
+        token = self.store.get("account_token") or (self.server or {}).get("token")
+        if not token:
+            raise PlexError("Inte inloggad på Plex")
+        return token
+
+    async def discover(self, query: str, limit: int = 24) -> list[dict]:
+        """Filmer och serier i Plex katalog, oavsett om de finns på servern."""
+        params = {"query": query, "limit": limit, "searchTypes": "movies,tv", "searchProviders": "discover", "includeMetadata": 1}
+        async with self.http.get(
+            f"{self.DISCOVER}/library/search?{urlencode(params)}",
+            headers=self.headers(self._account()),
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as r:
+            if r.status >= 400:
+                raise PlexError(f"Plex katalog svarade HTTP {r.status}")
+            data = await r.json(content_type=None)
+        groups = ((data or {}).get("MediaContainer") or {}).get("SearchResults") or []
+        out = []
+        for g in groups:
+            for res in g.get("SearchResult") or []:
+                m = res.get("Metadata") or {}
+                if m.get("type") not in ("movie", "show") or not m.get("guid"):
+                    continue
+                out.append(online_item(m))
+        seen, unique = set(), []
+        for i in out:
+            if i["guid"] not in seen:
+                seen.add(i["guid"])
+                unique.append(i)
+        return unique
+
+    async def online_ids(self, rating_key: str) -> dict:
+        """IMDb-, TMDB- och TVDB-id för en titel i Plex katalog (det Radarr och Sonarr behöver)."""
+        async with self.http.get(
+            f"{self.METADATA}/library/metadata/{rating_key}",
+            headers=self.headers(self._account()),
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as r:
+            if r.status >= 400:
+                raise PlexError(f"Plex katalog svarade HTTP {r.status}")
+            data = await r.json(content_type=None)
+        meta = (((data or {}).get("MediaContainer") or {}).get("Metadata") or [{}])[0]
+        ids = {}
+        for g in meta.get("Guid") or []:
+            gid = str(g.get("id") or "")
+            if "://" in gid:
+                scheme, value = gid.split("://", 1)
+                ids[scheme] = value
+        return ids
 
     async def sections(self) -> list[dict]:
         mc = await self.get("/library/sections", cache=60)
@@ -578,6 +639,22 @@ class Plex:
         if subtitle is not None:
             params["subtitleStreamID"] = subtitle
         await self.send("PUT", f"/library/parts/{part_id}", params)
+
+
+def online_item(m: dict) -> dict:
+    """En titel ur Plex katalog i samma lilla form som resten (bilderna är fulla adresser)."""
+    return {
+        "guid": m.get("guid"),
+        "key": str(m.get("ratingKey") or str(m.get("guid", "")).rsplit("/", 1)[-1]),
+        "type": m.get("type"),
+        "title": m.get("title", ""),
+        "year": m.get("year"),
+        "summary": m.get("summary") or None,
+        "thumb": m.get("thumb"),
+        "art": m.get("art"),
+        "contentRating": m.get("contentRating"),
+        "originallyAvailableAt": m.get("originallyAvailableAt"),
+    }
 
 
 def describe_decision(mc: dict) -> dict:

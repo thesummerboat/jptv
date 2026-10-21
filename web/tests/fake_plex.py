@@ -64,7 +64,7 @@ def build() -> None:
         k = nk()
         viewed = rnd.random() < 0.3
         items[k] = {
-            "ratingKey": k, "key": f"/library/metadata/{k}", "type": "movie", "title": title, "titleSort": title,
+            "ratingKey": k, "key": f"/library/metadata/{k}", "type": "movie", "title": title, "titleSort": title, "guid": f"plex://movie/m{k}",
             "year": year, "summary": SUMMARY, "thumb": f"/library/metadata/{k}/thumb/1", "art": f"/library/metadata/{k}/art/1",
             "duration": 5400000 + i * 60000, "librarySectionID": 1, "contentRating": "15", "studio": "Nordisk Film",
             "addedAt": NOW - i * 86400 * 3, "viewCount": 1 if viewed else 0, "lastViewedAt": NOW - i * 86400 if viewed else None,
@@ -86,7 +86,7 @@ def build() -> None:
     for i, (title, year, genres, rating, nseasons) in enumerate(SHOWS):
         sk = nk()
         show = {
-            "ratingKey": sk, "key": f"/library/metadata/{sk}/children", "type": "show", "title": title, "titleSort": title, "year": year,
+            "ratingKey": sk, "key": f"/library/metadata/{sk}/children", "type": "show", "title": title, "titleSort": title, "year": year, "guid": f"plex://show/s{sk}",
             "summary": SUMMARY, "thumb": f"/library/metadata/{sk}/thumb/1", "art": f"/library/metadata/{sk}/art/1", "librarySectionID": 2,
             "contentRating": "15", "addedAt": NOW - i * 86400 * 2, "childCount": nseasons, "leafCount": nseasons * 6,
             "viewedLeafCount": 8 if i in (0, 1, 3) else 0, "theme": f"/library/metadata/{sk}/theme/1",
@@ -112,7 +112,7 @@ def build() -> None:
                 items[ek] = {
                     "ratingKey": ek, "type": "episode", "title": ["Ankomsten", "Stormen", "Fyren", "Sanningen", "Flykten", "Hemkomsten"][e - 1],
                     "index": e, "parentIndex": s, "parentRatingKey": seak, "grandparentRatingKey": sk, "grandparentTitle": title,
-                    "grandparentThumb": show["thumb"], "grandparentArt": show["art"], "thumb": f"/library/metadata/{ek}/thumb/1",
+                    "grandparentThumb": show["thumb"], "grandparentArt": show["art"], "thumb": f"/library/metadata/{ek}/thumb/1", "grandparentGuid": show["guid"],
                     "summary": "Ett nytt spår leder utredningen åt ett oväntat håll, samtidigt som någon i gruppen döljer något.",
                     "duration": 70000, "librarySectionID": 2, "viewCount": 1 if watched else 0, "contentRating": "15",
                     "viewOffset": 30000 if (i == 0 and s == 2 and e == 3) else None, "originallyAvailableAt": f"{year + s - 1}-0{min(9, e)}-1{e}",
@@ -385,6 +385,25 @@ def make_app(media_dir: str, port: int) -> web.Application:
     @r.put("/actions/removeFromContinueWatching")
     async def put_ok(_):
         return web.Response(text="ok")
+
+    # ---- Plex katalog (önskemål): det som finns i biblioteket plus två titlar som saknas
+    CATALOG = [
+        {"guid": "plex://movie/nyfilm1", "ratingKey": "nyfilm1", "type": "movie", "title": "Polarexpressen 2", "year": 2026, "summary": "En ny film som inte finns i Plex.", "thumb": "https://example.invalid/p1.jpg"},
+        {"guid": "plex://show/nyserie1", "ratingKey": "nyserie1", "type": "show", "title": "Fjällstationen", "year": 2025, "summary": "En ny serie som inte finns i Plex.", "thumb": "https://example.invalid/p2.jpg"},
+    ]
+
+    @r.get("/discover/library/search")
+    async def discover(req):
+        q = req.query.get("query", "").lower()
+        lib = [{k: v for k, v in strip(items[k]).items() if k in ("guid", "ratingKey", "type", "title", "year", "summary")} for k in order]
+        hits = [m for m in lib + CATALOG if q in m["title"].lower()]
+        return web.json_response({"MediaContainer": {"SearchResults": [{"id": "external", "SearchResult": [{"Metadata": m} for m in hits]}]}})
+
+    @r.get("/meta/library/metadata/{rk}")
+    async def online_meta(req):
+        rk = req.match_info["rk"]
+        guids = {"nyfilm1": [{"id": "imdb://tt7654321"}, {"id": "tmdb://424242"}], "nyserie1": [{"id": "imdb://tt1111111"}, {"id": "tvdb://373737"}, {"id": "tmdb://99"}]}
+        return web.json_response({"MediaContainer": {"Metadata": [{"ratingKey": rk, "Guid": guids.get(rk, [])}]}})
 
     # ---- IPTV
     @r.get("/iptv.m3u")

@@ -15,11 +15,13 @@ import aiohttp
 from aiohttp import web
 
 from . import imdb
+from .arr import Arr, ArrError
 from .iptv import HwAccel, LiveStream
 from .library import Library
 from .plex import QUALITIES, Plex, PlexError, public
 from .store import Store
 from .tv import Iptv
+from .wishes import Wishes
 
 VERSION = os.environ.get("JPTV_VERSION", "dev")
 STATIC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
@@ -73,6 +75,7 @@ async def status(request: web.Request):
             "live": c["live"].status(),
             "hardware": c["live"].hw.status() if c["live"].hw else None,
             "imdb": imdb.RATINGS.status(),
+            "requests": c["wishes"].pending(),
             "settings": settings_public(c),
         }
     )
@@ -88,6 +91,10 @@ def settings_public(c: dict) -> dict:
         "liveTranscode": st.get("live_transcode", "auto"),
         "liveDeinterlace": st.get("live_deinterlace", "auto"),
         "themeLevel": st.get("theme_level", 1),
+        "radarrUrl": st.get("radarr_url", ""),
+        "radarrKey": bool(st.get("radarr_key")),
+        "sonarrUrl": st.get("sonarr_url", ""),
+        "sonarrKey": bool(st.get("sonarr_key")),
     }
 
 
@@ -103,6 +110,15 @@ async def save_settings(request: web.Request):
         changes["live_transcode"] = b["liveTranscode"]
     if b.get("liveDeinterlace") in ("auto", "off"):
         changes["live_deinterlace"] = b["liveDeinterlace"]
+    for kind in ("radarr", "sonarr"):
+        if f"{kind}Url" in b:
+            changes[f"{kind}_url"] = str(b[f"{kind}Url"] or "").strip()
+        # Nyckeln visas aldrig igen; tom ruta = behåll den sparade, "-" = ta bort.
+        key = str(b.get(f"{kind}Key") or "").strip()
+        if key == "-":
+            changes[f"{kind}_key"] = ""
+        elif key:
+            changes[f"{kind}_key"] = key
     if "themeLevel" in b:
         changes["theme_level"] = max(0, min(int(b["themeLevel"]), 2))
     iptv_changed = False
@@ -346,6 +362,119 @@ async def watched(request: web.Request):
 async def deck_remove(request: web.Request):
     await ctx(request)["plex"].remove_from_deck(request.match_info["key"])
     return web.json_response({"ok": True})
+
+
+# ------------------------------------------------------------------ önskemål
+
+
+def arr_for(c: dict, typ: str) -> Arr:
+    kind = "sonarr" if typ == "show" else "radarr"
+    st = c["store"]
+    return Arr(c["http"], kind, st.get(f"{kind}_url", ""), st.get(f"{kind}_key", ""))
+
+
+@routes.get("/api/discover")
+async def discover(request: web.Request):
+    """Sök i Plex katalog: vad finns redan i Plex, vad är redan önskat, vad kan önskas."""
+    c = ctx(request)
+    q = request.query.get("q", "").strip()
+    if not q:
+        return web.json_response({"results": []})
+    found, library = await asyncio.gather(c["plex"].discover(q), c["library"].guid_map())
+    out = []
+    for i in found:
+        w = c["wishes"].find(i["guid"])
+        out.append(i | {"libraryKey": library.get(i["guid"]), "request": {"id": w["id"], "status": w["status"]} if w else None})
+    return web.json_response({"results": out})
+
+
+@routes.get("/api/requests")
+async def requests_list(request: web.Request):
+    c = ctx(request)
+    if any(w["status"] in ("pending", "approved") for w in c["wishes"].items):
+        try:
+            c["wishes"].mark_available(await c["library"].guid_map())
+        except Exception:
+            pass
+    return web.json_response(
+        {
+            "items": c["wishes"].public(),
+            "pending": c["wishes"].pending(),
+            "radarr": arr_for(c, "movie").configured,
+            "sonarr": arr_for(c, "show").configured,
+        }
+    )
+
+
+@routes.post("/api/requests")
+async def requests_add(request: web.Request):
+    c = ctx(request)
+    b = await body(request)
+    if not b.get("guid") or not b.get("title"):
+        raise web.HTTPBadRequest(text="Titel saknas")
+    library = await c["library"].guid_map()
+    if b["guid"] in library:
+        return web.json_response({"error": "Finns redan i Plex", "libraryKey": library[b["guid"]]}, status=409)
+    w, new = c["wishes"].add(b, str(b.get("by") or ""))
+    return web.json_response({"request": w, "new": new})
+
+
+@routes.post("/api/requests/{id}/approve")
+async def requests_approve(request: web.Request):
+    c = ctx(request)
+    w = c["wishes"].get(request.match_info["id"])
+    if not w:
+        raise web.HTTPNotFound()
+    arr = arr_for(c, w["type"])
+    note = None
+    if arr.configured:
+        try:
+            ids = await c["plex"].online_ids(w["key"])
+            note = await arr.add(w, ids)
+        except (ArrError, PlexError) as e:
+            c["wishes"].update(w["id"], error=str(e))
+            return web.json_response({"error": str(e), "request": w}, status=502)
+    w = c["wishes"].update(w["id"], status="approved", note=note or "Godkänd", error=None)
+    return web.json_response({"request": w})
+
+
+@routes.post("/api/requests/{id}/decline")
+async def requests_decline(request: web.Request):
+    c = ctx(request)
+    w = c["wishes"].update(request.match_info["id"], status="declined", note="Nej", error=None)
+    if not w:
+        raise web.HTTPNotFound()
+    return web.json_response({"request": w})
+
+
+@routes.delete("/api/requests/{id}")
+async def requests_delete(request: web.Request):
+    return web.json_response({"ok": ctx(request)["wishes"].remove(request.match_info["id"])})
+
+
+@routes.post("/api/arr/test/{kind}")
+async def arr_test(request: web.Request):
+    c = ctx(request)
+    arr = arr_for(c, "show" if request.match_info["kind"] == "sonarr" else "movie")
+    if not arr.configured:
+        return web.json_response({"error": f"Fyll i adress och API-nyckel för {arr.name}"}, status=400)
+    try:
+        return web.json_response({"ok": await arr.test()})
+    except ArrError as e:
+        return web.json_response({"error": str(e)}, status=502)
+
+
+async def watch_wishes(c: dict) -> None:
+    """Var femte minut: dyker något önskat upp i Plex markeras det som Finns nu."""
+    while True:
+        await asyncio.sleep(300)
+        try:
+            if any(w["status"] in ("pending", "approved") for w in c["wishes"].items) and c["store"].get("server"):
+                done = c["wishes"].mark_available(await c["library"].guid_map())
+                if done:
+                    c["library"].invalidate()
+        except Exception:
+            log.exception("önskemål")
 
 
 # ------------------------------------------------------------------ Plex-proxy (video, bilder, ledmotiv)
@@ -608,7 +737,7 @@ def create_app(config_dir: str | None = None) -> web.Application:
     config_dir = config_dir or os.environ.get("JPTV_CONFIG", "/config")
     app = web.Application(middlewares=[errors], client_max_size=2 * 1024 * 1024)
     store = Store(config_dir)
-    state: dict = {"store": store, "index_html": render_index()}
+    state: dict = {"store": store, "index_html": render_index(), "wishes": Wishes(config_dir)}
     app[JPTV] = state
 
     async def startup(app: web.Application):
@@ -623,6 +752,7 @@ def create_app(config_dir: str | None = None) -> web.Application:
         state["live"].hw = HwAccel(os.environ.get("JPTV_VAAPI_DEVICE", "/dev/dri/renderD128"))
         asyncio.create_task(state["live"].hw.probe())
         await state["iptv"].start()
+        state["wishes_task"] = asyncio.create_task(watch_wishes(state))
         asyncio.create_task(state["plex"].ensure_server())
         # IMDb-betygen: sparad fil direkt, ny hämtas i bakgrunden om den är gammal.
         path = store.cache_path("imdb-ratings.bin")
@@ -632,6 +762,7 @@ def create_app(config_dir: str | None = None) -> web.Application:
 
     async def cleanup(app: web.Application):
         state["watchdog"].cancel()
+        state["wishes_task"].cancel()
         state["imdb"].cancel()
         await state["live"].stop()
         await state["http"].close()

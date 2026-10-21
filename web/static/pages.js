@@ -263,7 +263,10 @@
               h('span', null, h('b', null, c.name), c.now ? h('small', null, c.now.title) : null))))));
         }
         for (const hub of data.hubs) parts.push(h('section', { class: 'search-group' }, h('h2', null, hub.title), JP.posterGrid(hub.items, false)));
-        results.replaceChildren(...(parts.length ? parts : [h('div', { class: 'empty' }, h('div', { class: 'empty-title' }, 'Inga träffar'), h('div', { class: 'dim' }, `Hittade inget för "${text}".`))]));
+        if (!parts.length) parts.push(h('div', { class: 'dim search-none' }, `Inget i Plex eller bland kanalerna för "${text}".`));
+        // Det som saknas i Plex kan önskas.
+        if (JP.status && JP.status.plex) parts.push(JP.wishSection(text));
+        results.replaceChildren(...parts);
       } catch (e) {
         results.replaceChildren(JP.errorBox(e));
       }
@@ -385,12 +388,35 @@
     const imdbLine = im.loading ? 'IMDb-betyg: hämtas …'
       : im.count ? `IMDb-betyg för ${im.count.toLocaleString('sv-SE')} titlar · hämtade ${ago(im.updatedAt)} (uppdateras varje vecka)`
         : im.error ? 'IMDb-betyg: kunde inte hämtas (' + im.error + ')' : 'IMDb-betyg: hämtas strax';
+    // Radarr och Sonarr: godkända önskemål skickas dit.
+    const arrBox = h('section', { class: 'card-box' }, h('h2', null, 'Önskemål'),
+      h('p', { class: 'dim' }, 'Önskade filmer och serier hamnar under Önskemål. Med Radarr (filmer) och Sonarr (serier) skickar OK titeln dit direkt; adressen och API-nyckeln finns i respektive app under Settings → General. Utan dem markerar OK bara önskemålet.'));
+    for (const [kind, label] of [['radarr', 'Radarr'], ['sonarr', 'Sonarr']]) {
+      const url = h('input', { type: 'text', value: s[kind + 'Url'] || '', placeholder: kind === 'radarr' ? 'http://192.168.x.x:7878' : 'http://192.168.x.x:8989', spellcheck: 'false' });
+      const key = h('input', { type: 'password', value: '', placeholder: s[kind + 'Key'] ? 'Sparad – skriv en ny för att byta' : 'API-nyckel', autocomplete: 'off' });
+      const state = h('span', { class: 'dim small' });
+      arrBox.append(
+        h('div', { class: 'arr-row' },
+          field(label + ' – adress', url),
+          field(label + ' – API-nyckel', key)),
+        h('div', { class: 'actions' },
+          h('button', { class: 'btn small', onclick: async () => {
+            await save({ [kind + 'Url']: url.value, [kind + 'Key']: key.value });
+            key.value = '';
+            key.placeholder = 'Sparad – skriv en ny för att byta';
+            state.textContent = 'Testar …';
+            try { state.textContent = '✓ ' + (await JP.post('/api/arr/test/' + kind)).ok; } catch (e) { state.textContent = e.message; }
+          } }, 'Spara och testa'),
+          s[kind + 'Key'] ? h('button', { class: 'btn ghost small', onclick: async () => { await save({ [kind + 'Url']: '', [kind + 'Key']: '-' }, label + ' borttagen'); url.value = ''; state.textContent = ''; } }, 'Ta bort') : null,
+          state));
+    }
+
     const about = h('section', { class: 'card-box' }, h('h2', null, 'Om'),
       h('p', { class: 'dim' }, imdbLine),
       h('p', { class: 'dim' }, `JPTV Web ${st.version}. Live-TV använder en ström åt gången: startar du en kanal här stängs den som spelades i ett annat fönster. TV:n och mobilen räknas för sig hos leverantören.`),
       h('p', { class: 'dim' }, 'Tangenter i spelaren: mellanslag = paus, ← → = 10 s, ↑ ↓ = volym, F = helskärm, M = ljud av, Esc = tillbaka. I live-TV byter ↑ ↓ kanal.'));
 
-    v.el.append(h('div', { class: 'page narrow' }, h('h1', null, 'Inställningar'), plexBox, tvBox, playBox, about));
+    v.el.append(h('div', { class: 'page narrow' }, h('h1', null, 'Inställningar'), plexBox, tvBox, playBox, st.plex ? arrBox : null, about));
   }, { nocache: true });
 
   /* ---------- inloggning ---------- */

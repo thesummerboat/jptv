@@ -97,7 +97,7 @@ body[data-page="guide"] #topbar {
 .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .actions.center { justify-content: center; }
 
-input[type="text"], input[type="url"], input[type="search"], select {
+input[type="text"], input[type="url"], input[type="search"], input[type="password"], select {
   background: var(--surface); color: var(--text);
   border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px;
   padding: 9px 12px; font: inherit; min-width: 0;
@@ -503,6 +503,43 @@ input.search-input { width: 100%; font-size: 22px; padding: 14px 18px; border-ra
 .login-box a:not(.btn) { color: var(--accent); font-weight: 650; }
 .pin { font: 800 48px/1 ui-monospace, "SF Mono", Consolas, monospace; letter-spacing: 0.22em; color: var(--accent); margin: 10px 0; }
 
+/* ---------- önskemål ---------- */
+
+.nav-badge { display: inline-grid; place-items: center; min-width: 19px; height: 19px; margin-left: 6px; padding: 0 5px; border-radius: 10px; background: var(--accent); color: var(--accent-ink); font-size: 11.5px; font-weight: 800; vertical-align: 1px; }
+.search-none { margin-top: 24px; }
+.wish-card { background: none; border: 0; padding: 0; color: inherit; text-align: left; cursor: pointer; font: inherit; }
+.card-wish { position: absolute; left: 8px; bottom: 8px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border-radius: 6px; background: rgba(14, 17, 22, 0.88); font-size: 12.5px; font-weight: 700; opacity: 0.9; }
+.card-wish .ico { width: 14px; height: 14px; color: var(--accent); }
+.wish-card:hover .card-wish { background: var(--accent); color: var(--accent-ink); opacity: 1; }
+.wish-card:hover .card-wish .ico { color: var(--accent-ink); }
+.card-label.wish-pending { background: var(--accent); color: var(--accent-ink); }
+.card-label.wish-available { background: #2e7d4f; }
+.modal { position: fixed; inset: 0; z-index: 150; display: grid; place-items: center; padding: 20px; background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(4px); }
+.modal-box { width: min(720px, 100%); max-height: 90vh; overflow: auto; padding: 22px; border-radius: 16px; background: var(--surface); box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6); }
+.wish-dialog { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 22px; }
+.wish-poster { aspect-ratio: 2 / 3; border-radius: 10px; overflow: hidden; background: var(--high); }
+.wish-poster img { width: 100%; height: 100%; object-fit: cover; }
+.wish-text { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.wish-text h2 { font-size: 24px; }
+.wish-text .summary { font-size: 14.5px; color: #c9d0da; }
+.wish-text .field { margin: 4px 0; }
+.wish-status { align-self: flex-start; padding: 3px 10px; border-radius: 6px; font-size: 13px; font-weight: 700; background: var(--high); }
+.wish-status.pending { background: var(--accent); color: var(--accent-ink); }
+.wish-status.available { background: #2e7d4f; }
+.wish-arr { margin: 6px 0 16px; }
+.wish-list { margin-top: 28px; }
+.wish-heading { font-size: 17px; margin: 22px 0 8px; }
+.wish-row { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 10px; border-radius: 10px; }
+.wish-row:hover { background: var(--surface); }
+.wish-row.declined { opacity: 0.55; }
+.wish-thumb { width: 52px; aspect-ratio: 2 / 3; border-radius: 6px; overflow: hidden; background: var(--high); }
+.wish-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.wish-title { font-weight: 650; }
+.wish-type { margin-left: 8px; padding: 1px 6px; border-radius: 4px; background: var(--high); font-size: 11.5px; font-weight: 700; color: var(--dim); vertical-align: 2px; }
+.wish-actions { display: flex; align-items: center; gap: 8px; }
+.arr-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.page.narrow.wide-ish { max-width: 1100px; }
+
 /* ---------- mindre fönster ---------- */
 
 @media (max-width: 1100px) {
@@ -518,6 +555,9 @@ input.search-input { width: 100%; font-size: 22px; padding: 14px 18px; border-ra
   .season-list { position: static; flex-direction: row; overflow-x: auto; max-height: none; }
   .season { flex: none; }
   .ep { grid-template-columns: 140px minmax(0, 1fr); }
+  .wish-dialog { grid-template-columns: 1fr; }
+  .wish-poster { width: 140px; }
+  .arr-row { grid-template-columns: 1fr; }
   .view.live { display: flex; flex-direction: column; height: auto; }
   .live-side { order: -1; }
   .groups, .channels { border-right: 0; }

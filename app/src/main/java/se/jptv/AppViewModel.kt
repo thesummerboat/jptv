@@ -89,6 +89,77 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val updater = Updater(app, http)
     val imdb = se.jptv.imdb.ImdbRatings(app, http)
 
+    // ---------- Önskemål via JPTV Web på Unraid ----------
+
+    val web = se.jptv.web.JptvWeb(http)
+
+    /** Adressen JPTV Web hittades på, eller null. Visas under Inställningar. */
+    var webUrl by mutableStateOf<String?>(null)
+        private set
+
+    /** Hittar JPTV Web: egen adress först, annars Plex-serverns adress med port 8099. */
+    suspend fun webBase(force: Boolean = false): String? {
+        if (!force) web.baseUrl?.let { return it }
+        val candidates = listOfNotNull(
+            se.jptv.web.JptvWebAddress.normalize(prefs.jptvWebUrl),
+            se.jptv.web.JptvWebAddress.fromPlex(plex.server?.uri),
+        ).distinct()
+        for (c in candidates) {
+            if (web.probe(c)) {
+                web.baseUrl = c
+                webUrl = c
+                return c
+            }
+        }
+        web.baseUrl = null
+        webUrl = null
+        return null
+    }
+
+    fun changeJptvWebUrl(value: String) {
+        prefs.jptvWebUrl = value.trim().ifBlank { null }
+        viewModelScope.launch { webBase(force = true) }
+    }
+
+    /** Namnet på önskemål: eget, annars enhetens modell (t.ex. "TV · SHIELD Android TV"). */
+    val wisherName: String
+        get() = prefs.wisherName?.takeIf { it.isNotBlank() }
+            ?: ((if (isTvDevice) "TV · " else "") + (android.os.Build.MODEL ?: "JPTV"))
+
+    fun changeWisherName(value: String) {
+        prefs.wisherName = value.trim().ifBlank { null }
+    }
+
+    private val isTvDevice: Boolean by lazy {
+        val app = getApplication<Application>()
+        val ui = app.getSystemService(android.content.Context.UI_MODE_SERVICE) as android.app.UiModeManager
+        ui.currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION ||
+            app.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
+    }
+
+    /** Titlar ur Plex katalog som saknas i Plex. Tom lista om JPTV Web inte finns. */
+    suspend fun searchWishes(query: String): List<se.jptv.web.WishItem> {
+        if (webBase() == null) return emptyList()
+        return try {
+            kotlinx.coroutines.withTimeoutOrNull(8_000) { web.discover(query) }.orEmpty().filter { it.libraryKey == null }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /** Skickar ett önskemål. Returnerar titeln med ny status, eller felet. */
+    suspend fun wish(item: se.jptv.web.WishItem, by: String = wisherName): Result<se.jptv.web.WishItem> =
+        try {
+            if (webBase() == null) throw java.io.IOException("JPTV Web på Unraid hittades inte")
+            Result.success(web.wish(item, by))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+
     // ---------- Minne för listor, så att fokus och scroll är kvar när man går tillbaka ----------
 
     /**
@@ -1346,11 +1417,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val channels: List<Channel> = emptyList(),
         val programmes: List<Pair<Channel, se.jptv.iptv.Programme>> = emptyList(),
         val error: String? = null,
+        /** Inte i Plex – kan önskas (via JPTV Web på Unraid). */
+        val wishes: List<se.jptv.web.WishItem> = emptyList(),
     )
 
-    suspend fun searchEverything(query: String): SearchResults {
+    suspend fun searchEverything(query: String): SearchResults = kotlinx.coroutines.coroutineScope {
         val q = query.trim()
-        if (q.length < 2) return SearchResults()
+        if (q.length < 2) return@coroutineScope SearchResults()
+        val wishes = async { searchWishes(q) }
+        searchLocal(q).copy(wishes = wishes.await())
+    }
+
+    private suspend fun searchLocal(q: String): SearchResults {
         val lower = q.lowercase()
         val pl = playlist
         val channels = pl?.channels?.filter { it.name.lowercase().contains(lower) }?.take(40) ?: emptyList()
