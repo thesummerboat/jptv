@@ -29,7 +29,13 @@ jobs:
           build-args: VERSION=1.${{ github.run_number }}
 
       - name: Testa (i containern, med dess ffmpeg)
-        run: docker run --rm jptv-web:test python -m unittest discover -s tests -t . -v
+        run: |
+          set -o pipefail
+          if ! docker run --rm jptv-web:test python -m unittest discover -s tests -t . -v 2>&1 | tee test.log; then
+            # Felet som anteckning, så att det syns även utan körloggen.
+            echo "::error title=Test misslyckades::$(grep -E -A 25 '^(FAIL|ERROR):' test.log | head -80 | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')"
+            exit 1
+          fi
 
       - uses: docker/login-action@v3
         with:
