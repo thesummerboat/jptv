@@ -8,3 +8,5 @@ captures/
 .kotlin/
 *.keystore
 *.jks
+__pycache__/
+*.pyc
