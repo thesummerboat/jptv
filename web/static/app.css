@@ -10,7 +10,11 @@
   --dim: #9aa4b2;
   --gutter: clamp(20px, 3.4vw, 64px);
   --poster: clamp(112px, 8.6vw, 178px);
-  --hero-h: 55vh;
+  /* Bakgrundsbilden behåller 16:9 och den stora rutan följer dess höjd, så att bilden inte
+     zoomas in i höga eller smala fönster. */
+  --art-w: 78vw;
+  --art-h: min(82vh, calc(var(--art-w) * 9 / 16));
+  --hero-h: max(360px, min(55vh, calc(var(--art-h) + 40px)));
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
   color-scheme: dark;
 }
@@ -178,8 +182,8 @@ select { cursor: pointer; }
 
 .view.browse { position: relative; height: 100vh; overflow: hidden; }
 .hero { position: absolute; inset: 0; }
-.hero-bg { position: absolute; top: 0; right: 0; width: 78%; height: 80vh; overflow: hidden; }
-.hero-img, .hero-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity 0.9s ease; }
+.hero-bg { position: absolute; top: 0; right: 0; width: var(--art-w); height: var(--art-h); overflow: hidden; }
+.hero-img, .hero-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center 30%; opacity: 0; transition: opacity 0.9s ease; }
 .hero-img.on { opacity: 1; }
 .hero.trailer-on .hero-video { opacity: 1; }
 .hero.trailer-on .hero-img { opacity: 0; }
@@ -208,7 +212,7 @@ select { cursor: pointer; }
 .dot-arrow { width: 30px; height: 30px; border-radius: 50%; border: 0; background: rgba(255, 255, 255, 0.1); color: #fff; display: grid; place-items: center; cursor: pointer; }
 .dot-arrow:hover { background: rgba(255, 255, 255, 0.22); }
 .dot-arrow .ico { width: 16px; height: 16px; }
-.hero-mute { position: absolute; right: var(--gutter); top: calc(var(--hero-h) - 48px); z-index: 3; width: 38px; height: 38px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, 0.4); background: rgba(14, 17, 22, 0.5); color: #fff; display: grid; place-items: center; cursor: pointer; }
+.hero-mute { position: absolute; right: var(--gutter); top: calc(min(var(--hero-h), var(--art-h)) - 48px); z-index: 3; width: 38px; height: 38px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, 0.4); background: rgba(14, 17, 22, 0.5); color: #fff; display: grid; place-items: center; cursor: pointer; }
 
 .rows {
   position: absolute; top: var(--hero-h); bottom: 0; left: 0; right: 0; z-index: 2;
@@ -243,10 +247,10 @@ select { cursor: pointer; }
 
 /* ---------- detaljsidor ---------- */
 
-.details { position: relative; min-height: 88vh; display: flex; align-items: flex-end; }
-.details.show { min-height: 66vh; }
-.details-bg { position: absolute; top: 0; right: 0; width: 80%; height: 100%; overflow: hidden; }
-.details-img, .details-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transition: opacity 0.9s; }
+.details { position: relative; min-height: min(88vh, calc(80vw * 9 / 16 + 140px)); display: flex; align-items: flex-end; }
+.details.show { min-height: min(66vh, calc(80vw * 9 / 16 + 60px)); }
+.details-bg { position: absolute; top: 0; right: 0; width: 80%; height: auto; aspect-ratio: 16 / 9; max-height: 100%; overflow: hidden; }
+.details-img, .details-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center 30%; transition: opacity 0.9s; }
 .details-video { opacity: 0; }
 .details-bg.trailer-on .details-video { opacity: 1; }
 .details-bg.trailer-on .details-img { opacity: 0; }
@@ -502,7 +506,7 @@ input.search-input { width: 100%; font-size: 22px; padding: 14px 18px; border-ra
   .view.live { grid-template-columns: 190px minmax(240px, 320px) minmax(0, 1fr); }
 }
 @media (max-width: 900px) {
-  :root { --hero-h: 60vh; }
+  :root { --art-w: 100vw; }
   #clock { display: none; }
   .hero-bg, .details-bg { width: 100%; }
   .hero-info { width: calc(100vw - 2 * var(--gutter)); }
