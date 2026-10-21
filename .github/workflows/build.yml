@@ -3,6 +3,10 @@ name: Bygg APK
 on:
   push:
     branches: [main]
+    # Webbappen byggs för sig (web.yml) och ska inte ge en ny APK.
+    paths-ignore:
+      - "web/**"
+      - ".github/workflows/web.yml"
   workflow_dispatch:
 
 permissions:
