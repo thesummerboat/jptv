@@ -15,7 +15,7 @@ import aiohttp
 from aiohttp import web
 
 from . import imdb
-from .iptv import LiveStream
+from .iptv import HwAccel, LiveStream
 from .library import Library
 from .plex import QUALITIES, Plex, PlexError, public
 from .store import Store
@@ -71,6 +71,7 @@ async def status(request: web.Request):
             "server": server and {"name": server.get("name"), "uri": server.get("uri")},
             "iptv": c["iptv"].status(),
             "live": c["live"].status(),
+            "hardware": c["live"].hw.status() if c["live"].hw else None,
             "imdb": imdb.RATINGS.status(),
             "settings": settings_public(c),
         }
@@ -618,6 +619,9 @@ def create_app(config_dir: str | None = None) -> web.Application:
         state["iptv"] = Iptv(store, http)
         state["live"] = LiveStream(os.environ.get("JPTV_LIVE_DIR") or os.path.join(tempfile.gettempdir(), "jptv-live"))
         state["watchdog"] = asyncio.create_task(state["live"].watchdog())
+        # Intel QuickSync för avflätning/omkodning av live-TV, om /dev/dri finns i containern.
+        state["live"].hw = HwAccel(os.environ.get("JPTV_VAAPI_DEVICE", "/dev/dri/renderD128"))
+        asyncio.create_task(state["live"].hw.probe())
         await state["iptv"].start()
         asyncio.create_task(state["plex"].ensure_server())
         # IMDb-betygen: sparad fil direkt, ny hämtas i bakgrunden om den är gammal.

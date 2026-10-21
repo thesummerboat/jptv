@@ -8,7 +8,7 @@ import unittest
 
 from aiohttp import web
 
-from app.iptv import Channel, LiveStream
+from app.iptv import Channel, HwAccel, LiveStream, ffmpeg_args
 
 
 def make_interlaced_ts(path: str, seconds: int = 20) -> None:
@@ -165,6 +165,35 @@ class LiveTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(live.deinterlacing)
         self.assertIn("c" + "i3", live.too_slow)
         self.assertTrue(live.status()["note"])
+        await live.stop()
+
+    async def test_hardware_missing_is_reported(self):
+        hw = HwAccel(os.path.join(self.tmp, "renderD128"))
+        self.assertFalse(await hw.probe())
+        self.assertTrue(hw.checked)
+        self.assertIn("/dev/dri", hw.error)
+
+    def test_hardware_args(self):
+        hw = HwAccel("/dev/dri/renderD128")
+        hw.ok, hw.low_power = True, True
+        args = ffmpeg_args(self.chan(1), "/tmp/x", False, True, hw)
+        joined = " ".join(args)
+        self.assertLess(args.index("-hwaccel"), args.index("-i"))
+        self.assertIn("deinterlace_vaapi=mode=motion_adaptive:rate=field", joined)
+        self.assertIn("h264_vaapi", joined)
+        self.assertIn("-low_power 1", joined)
+        # Utan omkodning används inte grafikdelen alls.
+        self.assertNotIn("-hwaccel", ffmpeg_args(self.chan(1), "/tmp/x", False, False, hw))
+
+    async def test_broken_hardware_falls_back_to_cpu(self):
+        live = LiveStream(os.path.join(self.tmp, "out"))
+        live.hw = HwAccel(os.path.join(self.tmp, "saknas"))
+        live.hw.ok = True  # låtsas att provet gick bra; ffmpeg får ändå inte öppna enheten
+        s = await live.start(self.chan("i4"), deinterlace=True)
+        self.assertTrue(live.deinterlacing)
+        self.assertFalse(live.using_hw)
+        self.assertIn("ci4", live.hw_bad)
+        self.assertIsNotNone(live.file(s, "index.m3u8"))
         await live.stop()
 
     async def test_idle_watchdog(self):

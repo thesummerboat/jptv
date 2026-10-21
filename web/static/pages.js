@@ -289,6 +289,12 @@
     return hrs < 48 ? hrs + ' h sedan' : Math.round(hrs / 24) + ' dagar sedan';
   }
 
+  function hwLine(hw) {
+    if (!hw || !hw.checked) return h('p', { class: 'dim small' }, 'Intel QuickSync: kontrolleras …');
+    if (hw.available) return h('p', { class: 'small' }, '✓ Intel QuickSync används för avflätning och omkodning av live-TV' + (hw.mode === 'bob' ? ' (enkel avflätning)' : '') + '.');
+    return h('p', { class: 'dim small' }, 'Intel QuickSync används inte – processorn gör jobbet. ' + (hw.error || ''));
+  }
+
   JP.route(/^\/settings$/, async (v) => {
     const st = await JP.refreshStatus();
     const s = st.settings;
@@ -369,6 +375,7 @@
     const trailers = h('input', { type: 'checkbox', checked: JP.store.get('heroTrailers', true), onchange: (e) => JP.store.set('heroTrailers', e.target.checked) });
     const playBox = h('section', { class: 'card-box' }, h('h2', null, 'Uppspelning'),
       field('Kvalitet för Plex', quality, 'Filer som webbläsaren klarar spelas som de är upp till vald nivå; annat kodar Plex om.'),
+      hwLine(st.hardware),
       field('Avfläta live-TV', deint, 'De flesta HD-kanaler sänds radsprångat (1080i): 50 halvbilder per sekund. I webbläsaren blir rörelser då ofta hackiga eller randiga. Avflätningen på Unraid gör dem till 50 hela bilder/s, som en TV gör – mjukare sport. Kostar processorkraft på Unraid; hinner den inte med visas kanalen som den sänds.'),
       field('Koda om live-TV', liveTx, 'Automatiskt: bilden skickas som den är, och kodas om bara för kanaler som webbläsaren inte kan visa (t.ex. HEVC).'),
       field('Ledmotiv på seriesidor', themeSel),

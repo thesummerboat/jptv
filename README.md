@@ -34,7 +34,7 @@ Egen TV-app för Android TV / Google TV (Nvidia Shield, TCL m.fl.) som samlar Pl
 | Hem och bibliotek | Som på TV:n: fem utvalda i den stora rutan, rader med Fortsätt titta, Nytt, Rekommenderat för dig, Eftersom du såg …, Topplista IMDb och Plex egna rader. Musen över en affisch visar titeln i den stora rutan; trailern spelas ljudlöst efter tre sekunder. Bibliotek med Bläddra och Alla titlar (sortering, genre, osett, samlingar, bokstavslist). |
 | Detaljer och serier | Logotyp, betyg, märken, handling, medverkande, Liknande. Seriesidan med säsonger till vänster och avsnitt med bilder till höger, Slumpvis, ledmotiv. |
 | Spelaren | Plex kodar om till H.264/AAC i HLS (videon kopieras om webbläsaren klarar den). Fortsätter där du var, Hoppa över intro, Nästa avsnitt, ljud, undertexter (bränns in) och kvalitet. Tangenter: mellanslag, ← →, ↑ ↓, F, M, N, Esc. Tittartiden rapporteras till Plex, så Fortsätt titta stämmer på TV:n. |
-| Live-TV | Samma M3U/Xtream-lista och guide som på TV:n: grupper, favoriter, senaste, sök, nu/sedan och kommande program. **En kanal åt gången**: servern läser kanalen med ffmpeg (ljudet blir AAC, bilden kopieras; HEVC och liknande kodas om automatiskt) och stänger den när ingen tittar. **Radsprångade kanaler (1080i) avflätas till 50 bilder/s** på Unraid, som en TV gör – mjukare sport; hinner Unraid inte med visas kanalen som den sänds. En rad under bilden visar upplösning, bilder/s och bithastighet. Bild-i-bild fortsätter medan du bläddrar i Plex. |
+| Live-TV | Samma M3U/Xtream-lista och guide som på TV:n: grupper, favoriter, senaste, sök, nu/sedan och kommande program. **En kanal åt gången**: servern läser kanalen med ffmpeg (ljudet blir AAC, bilden kopieras; HEVC och liknande kodas om automatiskt) och stänger den när ingen tittar. **Radsprångade kanaler (1080i) avflätas till 50 bilder/s** på Unraid, som en TV gör – mjukare sport. Med Intel-grafik (t.ex. N100) görs det med QuickSync; annars av processorn, och hinner den inte med visas kanalen som den sänds. En rad under bilden visar upplösning, bilder/s och bithastighet. Bild-i-bild fortsätter medan du bläddrar i Plex. |
 | TV-guide | Tidslinje med nu-linje; klick på ett pågående program startar kanalen. |
 
 Webbappen och TV:n är två olika spelare: tittar du på live-TV på båda samtidigt är det två strömmar hos leverantören.
@@ -45,7 +45,8 @@ Webbappen och TV:n är två olika spelare: tittar du på live-TV på båda samti
 2. **Name:** `jptv-web` · **Repository:** `ghcr.io/thesummerboat/jptv-web:latest`
 3. *Add another Path, Port …* → **Port**: container `8099`, värd `8099`
 4. *Add another Path, Port …* → **Path**: container `/config`, värd `/mnt/user/appdata/jptv-web`
-5. *Apply*, öppna `http://<unraids-ip>:8099` på datorn, logga in med koden på plex.tv/link och klistra in spellistan under Inställningar.
+5. *Add another Path, Port …* → **Device**: `/dev/dri` (Intel QuickSync för live-TV; valfritt men rekommenderat på N100)
+6. *Apply*, öppna `http://<unraids-ip>:8099` på datorn, logga in med koden på plex.tv/link och klistra in spellistan under Inställningar.
 
 Nya versioner byggs automatiskt (`web.yml`) när något i `web/` ändras; uppdatera containern i Unraid (*Check for updates*). Testerna körs i containern innan den publiceras. Lokalt: `cd web && pip install -r requirements.txt && JPTV_CONFIG=./config python -m app.main` (kräver ffmpeg).
 

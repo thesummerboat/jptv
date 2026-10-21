@@ -228,9 +228,9 @@
         const rate = v.fps ? Math.round(v.fps * (v.interlaced ? 2 : 1)) : '';
         parts.push(`${v.height}${v.interlaced ? 'i' : 'p'}${rate}`);
       }
-      if (st.deinterlacing) parts.push(`avflätas till ${v.height || ''}p${v.fps ? Math.round(v.fps * 2) : 50} på Unraid`);
-      else if (v.interlaced && st.transcoding) parts.push('kodas om på Unraid');
-      else if (st.transcoding) parts.push('kodas om till H.264 på Unraid');
+      const where = st.hardware ? 'med Intel QuickSync' : 'på Unraids processor';
+      if (st.deinterlacing) parts.push(`avflätas till ${v.height || ''}p${v.fps ? Math.round(v.fps * 2) : 50} ${where}`);
+      else if (st.transcoding) parts.push(`kodas om till H.264 ${where}`);
       if (v.codec) parts.push(CODECS[v.codec] || v.codec.toUpperCase());
       if (st.bitrate) parts.push((st.bitrate / 1000).toFixed(1).replace('.', ',') + ' Mbit/s');
       if (st.transcoding && st.speed) parts.push(st.speed >= 0.97 ? 'Unraid hinner med' : `Unraid för långsam (${st.speed.toFixed(2).replace('.', ',')}×)`);

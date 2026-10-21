@@ -1,8 +1,10 @@
 # JPTV Web: Plex och live-TV i webbläsaren, för Unraid (eller annan Docker-värd) på hemmanätet.
 FROM python:3.12-slim
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates tzdata \
+# Intel-drivrutinen (non-free) ger QuickSync för avflätning/omkodning av live-TV på t.ex. N100.
+RUN sed -i 's/^Components: main$/Components: main non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates tzdata intel-media-va-driver-non-free vainfo \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv
@@ -18,6 +20,7 @@ ENV JPTV_VERSION=$VERSION \
     JPTV_CONFIG=/config \
     PORT=8099 \
     TZ=Europe/Stockholm \
+    LIBVA_DRIVER_NAME=iHD \
     PYTHONUNBUFFERED=1
 
 VOLUME /config
