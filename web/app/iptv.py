@@ -572,6 +572,8 @@ class LiveStream:
         self._log: list[str] = []
         self._errors: list[str] = []
         self._slow_since = 0.0
+        # Strömmar som servern själv bytt ut (för långsam avflätning): gammal session -> ny.
+        self._replaced: dict[str, str] = {}
         self._lock = asyncio.Lock()
 
     def touch(self) -> None:
@@ -608,6 +610,9 @@ class LiveStream:
         restarted = False
         while time.monotonic() < deadline:
             if self.session != session:
+                if self._replaced.get(session) == self.session and self.session:
+                    session = self.session  # servern bytte själv ström för samma kanal
+                    continue
                 raise RuntimeError("En annan kanal valdes")
             proc = self.proc
             if proc is None or proc.returncode is not None:
@@ -745,7 +750,8 @@ class LiveStream:
     async def _fallback(self, ch: Channel, transcode_video: bool, session: str) -> None:
         if self.session != session:
             return
-        await self._spawn(ch, transcode_video, False)
+        new = await self._spawn(ch, transcode_video, False)
+        self._replaced = {session: new}
         self.note = "Unraid hann inte avfläta kanalen, så den visas som den sänds"
 
     async def stop(self) -> None:
