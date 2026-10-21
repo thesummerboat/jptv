@@ -155,14 +155,14 @@ class LiveTest(unittest.IsolatedAsyncioTestCase):
     async def test_too_slow_falls_back_to_copy(self):
         live = LiveStream(os.path.join(self.tmp, "out"))
         live.MIN_SPEED, live.SLOW_SECONDS, live.GRACE = 100, 0.5, 0
-        s = await live.start(self.chan("i3"), deinterlace=True)
-        self.assertTrue(live.deinterlacing)
-        for _ in range(60):
-            await asyncio.sleep(0.25)
-            if live.session != s and live.session:
+        await live.start(self.chan("i3"), deinterlace=True)
+        # Bytet kan ske medan start väntar eller efteråt; i båda fallen hamnar vi på kanalens egen bild.
+        for _ in range(80):
+            if not live.deinterlacing and live.session:
                 break
-        self.assertNotEqual(live.session, s)
+            await asyncio.sleep(0.25)
         self.assertFalse(live.deinterlacing)
+        self.assertIsNotNone(live.session)
         self.assertIn("c" + "i3", live.too_slow)
         self.assertTrue(live.status()["note"])
         await live.stop()
