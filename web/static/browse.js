@@ -70,14 +70,30 @@
 
   /* ---------- logotyper och trailers (hämtas när de behövs) ---------- */
 
-  const logos = new Map();
+  /** Full information om en titel (logotyp, alla betyg, märken), hämtas en gång per titel. */
+  const full = new Map();
+  JP.fullItem = function (key) {
+    if (!full.has(key)) full.set(key, JP.api('/api/item/' + key).catch(() => null));
+    return full.get(key);
+  };
+
   JP.logoFor = async function (item) {
     if (item.logo) return item.logo;
     const key = (item.type === 'episode' || item.type === 'season') && item.showKey ? item.showKey : item.key;
-    if (!logos.has(key)) {
-      logos.set(key, JP.api('/api/item/' + key).then((m) => (m && m.logo) || null).catch(() => null));
-    }
-    return logos.get(key);
+    const m = await JP.fullItem(key);
+    return (m && m.logo) || null;
+  };
+
+  /**
+   * Plex listor (hemskärmens rader) har ofta bara Rotten Tomatoes; IMDb-betyget och märken som
+   * HDR och Atmos finns i titelns fulla information. Den hämtas när titeln visas i den stora rutan.
+   */
+  JP.fullRatings = async function (item) {
+    if (!['movie', 'show', 'episode'].includes(item.type)) return null;
+    if ((item.ratings || []).some((r) => r.src === 'IMDb')) return null;
+    const m = await JP.fullItem(item.key);
+    if (!m || !(m.ratings || []).length) return null;
+    return { ratings: m.ratings, badges: (m.badges || []).length ? m.badges : item.badges };
   };
 
   const trailers = new Map();
@@ -170,7 +186,8 @@
       const sub = item.type === 'episode' ? h('div', { class: 'hero-sub' }, [JP.epCode(item), item.title].filter(Boolean).join(' · ')) : null;
       const meta = h('div', { class: 'hero-meta' }, item.type === 'episode' ? [item.contentRating, JP.duration(item.duration)].filter(Boolean).join(' · ') : JP.metaLine(item));
       const summary = item.summary ? h('p', { class: 'hero-summary' }, item.summary) : null;
-      const children = [item.label ? h('div', { class: 'hero-kicker' }, item.label) : null, logoBox, sub, meta, JP.badgeRow(item), summary];
+      const badges = JP.badgeRow(item) || h('div', { class: 'badges' });
+      const children = [item.label ? h('div', { class: 'hero-kicker' }, item.label) : null, logoBox, sub, meta, badges, summary];
       if (mode === 'featured' && featured.length) {
         const actions = h('div', { class: 'hero-actions' });
         if (item.type === 'movie' || item.type === 'episode') {
@@ -197,6 +214,11 @@
         if (!logo || current !== item) return;
         const im = h('img', { src: JP.img(logo), alt: title });
         im.onload = () => logoBox.replaceChildren(im);
+      });
+      JP.fullRatings(item).then((more) => {
+        if (!more || current !== item) return;
+        const row = JP.badgeRow(Object.assign({}, item, more));
+        if (row && badges.isConnected) badges.replaceWith(row);
       });
     }
 
