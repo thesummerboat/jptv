@@ -9,6 +9,8 @@ from urllib.parse import quote, urlencode
 
 import aiohttp
 
+from . import imdb as imdb_ratings
+
 PRODUCT = "JPTV"
 PLEX_TV = "https://plex.tv"
 IMDB_RE = re.compile(r"tt\d{5,10}")
@@ -207,6 +209,8 @@ def slim(o: dict, full: bool = False) -> dict:
     if isinstance(year, int):
         tags.append(f"y:{year // 10 * 10}")
     item["_tags"] = tags
+    # IMDb-betyget från IMDb:s egen fil när Plex bara har Rotten Tomatoes (som på TV:n).
+    imdb_ratings.enrich(item)
     return item
 
 

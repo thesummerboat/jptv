@@ -371,7 +371,12 @@
       field('Ledmotiv på seriesidor', themeSel),
       h('label', { class: 'check big' }, trailers, 'Trailer i bakgrunden (i den här webbläsaren)'));
 
+    const im = st.imdb || {};
+    const imdbLine = im.loading ? 'IMDb-betyg: hämtas …'
+      : im.count ? `IMDb-betyg för ${im.count.toLocaleString('sv-SE')} titlar · hämtade ${ago(im.updatedAt)} (uppdateras varje vecka)`
+        : im.error ? 'IMDb-betyg: kunde inte hämtas (' + im.error + ')' : 'IMDb-betyg: hämtas strax';
     const about = h('section', { class: 'card-box' }, h('h2', null, 'Om'),
+      h('p', { class: 'dim' }, imdbLine),
       h('p', { class: 'dim' }, `JPTV Web ${st.version}. Live-TV använder en ström åt gången: startar du en kanal här stängs den som spelades i ett annat fönster. TV:n och mobilen räknas för sig hos leverantören.`),
       h('p', { class: 'dim' }, 'Tangenter i spelaren: mellanslag = paus, ← → = 10 s, ↑ ↓ = volym, F = helskärm, M = ljud av, Esc = tillbaka. I live-TV byter ↑ ↓ kanal.'));
 

@@ -14,6 +14,7 @@ from urllib.parse import quote, urlencode
 import aiohttp
 from aiohttp import web
 
+from . import imdb
 from .iptv import LiveStream
 from .library import Library
 from .plex import QUALITIES, Plex, PlexError, public
@@ -70,6 +71,7 @@ async def status(request: web.Request):
             "server": server and {"name": server.get("name"), "uri": server.get("uri")},
             "iptv": c["iptv"].status(),
             "live": c["live"].status(),
+            "imdb": imdb.RATINGS.status(),
             "settings": settings_public(c),
         }
     )
@@ -598,9 +600,15 @@ def create_app(config_dir: str | None = None) -> web.Application:
         state["watchdog"] = asyncio.create_task(state["live"].watchdog())
         await state["iptv"].start()
         asyncio.create_task(state["plex"].ensure_server())
+        # IMDb-betygen: sparad fil direkt, ny hämtas i bakgrunden om den är gammal.
+        path = store.cache_path("imdb-ratings.bin")
+        if await asyncio.to_thread(imdb.RATINGS.load, path):
+            state["library"].invalidate()
+        state["imdb"] = asyncio.create_task(imdb.RATINGS.keep_fresh(http, state["library"].invalidate))
 
     async def cleanup(app: web.Application):
         state["watchdog"].cancel()
+        state["imdb"].cancel()
         await state["live"].stop()
         await state["http"].close()
 
