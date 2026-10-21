@@ -400,22 +400,43 @@ def parse_xmltv(source, pl: Playlist, now_ms: int | None = None, back_h: int = 3
 # ---------------------------------------------------------------- Direktsändning
 
 
-def ffmpeg_args(ch: Channel, out_dir: str, transcode_video: bool, deinterlace: bool = False) -> list[str]:
+def ffmpeg_args(ch: Channel, out_dir: str, transcode_video: bool, deinterlace: bool = False, hw: "HwAccel | None" = None) -> list[str]:
     """
-    deinterlace: kanalen sänds radsprångat (t.ex. 1080i50). bwdif gör en hel bild av varje halvbild,
-    så att 25 bilder/s blir 50 – det som gör sport mjuk, som TV:n gör själv. Kräver omkodning.
+    deinterlace: kanalen sänds radsprångat (t.ex. 1080i50). Varje halvbild blir en hel bild, så att
+    25 bilder/s blir 50 – det som gör sport mjuk, som TV:n gör själv. Kräver omkodning.
+    hw: Intel QuickSync (VAAPI) avkodar, avflätar och kodar i grafikdelen i stället för processorn.
     """
+    encode = transcode_video or deinterlace
+    use_hw = encode and hw is not None and hw.ok
     args = [
         "ffmpeg", "-hide_banner", "-loglevel", "level+info", "-nostdin", "-nostats",
         "-progress", "pipe:1", "-stats_period", "2", "-fflags", "+discardcorrupt",
     ]
+    if use_hw:
+        args += [
+            "-init_hw_device", f"vaapi=va:{hw.device}", "-filter_hw_device", "va",
+            "-hwaccel", "vaapi", "-hwaccel_device", "va", "-hwaccel_output_format", "vaapi",
+        ]
     if ch.url.startswith("http"):
         args += ["-user_agent", ch.user_agent or USER_AGENT]
         if ch.referrer:
             args += ["-headers", f"Referer: {ch.referrer}\r\n"]
         args += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5", "-rw_timeout", "15000000"]
     args += ["-i", ch.url, "-map", "0:v:0?", "-map", "0:a:0?", "-sn", "-dn"]
-    if transcode_video or deinterlace:
+    if use_hw:
+        # "format=nv12|vaapi,hwupload" fungerar både när grafikdelen avkodar och när den inte kan.
+        vf = "format=nv12|vaapi,hwupload"
+        if deinterlace:
+            vf += f",deinterlace_vaapi=mode={hw.mode}:rate=field"
+        vf += ",scale_vaapi=format=nv12"
+        args += ["-vf", vf, "-c:v", "h264_vaapi"]
+        if hw.low_power:
+            args += ["-low_power", "1"]
+        args += [
+            "-b:v", "10M", "-maxrate", "15M", "-bufsize", "20M", "-bf", "0", "-g", "100",
+            "-force_key_frames", "expr:gte(t,n_forced*2)",
+        ]
+    elif encode:
         vf = "bwdif=mode=send_field:parity=auto:deint=all," if deinterlace else ""
         args += [
             "-vf", vf + "scale='min(1920,iw)':-2",
@@ -465,6 +486,55 @@ def parse_video_info(line: str) -> dict | None:
     }
 
 
+class HwAccel:
+    """
+    Intel QuickSync via VAAPI (t.ex. N100 i Unraid). Kräver att /dev/dri lagts till som Device på
+    containern. Provas vid start med en kort testkodning; fungerar den inte används processorn.
+    """
+
+    def __init__(self, device: str = "/dev/dri/renderD128"):
+        self.device = device
+        self.ok = False
+        self.low_power = False
+        self.mode = "motion_adaptive"
+        self.error: str | None = None
+        self.checked = False
+
+    def status(self) -> dict:
+        return {"available": self.ok, "checked": self.checked, "device": self.device, "lowPower": self.low_power, "mode": self.mode, "error": self.error}
+
+    async def probe(self) -> bool:
+        self.checked = False
+        if not os.path.exists(self.device):
+            self.ok, self.error, self.checked = False, "Ingen Intel-grafik i containern (lägg till /dev/dri som Device)", True
+            return False
+        last = None
+        # Gen12 (N100) kodar H.264 bara i "low power"-läget; äldre tvärtom. Rörelseanpassad avflätning
+        # först, annars enklare "bob".
+        for mode in ("motion_adaptive", "bob"):
+            for low_power in (False, True):
+                cmd = [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                    "-init_hw_device", f"vaapi=va:{self.device}", "-filter_hw_device", "va",
+                    "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25,setfield=tff", "-frames:v", "15",
+                    "-vf", f"format=nv12,hwupload,deinterlace_vaapi=mode={mode}:rate=field,scale_vaapi=format=nv12",
+                    "-c:v", "h264_vaapi", *(["-low_power", "1"] if low_power else []), "-bf", "0", "-f", "null", "-",
+                ]
+                try:
+                    proc = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+                    _, err = await asyncio.wait_for(proc.communicate(), 20)
+                except (OSError, asyncio.TimeoutError) as e:
+                    last = str(e) or "tidsgräns"
+                    continue
+                if proc.returncode == 0:
+                    self.ok, self.low_power, self.mode, self.error, self.checked = True, low_power, mode, None, True
+                    return True
+                lines = err.decode(errors="ignore").strip().splitlines()
+                last = lines[-1] if lines else f"ffmpeg avslutade med {proc.returncode}"
+        self.ok, self.error, self.checked = False, f"Intel-grafiken gick inte att använda: {last}", True
+        return False
+
+
 class LiveStream:
     """
     En kanal åt gången: ffmpeg läser kanalen och skriver HLS som webbläsaren spelar. En ny kanal stänger
@@ -495,6 +565,9 @@ class LiveStream:
         # Vad vi vet om kanalerna sedan tidigare: radsprångad, och om Unraid var för långsam.
         self.interlaced: dict[str, bool] = {}
         self.too_slow: set[str] = set()
+        self.hw: HwAccel | None = None
+        self.hw_bad: set[str] = set()
+        self.using_hw = False
         self._tasks: list[asyncio.Task] = []
         self._log: list[str] = []
         self._errors: list[str] = []
@@ -512,6 +585,7 @@ class LiveStream:
             "session": self.session,
             "transcoding": self.transcoding,
             "deinterlacing": self.deinterlacing,
+            "hardware": self.using_hw,
             "running": self.proc.returncode is None,
             "error": self._errors[-1] if self._errors else None,
             "video": self.info,
@@ -538,6 +612,11 @@ class LiveStream:
             proc = self.proc
             if proc is None or proc.returncode is not None:
                 await asyncio.sleep(0.2)
+                if self.using_hw and ch.id not in self.hw_bad:
+                    # Grafikdelen klarade inte kanalen: samma sak med processorn.
+                    self.hw_bad.add(ch.id)
+                    session = await self._spawn(ch, transcode_video, deint)
+                    continue
                 msg = (self._errors or self._log or ["Kanalen startade inte"])[-1]
                 await self._stop_if(session)
                 raise RuntimeError(_friendly(msg))
@@ -563,13 +642,15 @@ class LiveStream:
             self.channel = ch
             self.transcoding = transcode_video or deinterlace
             self.deinterlacing = deinterlace
+            hw = self.hw if self.hw and self.hw.ok and ch.id not in self.hw_bad else None
+            self.using_hw = bool(hw) and self.transcoding
             self.info = None
             self.progress = {}
             self.note = None
             self._log, self._errors = [], []
             self._slow_since = 0.0
             self.proc = await asyncio.create_subprocess_exec(
-                *ffmpeg_args(ch, self.dir, transcode_video, deinterlace),
+                *ffmpeg_args(ch, self.dir, transcode_video, deinterlace, hw),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
