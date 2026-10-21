@@ -424,7 +424,10 @@ body.playing #topbar { display: none; }
 .live-screen:hover .live-bar { opacity: 1; }
 .live-bar-name { font-weight: 650; text-shadow: var(--shadow); }
 .live-holder { position: fixed; left: -20px; top: -20px; width: 2px; height: 2px; overflow: hidden; opacity: 0; pointer-events: none; }
-.live-info { padding: 18px 2px; }
+.live-info { padding: 12px 2px 18px; }
+.live-tech { min-height: 18px; margin-top: 10px; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.live-note { color: var(--accent); }
+.view.live.lists-hidden .live-tech { width: min(100%, calc((100vh - 112px) * 16 / 9)); margin-left: auto; margin-right: auto; }
 .live-chan { display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: 14px; font-weight: 600; }
 .live-chan img { height: 30px; max-width: 70px; object-fit: contain; }
 .live-now h2 { font-size: 24px; margin: 10px 0 2px; }

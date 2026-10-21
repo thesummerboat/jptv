@@ -400,19 +400,29 @@ def parse_xmltv(source, pl: Playlist, now_ms: int | None = None, back_h: int = 3
 # ---------------------------------------------------------------- Direktsändning
 
 
-def ffmpeg_args(ch: Channel, out_dir: str, transcode_video: bool) -> list[str]:
-    args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-fflags", "+discardcorrupt"]
+def ffmpeg_args(ch: Channel, out_dir: str, transcode_video: bool, deinterlace: bool = False) -> list[str]:
+    """
+    deinterlace: kanalen sänds radsprångat (t.ex. 1080i50). bwdif gör en hel bild av varje halvbild,
+    så att 25 bilder/s blir 50 – det som gör sport mjuk, som TV:n gör själv. Kräver omkodning.
+    """
+    args = [
+        "ffmpeg", "-hide_banner", "-loglevel", "level+info", "-nostdin", "-nostats",
+        "-progress", "pipe:1", "-stats_period", "2", "-fflags", "+discardcorrupt",
+    ]
     if ch.url.startswith("http"):
         args += ["-user_agent", ch.user_agent or USER_AGENT]
         if ch.referrer:
             args += ["-headers", f"Referer: {ch.referrer}\r\n"]
         args += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5", "-rw_timeout", "15000000"]
     args += ["-i", ch.url, "-map", "0:v:0?", "-map", "0:a:0?", "-sn", "-dn"]
-    if transcode_video:
+    if transcode_video or deinterlace:
+        vf = "bwdif=mode=send_field:parity=auto:deint=all," if deinterlace else ""
         args += [
-            "-vf", "yadif=mode=0:deint=interlaced,scale='min(1920,iw)':-2",
-            "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-crf", "21",
-            "-maxrate", "8M", "-bufsize", "12M", "-pix_fmt", "yuv420p", "-g", "50", "-keyint_min", "50", "-sc_threshold", "0",
+            "-vf", vf + "scale='min(1920,iw)':-2",
+            # Hemmanätet: hög bithastighet och snabb förinställning, så att Unraid hänger med i 50 bilder/s.
+            "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-crf", "19",
+            "-maxrate", "16M", "-bufsize", "24M", "-pix_fmt", "yuv420p",
+            "-force_key_frames", "expr:gte(t,n_forced*2)", "-sc_threshold", "0",
         ]
     else:
         args += ["-c:v", "copy"]
@@ -427,12 +437,46 @@ def ffmpeg_args(ch: Channel, out_dir: str, transcode_video: bool) -> list[str]:
     return args
 
 
+_VIDEO_RE = re.compile(r"Stream #0:\d+.*?: Video: (\w+)")
+# "-loglevel level+info": "[info] text" eller "[h264 @ 0x55] [error] text".
+_LEVEL_RE = re.compile(r"^(?:\[[^\]]*@[^\]]*\] )?\[(\w+)\] (.*)$")
+
+
+def parse_video_info(line: str) -> dict | None:
+    """ffmpegs rad om kanalens bild: codec, upplösning, bilder/s och om den sänds radsprångat."""
+    m = _VIDEO_RE.search(line)
+    if not m:
+        return None
+    size = re.search(r", (\d{2,5})x(\d{2,5})", line)
+    fps = re.search(r", ([\d.]+) fps", line)
+    lower = line.lower()
+    if "top first" in lower or "bottom first" in lower or "top coded first" in lower or "bottom coded first" in lower:
+        interlaced = True
+    elif "progressive" in lower:
+        interlaced = False
+    else:
+        interlaced = None
+    return {
+        "codec": m.group(1),
+        "width": int(size.group(1)) if size else None,
+        "height": int(size.group(2)) if size else None,
+        "fps": float(fps.group(1)) if fps else None,
+        "interlaced": interlaced,
+    }
+
+
 class LiveStream:
     """
     En kanal åt gången: ffmpeg läser kanalen och skriver HLS som webbläsaren spelar. En ny kanal stänger
     den förra först, och tittar ingen på en halv minut stängs strömmen. Ljudet blir alltid AAC; bilden
-    kopieras som den är, eller kodas om till H.264 när webbläsaren inte klarar kanalens format.
+    kopieras som den är, kodas om till H.264 när webbläsaren inte klarar formatet, och radsprångade
+    kanaler (1080i) avflätas till 50 bilder/s när det är påslaget.
     """
+
+    # Avflätningen slås av för kanalen om Unraid inte hinner med (lägre än så här i 15 s).
+    MIN_SPEED = 0.93
+    SLOW_SECONDS = 15
+    GRACE = 10
 
     def __init__(self, workdir: str | None = None, idle_timeout: float = 30):
         self.workdir = workdir or tempfile.gettempdir()
@@ -440,12 +484,21 @@ class LiveStream:
         self.proc: asyncio.subprocess.Process | None = None
         self.channel: Channel | None = None
         self.transcoding = False
+        self.deinterlacing = False
         self.dir: str | None = None
         self.session: str | None = None
         self.started_at = 0.0
         self.last_access = 0.0
-        self._stderr_task: asyncio.Task | None = None
-        self._stderr: list[str] = []
+        self.info: dict | None = None
+        self.progress: dict = {}
+        self.note: str | None = None
+        # Vad vi vet om kanalerna sedan tidigare: radsprångad, och om Unraid var för långsam.
+        self.interlaced: dict[str, bool] = {}
+        self.too_slow: set[str] = set()
+        self._tasks: list[asyncio.Task] = []
+        self._log: list[str] = []
+        self._errors: list[str] = []
+        self._slow_since = 0.0
         self._lock = asyncio.Lock()
 
     def touch(self) -> None:
@@ -458,52 +511,101 @@ class LiveStream:
             "channel": self.channel.public(),
             "session": self.session,
             "transcoding": self.transcoding,
+            "deinterlacing": self.deinterlacing,
             "running": self.proc.returncode is None,
-            "error": self._stderr[-1] if self._stderr else None,
+            "error": self._errors[-1] if self._errors else None,
+            "video": self.info,
+            "speed": self.progress.get("speed"),
+            "bitrate": self.progress.get("bitrate") or self._segment_kbps(),
+            "note": self.note,
         }
 
-    async def start(self, ch: Channel, transcode_video: bool = False, timeout: float = 25) -> str:
+    async def start(self, ch: Channel, transcode_video: bool = False, deinterlace: bool = False, timeout: float = 25) -> str:
         """
         Startar kanalen och väntar tills de första bitarna finns. Väljs en annan kanal under tiden
         avbryts den här (RuntimeError), så att ett snabbt kanalbyte inte behöver vänta.
+
+        deinterlace: avfläta radsprångade kanaler. Första gången kanalen startas syns det först när
+        ffmpeg läst bilden; då startas den om direkt med avflätning (samma ström, efter varandra).
         """
+        deint = deinterlace and self.interlaced.get(ch.id) is True and ch.id not in self.too_slow
+        session = await self._spawn(ch, transcode_video, deint)
+        deadline = time.monotonic() + timeout
+        restarted = False
+        while time.monotonic() < deadline:
+            if self.session != session:
+                raise RuntimeError("En annan kanal valdes")
+            proc = self.proc
+            if proc is None or proc.returncode is not None:
+                await asyncio.sleep(0.2)
+                msg = (self._errors or self._log or ["Kanalen startade inte"])[-1]
+                await self._stop_if(session)
+                raise RuntimeError(_friendly(msg))
+            info = self.info
+            if info and info["interlaced"] is not None:
+                self.interlaced[ch.id] = info["interlaced"]
+                if deinterlace and info["interlaced"] and not deint and not restarted and ch.id not in self.too_slow:
+                    deint = restarted = True
+                    session = await self._spawn(ch, transcode_video, True)
+                    continue
+            if self._playlist_ready():
+                return session
+            await asyncio.sleep(0.25)
+        await self._stop_if(session)
+        raise RuntimeError("Kanalen svarade inte i tid")
+
+    async def _spawn(self, ch: Channel, transcode_video: bool, deinterlace: bool) -> str:
         async with self._lock:
             await self._stop()
             os.makedirs(self.workdir, exist_ok=True)
             self.dir = tempfile.mkdtemp(prefix="live-", dir=self.workdir)
             self.session = os.path.basename(self.dir)
             self.channel = ch
-            self.transcoding = transcode_video
-            self._stderr = []
+            self.transcoding = transcode_video or deinterlace
+            self.deinterlacing = deinterlace
+            self.info = None
+            self.progress = {}
+            self.note = None
+            self._log, self._errors = [], []
+            self._slow_since = 0.0
             self.proc = await asyncio.create_subprocess_exec(
-                *ffmpeg_args(ch, self.dir, transcode_video),
+                *ffmpeg_args(ch, self.dir, transcode_video, deinterlace),
                 stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            self._stderr_task = asyncio.create_task(self._read_stderr(self.proc))
+            self._tasks = [
+                asyncio.create_task(self._read_stderr(self.proc)),
+                asyncio.create_task(self._read_progress(self.proc, ch, transcode_video, self.session)),
+            ]
             self.started_at = time.monotonic()
             self.touch()
-            session, proc = self.session, self.proc
-            playlist = os.path.join(self.dir, "index.m3u8")
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if self.session != session:
-                raise RuntimeError("En annan kanal valdes")
-            if proc.returncode is not None:
-                await asyncio.sleep(0.1)
-                msg = self._stderr[-1] if self._stderr else "Kanalen startade inte"
-                await self._stop_if(session)
-                raise RuntimeError(_friendly(msg))
-            try:
-                with open(playlist, encoding="utf-8", errors="ignore") as f:
-                    if f.read().count("#EXTINF") >= 2:
-                        return session
-            except OSError:
-                pass
-            await asyncio.sleep(0.25)
-        await self._stop_if(session)
-        raise RuntimeError("Kanalen svarade inte i tid")
+            return self.session
+
+    def _segment_kbps(self) -> float | None:
+        """Bithastigheten ut till webbläsaren, räknad på de senaste bitarna i spellistan."""
+        if not self.dir:
+            return None
+        try:
+            with open(os.path.join(self.dir, "index.m3u8"), encoding="utf-8", errors="ignore") as f:
+                lines = f.read().splitlines()
+            pairs = [(float(lines[i].split(":", 1)[1].rstrip(",")), lines[i + 1]) for i in range(len(lines) - 1) if lines[i].startswith("#EXTINF")]
+            secs = size = 0.0
+            for dur, name in pairs[-4:]:
+                size += os.path.getsize(os.path.join(self.dir, name))
+                secs += dur
+            return round(size * 8 / 1000 / secs, 1) if secs else None
+        except (OSError, ValueError, IndexError):
+            return None
+
+    def _playlist_ready(self) -> bool:
+        if not self.dir:
+            return False
+        try:
+            with open(os.path.join(self.dir, "index.m3u8"), encoding="utf-8", errors="ignore") as f:
+                return f.read().count("#EXTINF") >= 2
+        except OSError:
+            return False
 
     async def _stop_if(self, session: str) -> None:
         async with self._lock:
@@ -516,10 +618,54 @@ class LiveStream:
             line = await proc.stderr.readline()
             if not line:
                 return
-            text = line.decode(errors="ignore").strip()
-            if text:
-                self._stderr.append(text)
-                del self._stderr[:-20]
+            text = line.decode(errors="ignore").rstrip()
+            if not text.strip():
+                continue
+            m = _LEVEL_RE.match(text)
+            level, msg = (m.group(1), m.group(2).strip()) if m else ("info", text.strip())
+            if level in ("error", "fatal", "panic"):
+                self._errors.append(msg)
+                del self._errors[:-10]
+            self._log.append(msg)
+            del self._log[:-30]
+            if self.info is None:
+                info = parse_video_info(msg)
+                if info:
+                    self.info = info
+
+    async def _read_progress(self, proc: asyncio.subprocess.Process, ch: Channel, transcode_video: bool, session: str) -> None:
+        """-progress: hastighet och bithastighet. Hinner Unraid inte avfläta slås det av för kanalen."""
+        assert proc.stdout is not None
+        block: dict = {}
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                return
+            key, _, value = line.decode(errors="ignore").strip().partition("=")
+            block[key] = value
+            if key != "progress":
+                continue
+            speed = _num(block.get("speed", "").rstrip("x"))
+            kbps = _num(block.get("bitrate", "").replace("kbits/s", ""))
+            self.progress = {"speed": speed, "bitrate": kbps}
+            block = {}
+            if not self.deinterlacing or speed is None or time.monotonic() - self.started_at < self.GRACE:
+                continue
+            if speed < self.MIN_SPEED:
+                self._slow_since = self._slow_since or time.monotonic()
+                if time.monotonic() - self._slow_since > self.SLOW_SECONDS and self.session == session:
+                    # Unraid hinner inte: tillbaka till kanalens egen bild (25 bilder/s) för den här kanalen.
+                    self.too_slow.add(ch.id)
+                    asyncio.create_task(self._fallback(ch, transcode_video, session))
+                    return
+            else:
+                self._slow_since = 0.0
+
+    async def _fallback(self, ch: Channel, transcode_video: bool, session: str) -> None:
+        if self.session != session:
+            return
+        await self._spawn(ch, transcode_video, False)
+        self.note = "Unraid hann inte avfläta kanalen, så den visas som den sänds"
 
     async def stop(self) -> None:
         async with self._lock:
@@ -534,9 +680,10 @@ class LiveStream:
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
-        if self._stderr_task:
-            self._stderr_task.cancel()
-            self._stderr_task = None
+        for t in self._tasks:
+            if t is not asyncio.current_task():
+                t.cancel()
+        self._tasks = []
         if self.dir:
             shutil.rmtree(self.dir, ignore_errors=True)
         self.dir = None
@@ -554,6 +701,13 @@ class LiveStream:
             await asyncio.sleep(5)
             if self.proc and time.monotonic() - self.last_access > self.idle_timeout:
                 await self.stop()
+
+
+def _num(v: str | None) -> float | None:
+    try:
+        return float(v) if v not in (None, "", "N/A") else None
+    except ValueError:
+        return None
 
 
 def _friendly(msg: str) -> str:

@@ -88,6 +88,8 @@
     if (my !== L.token) return;
     L.session = res.session;
     L.transcoding = res.transcoding;
+    L.status = res.status;
+    if (L.onInfo) L.onInfo(res.status);
     const retryTranscode = () => {
       if (my !== L.token || L.transcoding || mode !== 'auto') return false;
       JP.store.set('tx:' + ch.id, true);
@@ -96,7 +98,25 @@
       setTimeout(() => tune(ch, { transcode: true }), 0);
       return true;
     };
-    L.stream = JP.attachHls(video, res.url, {
+    // Servern kan starta om kanalen själv (t.ex. utan avflätning om Unraid inte hann med):
+    // samma kanal med ny ström följs tyst, annars har ett annat fönster tagit över.
+    const followRestart = async () => {
+      const st = await JP.api('/api/live/status').catch(() => null);
+      if (my !== L.token) return;
+      if (st && st.channel && st.channel.id === ch.id && st.session && st.session !== L.session) {
+        L.session = st.session;
+        L.transcoding = st.transcoding;
+        L.status = st;
+        if (L.onInfo) L.onInfo(st);
+        destroyStream();
+        attach('/live/' + st.session + '/index.m3u8');
+        JP.playWithSound(video, L);
+      } else {
+        state('taken');
+      }
+    };
+    const attach = (url) => { L.stream = JP.attachHls(video, url, hlsOpts); };
+    const hlsOpts = {
       live: true,
       onAnyError: (data) => {
         if (/HEVC|Unsupported/i.test(String(data.reason || (data.error && data.error.message) || ''))) retryTranscode();
@@ -108,14 +128,15 @@
       onFatal: (data) => {
         const code = data.response && data.response.code;
         if (code === 410) {
-          if (my === L.token) state('taken');
+          if (my === L.token) followRestart();
           return true;
         }
         if (/Codec|Incompatible|fragParsing|bufferAppend/i.test(data.details || '') && retryTranscode()) return true;
         return false;
       },
       onError: () => { if (my === L.token) state('error', 'Strömmen avbröts'); },
-    });
+    };
+    attach(res.url);
     JP.playWithSound(video, L);
     // Spelar men ingen bild efter en stund: koda om.
     L.checkTimer = setTimeout(() => {
@@ -142,6 +163,7 @@
     const screen = h('div', { class: 'live-screen' }, slot, overlay, osd, bar);
     const handle = h('button', { class: 'lists-handle', title: 'Dölj/visa grupper och kanaler (L)', 'aria-label': 'Dölj eller visa listorna' }, JP.icon('left'));
     const info = h('div', { class: 'live-info' });
+    const tech = h('div', { class: 'live-tech' });
     const groupList = h('div', { class: 'group-list' });
     const filter = h('input', { type: 'search', class: 'live-filter', placeholder: 'Sök kanal', autocomplete: 'off' });
     const listHead = h('div', { class: 'list-head' });
@@ -149,7 +171,7 @@
     v.el.append(
       h('aside', { class: 'groups' }, filter, groupList),
       h('div', { class: 'channels' }, listHead, list),
-      h('div', { class: 'live-side' }, handle, screen, info));
+      h('div', { class: 'live-side' }, handle, screen, tech, info));
     slot.append(video);
 
     // Ljudnivå: reglaget, +/− och hjulet över bilden. Sparas i webbläsaren.
@@ -195,6 +217,39 @@
     listsBtn.addEventListener('click', () => setLists(v.el.classList.contains('lists-hidden')));
 
     let channels = [], current = null, group = null, refreshTimer = null;
+
+    // Teknisk rad under bilden: kanalens bild, avflätning och om Unraid hinner med.
+    const CODECS = { h264: 'H.264', hevc: 'HEVC', mpeg2video: 'MPEG-2', av1: 'AV1' };
+    function renderTech(st) {
+      if (!st || !L.channel || !st.channel || st.channel.id !== L.channel.id) { tech.replaceChildren(); return; }
+      const v = st.video || {};
+      const parts = [];
+      if (v.height) {
+        const rate = v.fps ? Math.round(v.fps * (v.interlaced ? 2 : 1)) : '';
+        parts.push(`${v.height}${v.interlaced ? 'i' : 'p'}${rate}`);
+      }
+      if (st.deinterlacing) parts.push(`avflätas till ${v.height || ''}p${v.fps ? Math.round(v.fps * 2) : 50} på Unraid`);
+      else if (v.interlaced && st.transcoding) parts.push('kodas om på Unraid');
+      else if (st.transcoding) parts.push('kodas om till H.264 på Unraid');
+      if (v.codec) parts.push(CODECS[v.codec] || v.codec.toUpperCase());
+      if (st.bitrate) parts.push((st.bitrate / 1000).toFixed(1).replace('.', ',') + ' Mbit/s');
+      if (st.transcoding && st.speed) parts.push(st.speed >= 0.97 ? 'Unraid hinner med' : `Unraid för långsam (${st.speed.toFixed(2).replace('.', ',')}×)`);
+      const q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null;
+      if (q && q.droppedVideoFrames > 0) parts.push(`tappade bilder ${q.droppedVideoFrames}`);
+      tech.replaceChildren(...[
+        h('span', null, parts.join(' · ')),
+        st.note ? h('span', { class: 'live-note' }, st.note) : null,
+      ].filter(Boolean));
+    }
+    L.onInfo = renderTech;
+    renderTech(L.status);
+    const techTimer = setInterval(async () => {
+      if (!L.session) return;
+      const st = await JP.api('/api/live/status').catch(() => null);
+      if (st) L.status = st;
+      renderTech(st);
+    }, 4000);
+    v.onLeave(() => { clearInterval(techTimer); L.onInfo = null; });
     const st = await JP.api('/api/live/groups');
     if (!st.groups.length) {
       v.el.replaceChildren(h('div', { class: 'page' }, h('div', { class: 'empty' },
