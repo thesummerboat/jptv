@@ -11,6 +11,24 @@ from aiohttp import web
 from app.iptv import Channel, LiveStream
 
 
+def make_interlaced_ts(path: str, seconds: int = 20) -> None:
+    """Radsprångad H.264 som en HD-kanal (1080i50), fast liten: 25 bilder/s med 50 halvbilder."""
+    subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=size=640x360:rate=50:duration={seconds}",
+         "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+         "-vf", "tinterlace=interleave_top,fieldorder=tff", "-flags", "+ildct+ilme", "-c:v", "libx264", "-x264opts", "tff=1",
+         "-pix_fmt", "yuv420p", "-preset", "ultrafast", "-g", "25", "-c:a", "mp2", "-f", "mpegts", path],
+        check=True,
+    )
+
+
+def fps_of(path: str) -> float:
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate,r_frame_rate",
+                          "-of", "csv=p=0", path], capture_output=True, text=True).stdout.split()[0]
+    num, den = out.split(",")[0].split("/")
+    return float(num) / float(den)
+
+
 def make_ts(path: str, seconds: int = 20, codec: str = "libx264") -> None:
     subprocess.run(
         ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=size=640x360:rate=25:duration={seconds}",
@@ -26,16 +44,21 @@ class LiveTest(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.mkdtemp()
         self.ts = os.path.join(self.tmp, "chan.ts")
         make_ts(self.ts)
+        self.its = os.path.join(self.tmp, "interlaced.ts")
+        make_interlaced_ts(self.its)
         self.requests = []
 
         async def stream(request):
             self.requests.append(request.headers.get("User-Agent"))
             resp = web.StreamResponse(headers={"Content-Type": "video/mp2t"})
             await resp.prepare(request)
-            with open(self.ts, "rb") as f:
-                while chunk := f.read(188 * 400):
-                    await resp.write(chunk)
-                    await asyncio.sleep(0.05)
+            try:
+                with open(self.its if request.match_info["n"].startswith("i") else self.ts, "rb") as f:
+                    while chunk := f.read(188 * 400):
+                        await resp.write(chunk)
+                        await asyncio.sleep(0.05)
+            except ConnectionError:
+                pass  # ffmpeg stängde (kanalbyte eller stopp)
             return resp
 
         app = web.Application()
@@ -97,6 +120,51 @@ class LiveTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(live.session, second)
         self.assertEqual(live.channel.id, "c6")
         self.assertIsNotNone(live.file(second, "index.m3u8"))
+        await live.stop()
+
+    async def test_interlaced_channel_is_deinterlaced_to_50(self):
+        live = LiveStream(os.path.join(self.tmp, "out"))
+        s = await live.start(self.chan("i1"), deinterlace=True)
+        self.assertTrue(live.info["interlaced"])
+        self.assertEqual(live.info["fps"], 25)
+        self.assertTrue(live.deinterlacing)
+        self.assertTrue(live.status()["deinterlacing"])
+        playlist = open(live.file(s, "index.m3u8")).read()
+        seg = next(l for l in playlist.splitlines() if l.endswith(".ts"))
+        self.assertAlmostEqual(fps_of(live.file(s, seg)), 50, delta=1)
+        # Nästa gång vet vi att kanalen är radsprångad: avflätning direkt, utan omstart.
+        await live.start(self.chan("i1"), deinterlace=True)
+        self.assertTrue(live.deinterlacing)
+        await live.stop()
+
+    async def test_progressive_channel_is_copied(self):
+        live = LiveStream(os.path.join(self.tmp, "out"))
+        await live.start(self.chan(7), deinterlace=True)
+        self.assertFalse(live.info["interlaced"])
+        self.assertFalse(live.deinterlacing)
+        self.assertFalse(live.transcoding)
+        await live.stop()
+
+    async def test_deinterlace_off(self):
+        live = LiveStream(os.path.join(self.tmp, "out"))
+        await live.start(self.chan("i2"), deinterlace=False)
+        self.assertTrue(live.info["interlaced"])
+        self.assertFalse(live.deinterlacing)
+        await live.stop()
+
+    async def test_too_slow_falls_back_to_copy(self):
+        live = LiveStream(os.path.join(self.tmp, "out"))
+        live.MIN_SPEED, live.SLOW_SECONDS, live.GRACE = 100, 0.5, 0
+        s = await live.start(self.chan("i3"), deinterlace=True)
+        self.assertTrue(live.deinterlacing)
+        for _ in range(60):
+            await asyncio.sleep(0.25)
+            if live.session != s and live.session:
+                break
+        self.assertNotEqual(live.session, s)
+        self.assertFalse(live.deinterlacing)
+        self.assertIn("c" + "i3", live.too_slow)
+        self.assertTrue(live.status()["note"])
         await live.stop()
 
     async def test_idle_watchdog(self):

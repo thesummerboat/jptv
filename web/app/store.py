@@ -15,6 +15,8 @@ DEFAULTS = {
     "quality": 1,
     # auto: kopiera bilden, koda om bara om webbläsaren inte klarar kanalen. always / never.
     "live_transcode": "auto",
+    # auto: radsprångade kanaler (1080i) avflätas till 50 bilder/s – mjukare sport. off: som de sänds.
+    "live_deinterlace": "auto",
     # Ledmotiv på seriesidor: 0 = av, 1 = lågt, 2 = mellan.
     "theme_level": 1,
     "favorites": [],

@@ -362,11 +362,14 @@
     const quality = h('select', { onchange: (e) => save({ quality: +e.target.value }, 'Sparat') }, s.qualities.map((q, i) => h('option', { value: i, selected: i === s.quality }, q)));
     const liveTx = h('select', { onchange: (e) => save({ liveTranscode: e.target.value }, 'Sparat') },
       [['auto', 'Automatiskt (rekommenderas)'], ['always', 'Alltid'], ['never', 'Aldrig']].map(([k, l]) => h('option', { value: k, selected: k === s.liveTranscode }, l)));
+    const deint = h('select', { onchange: (e) => save({ liveDeinterlace: e.target.value }, 'Sparat') },
+      [['auto', 'Automatiskt – 50 bilder/s (bäst för sport)'], ['off', 'Av – som kanalen sänds']].map(([k, l]) => h('option', { value: k, selected: k === (s.liveDeinterlace || 'auto') }, l)));
     const themeSel = h('select', { onchange: (e) => save({ themeLevel: +e.target.value }, 'Sparat') },
       ['Av', 'Lågt', 'Mellan'].map((l, i) => h('option', { value: i, selected: i === s.themeLevel }, l)));
     const trailers = h('input', { type: 'checkbox', checked: JP.store.get('heroTrailers', true), onchange: (e) => JP.store.set('heroTrailers', e.target.checked) });
     const playBox = h('section', { class: 'card-box' }, h('h2', null, 'Uppspelning'),
       field('Kvalitet för Plex', quality, 'Filer som webbläsaren klarar spelas som de är upp till vald nivå; annat kodar Plex om.'),
+      field('Avfläta live-TV', deint, 'De flesta HD-kanaler sänds radsprångat (1080i): 50 halvbilder per sekund. I webbläsaren blir rörelser då ofta hackiga eller randiga. Avflätningen på Unraid gör dem till 50 hela bilder/s, som en TV gör – mjukare sport. Kostar processorkraft på Unraid; hinner den inte med visas kanalen som den sänds.'),
       field('Koda om live-TV', liveTx, 'Automatiskt: bilden skickas som den är, och kodas om bara för kanaler som webbläsaren inte kan visa (t.ex. HEVC).'),
       field('Ledmotiv på seriesidor', themeSel),
       h('label', { class: 'check big' }, trailers, 'Trailer i bakgrunden (i den här webbläsaren)'));

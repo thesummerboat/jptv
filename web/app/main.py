@@ -85,6 +85,7 @@ def settings_public(c: dict) -> dict:
         "quality": st.get("quality", 1),
         "qualities": [q[0] for q in QUALITIES],
         "liveTranscode": st.get("live_transcode", "auto"),
+        "liveDeinterlace": st.get("live_deinterlace", "auto"),
         "themeLevel": st.get("theme_level", 1),
     }
 
@@ -99,6 +100,8 @@ async def save_settings(request: web.Request):
         changes["quality"] = max(0, min(int(b["quality"]), len(QUALITIES) - 1))
     if b.get("liveTranscode") in ("auto", "always", "never"):
         changes["live_transcode"] = b["liveTranscode"]
+    if b.get("liveDeinterlace") in ("auto", "off"):
+        changes["live_deinterlace"] = b["liveDeinterlace"]
     if "themeLevel" in b:
         changes["theme_level"] = max(0, min(int(b["themeLevel"]), 2))
     iptv_changed = False
@@ -525,14 +528,31 @@ async def live_start(request: web.Request):
     b = await body(request)
     mode = c["store"].get("live_transcode", "auto")
     transcode = mode == "always" or (mode == "auto" and bool(b.get("transcode")))
+    deinterlace = c["store"].get("live_deinterlace", "auto") == "auto"
+    live: LiveStream = c["live"]
     try:
-        session = await c["live"].start(ch, transcode_video=transcode)
+        session = await live.start(ch, transcode_video=transcode, deinterlace=deinterlace)
     except RuntimeError as e:
         return web.json_response({"error": str(e)}, status=502)
     recent = [ch.id] + [r for r in c["store"].get("recent", []) if r != ch.id]
     c["store"].set(recent=recent[:12])
     now = int(time.time() * 1000)
-    return web.json_response({"url": f"/live/{session}/index.m3u8", "session": session, "transcoding": transcode, "channel": channel_json(c, ch, now)})
+    return web.json_response(
+        {
+            "url": f"/live/{session}/index.m3u8",
+            "session": session,
+            "transcoding": live.transcoding,
+            "codecTranscode": transcode,
+            "channel": channel_json(c, ch, now),
+            "status": live.status(),
+        }
+    )
+
+
+@routes.get("/api/live/status")
+async def live_status(request: web.Request):
+    """Vad som spelas just nu: kanalens bild (upplösning, bilder/s, radsprång) och om Unraid hinner med."""
+    return web.json_response(ctx(request)["live"].status())
 
 
 @routes.post("/api/live/stop")
