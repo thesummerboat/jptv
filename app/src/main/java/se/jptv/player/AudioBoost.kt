@@ -52,14 +52,24 @@ object AudioBoost {
 
     private val decoders = ConcurrentHashMap<String, Boolean>()
 
-    /** Om enheten har en avkodare för formatet, så att ljudet kan bearbetas här. */
-    fun canDecode(mime: String?): Boolean {
-        if (mime == null) return false
-        return decoders.getOrPut(mime) {
+    /**
+     * Om enheten har en avkodare som klarar just det här formatet (kanaler, samplingsfrekvens),
+     * så att ljudet kan bearbetas här. Annars skulle spåret se ospelbart ut och Plex fick koda om.
+     */
+    fun canDecode(format: Format?): Boolean {
+        val mime = format?.sampleMimeType ?: return false
+        val key = "$mime/${format.channelCount}/${format.sampleRate}"
+        return decoders.getOrPut(key) {
             val candidates = if (mime == MimeTypes.AUDIO_E_AC3_JOC) listOf(mime, MimeTypes.AUDIO_E_AC3) else listOf(mime)
             candidates.any { m ->
                 try {
-                    MediaCodecUtil.getDecoderInfos(m, false, false).isNotEmpty()
+                    MediaCodecUtil.getDecoderInfos(m, false, false).any { info ->
+                        try {
+                            info.isFormatSupported(format.buildUpon().setSampleMimeType(m).build())
+                        } catch (e: MediaCodecUtil.DecoderQueryException) {
+                            false
+                        }
+                    }
                 } catch (e: MediaCodecUtil.DecoderQueryException) {
                     false
                 }
@@ -68,14 +78,14 @@ object AudioBoost {
     }
 
     /** Om spelaren ska avkoda formatet själv i stället för att skicka det vidare. */
-    fun decodeHere(mime: String?): Boolean = active && isEncoded(mime) && canDecode(mime)
+    fun decodeHere(format: Format?): Boolean = active && isEncoded(format?.sampleMimeType) && canDecode(format)
 
     /**
      * Om bytet av inställning kräver att filen laddas om: ljudet går orört vidare men borde nu
      * avkodas här (eller tvärtom).
      */
-    fun needsReload(mime: String?, wasActive: Boolean): Boolean =
-        wasActive != active && isEncoded(mime) && canDecode(mime)
+    fun needsReload(format: Format?, wasActive: Boolean): Boolean =
+        wasActive != active && isEncoded(format?.sampleMimeType) && canDecode(format)
 }
 
 /** Ljudutgången: säger nej till bitstream för Dolby/DTS när ljudet ska bearbetas här. */
@@ -85,7 +95,7 @@ internal class BoostAudioSink(sink: AudioSink) : ForwardingAudioSink(sink) {
         getFormatSupport(format) != AudioSink.SINK_FORMAT_UNSUPPORTED
 
     override fun getFormatSupport(format: Format): Int {
-        if (AudioBoost.decodeHere(format.sampleMimeType)) return AudioSink.SINK_FORMAT_UNSUPPORTED
+        if (AudioBoost.decodeHere(format)) return AudioSink.SINK_FORMAT_UNSUPPORTED
         return super.getFormatSupport(format)
     }
 }
