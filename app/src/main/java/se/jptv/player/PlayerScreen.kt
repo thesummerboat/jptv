@@ -2,7 +2,9 @@ package se.jptv.player
 
 import android.content.Context
 import android.net.Uri
+import android.util.TypedValue
 import android.view.KeyEvent
+import android.view.accessibility.CaptioningManager
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.foundation.Image
@@ -47,7 +49,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -64,17 +68,21 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
+import androidx.media3.common.text.Cue
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import androidx.media3.ui.SubtitleView
 import androidx.tv.material3.Button
 import androidx.tv.material3.ListItem
 import androidx.tv.material3.MaterialTheme
@@ -127,19 +135,40 @@ fun PlayerScreen(vm: AppViewModel, request: PlayRequest) {
  */
 @OptIn(UnstableApi::class)
 @Composable
-private fun rememberExoPlayer(tunneling: Boolean = false): ExoPlayer {
+private fun rememberExoPlayer(tunneling: Boolean = false, vod: Boolean = false): ExoPlayer {
     val context = LocalContext.current
-    return remember { buildExoPlayer(context, tunneling) }
+    return remember { buildExoPlayer(context, tunneling, vod) }
 }
 
+/** Renderare med ljudförbättringen (dialog/nattläge) i ljudutgången. */
 @OptIn(UnstableApi::class)
-internal fun buildExoPlayer(context: Context, tunneling: Boolean): ExoPlayer {
+private class JptvRenderersFactory(context: Context) : DefaultRenderersFactory(context) {
+    override fun buildAudioSink(
+        context: Context,
+        enableFloatOutput: Boolean,
+        enableAudioTrackPlaybackParams: Boolean,
+    ): AudioSink = BoostAudioSink(
+        DefaultAudioSink.Builder(context)
+            .setEnableFloatOutput(enableFloatOutput)
+            .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+            .setAudioProcessors(arrayOf(BoostAudioProcessor()))
+            .build(),
+    )
+}
+
+/** vod: filmer och avsnitt får en större buffert (se [PlayerBuffer]); live använder standarden. */
+@OptIn(UnstableApi::class)
+internal fun buildExoPlayer(context: Context, tunneling: Boolean, vod: Boolean = false): ExoPlayer {
     // Decoder fallback: om hårdvaruavkodaren vägrar provas nästa, vilket hjälper på svagare TV-apparater.
-    val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
+    val renderers = JptvRenderersFactory(context).setEnableDecoderFallback(true)
     val selector = DefaultTrackSelector(context).apply {
         setParameters(buildUponParameters().setTunnelingEnabled(tunneling))
     }
-    return ExoPlayer.Builder(context, renderers).setTrackSelector(selector).build().apply {
+    val buffer = if (vod) PlayerBuffer.create() else null
+    val builder = ExoPlayer.Builder(context, renderers).setTrackSelector(selector)
+    if (buffer != null) builder.setLoadControl(buffer.loadControl)
+    return builder.build().apply {
+        if (buffer != null) PlayerBuffer.register(this, buffer)
         setAudioAttributes(
             AudioAttributes.Builder()
                 .setUsage(C.USAGE_MEDIA)
@@ -151,10 +180,10 @@ internal fun buildExoPlayer(context: Context, tunneling: Boolean): ExoPlayer {
     }
 }
 
-/** scale: 0 = anpassa, 1 = fyll (sträck), 2 = zooma (beskär). */
+/** scale: 0 = anpassa, 1 = fyll (sträck), 2 = zooma (beskär). subtitles: hur textundertexter ritas. */
 @OptIn(UnstableApi::class)
 @Composable
-internal fun VideoSurface(exo: ExoPlayer, scale: Int, keepContent: Boolean = false) {
+internal fun VideoSurface(exo: ExoPlayer, scale: Int, keepContent: Boolean = false, subtitles: SubtitleLook = SubtitleLook()) {
     AndroidView(
         factory = { ctx ->
             PlayerView(ctx).apply {
@@ -175,6 +204,7 @@ internal fun VideoSurface(exo: ExoPlayer, scale: Int, keepContent: Boolean = fal
                 2 -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                 else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
             }
+            view.subtitleView?.let { subtitles.applyTo(it) }
         },
         modifier = Modifier.fillMaxSize(),
     )
@@ -244,7 +274,7 @@ private fun iso3(code: String?): String? {
     }
 }
 
-private enum class VodPanel { NONE, TRACKS, SEARCH, SYNC, OPTIONS }
+private enum class VodPanel { NONE, TRACKS, SEARCH, SYNC, STYLE, OPTIONS }
 
 // ======================================================================
 // Film och avsnitt från Plex
@@ -254,7 +284,7 @@ private enum class VodPanel { NONE, TRACKS, SEARCH, SYNC, OPTIONS }
 @Composable
 private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     val context = LocalContext.current
-    val exo = rememberExoPlayer(tunneling = vm.useTunneling())
+    val exo = rememberExoPlayer(tunneling = vm.useTunneling(), vod = true)
     var session by remember { mutableStateOf(UUID.randomUUID().toString()) }
     val scope = rememberCoroutineScope()
     val focus = remember { FocusRequester() }
@@ -272,6 +302,12 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     var duration by remember { mutableLongStateOf(request.item.durationMs) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var playing by remember { mutableStateOf(false) }
+    /** Spelaren vill spela (även när den buffrar). Styr ikonen på spela/paus-knappen. */
+    var wantPlay by remember { mutableStateOf(true) }
+    /** Hur långt fram filen är laddad. */
+    var buffered by remember { mutableLongStateOf(0L) }
+    /** Vald knapp i kontrollraden; null = tidslinjen (◀/▶ spolar). */
+    var controlFocus by remember { mutableStateOf<VodButton?>(null) }
     var finished by remember { mutableStateOf(false) }
     var nextEpisode by remember { mutableStateOf<PlexItem?>(null) }
     var countdown by remember { mutableIntStateOf(-1) }
@@ -498,6 +534,27 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         exo.seekTo(target)
     }
 
+    fun togglePlay() {
+        if (exo.playWhenReady) exo.pause() else exo.play()
+    }
+
+    /**
+     * Dialogförstärkning/nattläge av eller på. Går ljudet orört till förstärkaren (Dolby) och boxen kan
+     * avkoda det, laddas filen om på samma ställe så att ljudet avkodas här (eller skickas vidare igen).
+     */
+    fun setBoost(dialogue: Boolean = vm.dialogueBoost, night: Boolean = vm.nightMode) {
+        val wasActive = AudioBoost.active
+        vm.changeAudioBoost(dialogue, night)
+        val mime = exo.audioFormat?.sampleMimeType
+        val pos = exo.currentPosition
+        when {
+            AudioBoost.needsReload(mime, wasActive) -> if (transcoding) restartTranscode(pos) else loadDirect(pos)
+            AudioBoost.active && AudioBoost.isEncoded(mime) && !AudioBoost.canDecode(mime) ->
+                toast = "${codecName(mime) ?: "Ljudet"} går orört till förstärkaren/TV:n och kan inte ändras här. " +
+                    "Välj ett annat ljudspår (t.ex. AAC) för att det ska verka."
+        }
+    }
+
     // Efter "Hoppa över intro": spola om en gång när filmen gått en sekund. Vissa TV-boxar och
     // förstärkare tappar ibland ljudsynken vid långa hopp (även i Plex egen app); ett hopp till rättar det,
     // som när man backar tio sekunder för hand.
@@ -544,6 +601,10 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 playing = isPlaying
+            }
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                wantPlay = playWhenReady
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -656,8 +717,10 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                 pausedSince = 0L
             }
             if (exo.duration > 0) duration = exo.duration
+            buffered = exo.bufferedPosition
             if (overlayVisible && exo.isPlaying && now - lastKeyAt > 5_000) {
                 overlayVisible = false
+                controlFocus = null
             }
             val credits = item.credits
             if (credits != null && position >= credits.startMs && exo.isPlaying) offerNext(15)
@@ -755,11 +818,64 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         }
     }
 
+    val timelineMarks = remember(item.markers, item.chapters) { TimelineMarks(item.intro, item.credits, item.chapters) }
+    val controlButtons = buildList {
+        add(ControlButton(VodButton.PLAY_PAUSE, if (wantPlay) "Pausa" else "Spela", if (wantPlay) PlayerIcons.Pause else PlayerIcons.Play))
+        add(ControlButton(VodButton.BACK, "Bakåt 10 s", text = "−10"))
+        add(ControlButton(VodButton.FORWARD, "Framåt 30 s", text = "+30"))
+        if (introActive) add(ControlButton(VodButton.SKIP_INTRO, "Hoppa över intro", PlayerIcons.FastForward))
+        add(ControlButton(VodButton.TRACKS, "Ljud och undertexter", PlayerIcons.Subtitles))
+        if (nextEpisode != null) {
+            add(ControlButton(VodButton.NEXT, if (request.shuffle) "Slumpat avsnitt" else "Nästa avsnitt", PlayerIcons.SkipNext))
+        }
+        if (!isTrailer) add(ControlButton(VodButton.RESTART, "Från början", PlayerIcons.Restart))
+        add(ControlButton(VodButton.MORE, "Sovtimer, bild och info", PlayerIcons.More))
+    }
+
+    fun moveControlFocus(delta: Int) {
+        val index = controlButtons.indexOfFirst { it.id == controlFocus }.coerceAtLeast(0)
+        controlFocus = controlButtons[(index + delta).coerceIn(0, controlButtons.lastIndex)].id
+    }
+
+    fun pressControl(id: VodButton, repeat: Int) {
+        when (id) {
+            VodButton.PLAY_PAUSE -> if (repeat == 0) togglePlay()
+            VodButton.BACK -> scrubBy(if (repeat > 10) -60_000L else -10_000L)
+            VodButton.FORWARD -> scrubBy(if (repeat > 10) 120_000L else 30_000L)
+            VodButton.SKIP_INTRO -> if (repeat == 0 && intro != null) {
+                exo.seekTo(intro.endMs)
+                resyncToken++
+                controlFocus = VodButton.PLAY_PAUSE
+            }
+            VodButton.TRACKS -> if (repeat == 0) panel = VodPanel.TRACKS
+            VodButton.NEXT -> if (repeat == 0) playNext(auto = false)
+            // Som spolning: förhandsbild, hoppet görs efter en sekund och Tillbaka ångrar.
+            VodButton.RESTART -> if (repeat == 0) scrubTarget = 0L
+            VodButton.MORE -> if (repeat == 0) panel = VodPanel.OPTIONS
+        }
+    }
+
+    val pauseScreen = started && everReady && pausedSince > 0L && scrubTarget == null &&
+        now - maxOf(pausedSince, lastKeyAt) > 5_000 && !panelOpen && !cardVisible && error == null && !switchingMode
+    /** Kontrollerna syns (och knappraden kan styras). */
+    val controlsShown = (overlayVisible || !playing || scrubTarget != null) && !panelOpen && !cardVisible && !pauseScreen
+
+    // Pausskärmen: OK ska fortsätta spela, oavsett vilken knapp som var vald.
+    LaunchedEffect(pauseScreen) {
+        if (pauseScreen) controlFocus = null
+    }
+
+    // Tillbaka från knappraden: göm kontrollerna (nästa Tillbaka lämnar spelaren).
+    BackHandler(enabled = controlFocus != null && scrubTarget == null && !panelOpen && !cardVisible) {
+        controlFocus = null
+        overlayVisible = false
+    }
+
     BackHandler(enabled = scrubTarget != null && !panelOpen) { scrubTarget = null }
 
     BackHandler(enabled = panelOpen || cardVisible) {
         when {
-            panel == VodPanel.SEARCH || panel == VodPanel.SYNC -> panel = VodPanel.TRACKS
+            panel == VodPanel.SEARCH || panel == VodPanel.SYNC || panel == VodPanel.STYLE -> panel = VodPanel.TRACKS
             panelOpen -> panel = VodPanel.NONE
             stillWatching -> vm.back()
             else -> dismissCountdown()
@@ -778,7 +894,28 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                 val native = ev.nativeKeyEvent
                 if (native.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
                 val code = native.keyCode
+                val repeat = native.repeatCount
+                // Knappraden: ◀/▶ flyttar mellan knapparna, OK trycker, ▲ tillbaka till tidslinjen.
+                val button = controlFocus?.takeIf { id -> controlsShown && controlButtons.any { it.id == id } }
                 val handled = when {
+                    button != null && code == KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        moveControlFocus(-1)
+                        true
+                    }
+                    button != null && code == KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        moveControlFocus(1)
+                        true
+                    }
+                    button != null && code == KeyEvent.KEYCODE_DPAD_UP -> {
+                        controlFocus = null
+                        true
+                    }
+                    button != null && code == KeyEvent.KEYCODE_DPAD_DOWN -> true
+                    button != null && isOk(code) -> {
+                        pressControl(button, repeat)
+                        true
+                    }
+                    // Tidslinjen (och när kontrollerna är gömda).
                     isOk(code) && scrubTarget != null -> {
                         commitScrub()
                         true
@@ -789,7 +926,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                         true
                     }
                     isOk(code) || code == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || code == KeyEvent.KEYCODE_SPACE -> {
-                        if (exo.isPlaying) exo.pause() else exo.play()
+                        if (repeat == 0) togglePlay()
                         true
                     }
                     code == KeyEvent.KEYCODE_MEDIA_PLAY -> {
@@ -802,19 +939,23 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                     }
                     code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_MEDIA_REWIND -> {
                         // Håll inne för att spola snabbare.
-                        scrubBy(if (native.repeatCount > 10) -60_000L else -10_000L)
+                        scrubBy(if (repeat > 10) -60_000L else -10_000L)
                         true
                     }
                     code == KeyEvent.KEYCODE_DPAD_RIGHT || code == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                        scrubBy(if (native.repeatCount > 10) 120_000L else 30_000L)
+                        scrubBy(if (repeat > 10) 120_000L else 30_000L)
                         true
                     }
                     code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_CAPTIONS -> {
                         panel = VodPanel.TRACKS
                         true
                     }
-                    code == KeyEvent.KEYCODE_DPAD_DOWN || code == KeyEvent.KEYCODE_MENU ||
-                        code == KeyEvent.KEYCODE_INFO -> {
+                    code == KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        // Ner till knappraden, med spela/paus vald.
+                        controlFocus = VodButton.PLAY_PAUSE
+                        true
+                    }
+                    code == KeyEvent.KEYCODE_MENU || code == KeyEvent.KEYCODE_INFO -> {
                         panel = VodPanel.OPTIONS
                         true
                     }
@@ -836,11 +977,9 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                 handled
             },
     ) {
-        VideoSurface(exo, vm.videoScale)
+        VideoSurface(exo, vm.videoScale, subtitles = vm.subtitleLook)
         if (!started) MessageBox("Startar…")
         if (switchingMode) MessageBox("Anpassar bildfrekvensen…")
-        val pauseScreen = started && everReady && pausedSince > 0L && scrubTarget == null &&
-            now - maxOf(pausedSince, lastKeyAt) > 5_000 && !panelOpen && !cardVisible && error == null && !switchingMode
         androidx.compose.animation.AnimatedVisibility(
             visible = pauseScreen,
             enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(600)),
@@ -848,17 +987,31 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         ) {
             PauseScreen(vm, item, position, duration, now)
         }
-        if ((overlayVisible || !playing || scrubTarget != null) && !panelOpen && !cardVisible && !pauseScreen) {
-            VodOverlay(
+        if (controlsShown) {
+            val boostWorking = AudioBoost.working(now)
+            val status = buildList {
+                sleepLabel(vm, now)?.let { add(it to true) }
+                if (vm.dialogueBoost) add((if (boostWorking) "Dialog+" else "Dialog+ (verkar inte här)") to boostWorking)
+                if (vm.nightMode) add((if (boostWorking) "Nattläge" else "Nattläge (verkar inte här)") to boostWorking)
+                add((if (transcoding) "Omkodas av Plex" else "Direct Play") to false)
+            }
+            PlayerTopBar(
+                now = now,
+                endsAt = if (duration > 0) now + (duration - position).coerceAtLeast(0) else null,
+                modifier = Modifier.align(Alignment.TopCenter),
+            )
+            VodControls(
                 title = item.displayTitle,
                 subtitle = item.subtitle,
                 scrubTarget = scrubTarget,
                 preview = preview,
                 position = position,
                 duration = duration,
-                playing = playing,
-                transcoding = transcoding,
-                sleep = sleepLabel(vm, now),
+                buffered = buffered,
+                marks = timelineMarks,
+                buttons = controlButtons,
+                focused = controlFocus?.takeIf { id -> controlButtons.any { it.id == id } },
+                status = status,
                 modifier = Modifier.align(Alignment.BottomStart),
             )
         }
@@ -870,7 +1023,8 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                 modifier = Modifier.align(Alignment.TopStart),
             )
         }
-        if (introActive && !panelOpen && !cardVisible) {
+        // Med kontrollerna framme finns "Hoppa över intro" som knapp i raden.
+        if (introActive && !panelOpen && !cardVisible && !controlsShown) {
             Chip("OK = Hoppa över intro", Modifier.align(Alignment.TopEnd).padding(32.dp))
         }
         SleepTimer(
@@ -890,6 +1044,31 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                 val searchOption = PanelOption("Sök undertexter…", detail = "Hämta från internet via Plex") {
                     panel = VodPanel.SEARCH
                 }
+                val styleOption = PanelOption(
+                    "Undertextstil…",
+                    detail = if (vm.subtitleLook.isDefault) "Storlek, kantlinje eller ruta, färg, höjd"
+                    else "${vm.subtitleLook.sizeLabel} · ${vm.subtitleLook.styleLabel}",
+                ) {
+                    panel = VodPanel.STYLE
+                }
+                val boostWorking = AudioBoost.working(now)
+                fun boostDetail(on: Boolean, off: String) = when {
+                    !on -> off
+                    boostWorking -> "På"
+                    else -> "På · verkar inte på det här ljudet (går orört till förstärkaren)"
+                }
+                val boostOptions = listOf(
+                    PanelOption(
+                        "Dialogförstärkning",
+                        selected = vm.dialogueBoost,
+                        detail = boostDetail(vm.dialogueBoost, "Tydligare röster, lägre musik och effekter"),
+                    ) { setBoost(dialogue = !vm.dialogueBoost) },
+                    PanelOption(
+                        "Nattläge",
+                        selected = vm.nightMode,
+                        detail = boostDetail(vm.nightMode, "Jämnare volym: lägre smällar, starkare tal"),
+                    ) { setBoost(night = !vm.nightMode) },
+                )
                 if (transcoding) {
                     // Omkodning: spåren väljs i Plex och omkodningen startas om.
                     val audioStreams = item.streams.filter { it.type == 2 }
@@ -897,14 +1076,15 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                     TrackPanel(
                         audio = PanelSection(
                             "Ljud",
-                            audioStreams.map { s -> PanelOption(s.title, selected = s.selected) { selectPlex(C.TRACK_TYPE_AUDIO, s) } },
+                            audioStreams.map { s -> PanelOption(s.title, selected = s.selected) { selectPlex(C.TRACK_TYPE_AUDIO, s) } } +
+                                boostOptions,
                             empty = "Inga ljudspår",
                         ),
                         text = PanelSection(
                             "Undertexter",
                             listOf(PanelOption("Av", selected = subStreams.none { it.selected }) { selectPlex(C.TRACK_TYPE_TEXT, null) }) +
                                 subStreams.map { s -> PanelOption(s.title, selected = s.selected) { selectPlex(C.TRACK_TYPE_TEXT, s) } } +
-                                searchOption,
+                                searchOption + styleOption,
                         ),
                         modifier = Modifier.align(Alignment.CenterEnd),
                     )
@@ -921,6 +1101,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                         add(PanelOption("Av", selected = textOff) { selectExo(C.TRACK_TYPE_TEXT, null) })
                         text.forEach { c -> add(PanelOption(c.label, selected = c.selected && !textOff) { selectExo(C.TRACK_TYPE_TEXT, c) }) }
                         add(searchOption)
+                        add(styleOption)
                         if (syncable != null) {
                             add(
                                 PanelOption("Synka undertext…", detail = SubtitleSync.label(subOffsets[syncable.id] ?: 0L)) {
@@ -933,7 +1114,8 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                     TrackPanel(
                         audio = PanelSection(
                             "Ljud",
-                            audio.map { c -> PanelOption(c.label, selected = c.selected) { selectExo(C.TRACK_TYPE_AUDIO, c) } },
+                            audio.map { c -> PanelOption(c.label, selected = c.selected) { selectExo(C.TRACK_TYPE_AUDIO, c) } } +
+                                boostOptions,
                             empty = "Inga ljudspår",
                         ),
                         text = PanelSection("Undertexter", textOptions),
@@ -978,6 +1160,12 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                     )
                 }
             }
+            VodPanel.STYLE -> SubtitleStylePanel(
+                look = vm.subtitleLook,
+                transcoding = transcoding,
+                onChange = { vm.changeSubtitleLook(it) },
+                modifier = Modifier.align(Alignment.CenterEnd),
+            )
             VodPanel.OPTIONS -> OptionsPanel(
                 title = "Alternativ",
                 sections = listOf(
@@ -1129,111 +1317,80 @@ private fun Chip(text: String, modifier: Modifier = Modifier) {
     )
 }
 
+/** Undertextstil: OK på en rad byter värde. Förhandsvisningen visar hur texten blir. */
+@OptIn(UnstableApi::class)
 @Composable
-private fun VodOverlay(
-    title: String,
-    subtitle: String?,
-    scrubTarget: Long?,
-    preview: ImageBitmap?,
-    position: Long,
-    duration: Long,
-    playing: Boolean,
+private fun SubtitleStylePanel(
+    look: SubtitleLook,
     transcoding: Boolean,
-    sleep: String?,
+    onChange: (SubtitleLook) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val shown = scrubTarget ?: position
-    val fraction = if (duration > 0) (shown.toFloat() / duration).coerceIn(0f, 1f) else 0f
+    val first = remember { FocusRequester() }
     Column(
         modifier
-            .fillMaxWidth()
-            .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))))
-            .padding(start = 48.dp, end = 48.dp, top = 64.dp, bottom = 32.dp),
+            .fillMaxHeight()
+            .width(560.dp)
+            .background(Color.Black.copy(alpha = 0.9f))
+            .padding(28.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text(title, style = MaterialTheme.typography.headlineSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        if (subtitle != null) {
-            Text(subtitle, color = JptvColors.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        Spacer(Modifier.height(14.dp))
-        if (scrubTarget != null) {
-            // Förhandsbild och tid ovanför markören på tidslinjen.
-            BoxWithConstraints(Modifier.fillMaxWidth()) {
-                val bubble = if (preview != null) 256.dp else 180.dp
-                val raw = maxWidth * fraction - bubble / 2
-                val x = when {
-                    raw < 0.dp -> 0.dp
-                    raw > maxWidth - bubble -> maxWidth - bubble
-                    else -> raw
-                }
-                Column(
-                    Modifier
-                        .offset(x = x)
-                        .width(bubble),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    if (preview != null) {
-                        Image(
-                            bitmap = preview,
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .width(bubble)
-                                .height(144.dp)
-                                .background(Color.Black, MaterialTheme.shapes.small),
-                        )
-                        Spacer(Modifier.height(6.dp))
-                    }
-                    val delta = scrubTarget - position
-                    Text(
-                        "${formatTime(scrubTarget)}  (${if (delta >= 0) "+" else "−"}${formatTime(kotlin.math.abs(delta))})",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = JptvColors.Accent,
-                    )
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-        }
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(6.dp)
-                .background(Color.White.copy(alpha = 0.25f)),
-        ) {
-            Box(
-                Modifier
-                    .fillMaxWidth(fraction)
-                    .fillMaxHeight()
-                    .background(JptvColors.Accent),
-            )
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("${formatTime(position)} / ${formatTime(duration)}")
-            if (duration > 0) {
-                Spacer(Modifier.width(16.dp))
-                Text("slutar ${clock(System.currentTimeMillis() + duration - position)}", color = JptvColors.TextDim)
-            }
-            Spacer(Modifier.width(24.dp))
-            if (!playing) Text("Pausad", color = JptvColors.Accent)
-            if (sleep != null) {
-                Spacer(Modifier.width(24.dp))
-                Text(sleep, color = JptvColors.Accent)
-            }
-            Spacer(Modifier.weight(1f))
-            Text(
-                if (transcoding) "Omkodas av Plex" else "Direct Play",
-                color = JptvColors.TextDim,
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        Spacer(Modifier.height(6.dp))
+        Text("Undertextstil", style = MaterialTheme.typography.titleLarge)
+        SubtitlePreview(look, Modifier.fillMaxWidth().height(150.dp))
+        Spacer(Modifier.height(4.dp))
+        StyleRow("Storlek", look.sizeLabel, Modifier.focusRequester(first)) { onChange(look.nextSize()) }
+        StyleRow("Utseende", look.styleLabel) { onChange(look.nextStyle()) }
+        StyleRow("Färg", look.colorLabel) { onChange(look.nextColor()) }
+        StyleRow("Höjd", look.positionLabel) { onChange(look.nextPosition()) }
+        StyleRow("Återställ", "TV:ns standard") { onChange(SubtitleLook()) }
         Text(
-            if (scrubTarget != null) "Släpp för att hoppa · OK hoppa direkt · Tillbaka avbryt"
-            else "OK paus · ◀ −10 s · ▶ +30 s (håll för snabbare) · ▲ ljud & undertexter · ▼ sovtimer, bild & info",
+            if (transcoding) {
+                "Plex kodar om den här filen och bränner in texten i bilden, så stilen syns först vid Direct Play."
+            } else {
+                "OK byter värde. Gäller textundertexter (SRT, ASS, WebVTT). Bildundertexter (PGS) ritas som de är."
+            },
             color = JptvColors.TextDim,
             style = MaterialTheme.typography.bodySmall,
         )
     }
+    LaunchedEffect(Unit) { first.requestWhenReady() }
+}
+
+@Composable
+private fun StyleRow(title: String, value: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    ListItem(
+        selected = false,
+        onClick = onClick,
+        headlineContent = { Text(title) },
+        trailingContent = { Text(value, color = JptvColors.Accent) },
+        modifier = modifier,
+    )
+}
+
+/** En exempeltext med vald stil, i samma storlek som den får på skärmen. */
+@OptIn(UnstableApi::class)
+@Composable
+private fun SubtitlePreview(look: SubtitleLook, modifier: Modifier = Modifier) {
+    val screenPx = with(LocalDensity.current) { LocalConfiguration.current.screenHeightDp.dp.toPx() }
+    AndroidView(
+        factory = { ctx ->
+            SubtitleView(ctx).apply {
+                setCues(listOf(Cue.Builder().setText("Det här är en undertext.\nSå här ser den ut på skärmen.").build()))
+            }
+        },
+        update = { view ->
+            val caption = look.captionStyle(view.context)
+            if (caption == null) view.setUserDefaultStyle() else view.setStyle(caption)
+            val fontScale = (view.context.getSystemService(Context.CAPTIONING_SERVICE) as? CaptioningManager)?.fontScale ?: 1f
+            val fraction = look.sizeFraction ?: (SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * fontScale)
+            view.setFixedTextSize(TypedValue.COMPLEX_UNIT_PX, fraction * screenPx)
+            view.setBottomPaddingFraction(0.12f)
+        },
+        modifier = modifier.background(
+            Brush.verticalGradient(listOf(Color(0xFF5A6575), Color(0xFF2B323D))),
+            MaterialTheme.shapes.small,
+        ),
+    )
 }
 
 // ---------- Spårval ----------
@@ -1748,7 +1905,23 @@ private fun streamInfoLines(exo: ExoPlayer, mode: String, contentFps: Float?): L
     DisplayModes.modesSummary()?.let { add("TV:ns lägen: $it") }
     val tunneled = (exo.trackSelector as? DefaultTrackSelector)?.parameters?.tunnelingEnabled == true
     add("Tunnlad uppspelning: " + if (tunneled) "på" else "av")
-    add(String.format(Locale.US, "Buffert: %.1f s", exo.totalBufferedDuration / 1000f))
+    val usage = PlayerBuffer.usage(exo)
+    if (usage != null) {
+        val mb = 1024L * 1024L
+        add(
+            String.format(
+                Locale.US, "Buffert: %.1f s · %d av %d MB",
+                exo.totalBufferedDuration / 1000f, usage.first / mb, usage.second / mb,
+            ),
+        )
+    } else {
+        add(String.format(Locale.US, "Buffert: %.1f s", exo.totalBufferedDuration / 1000f))
+    }
+    if (AudioBoost.active) {
+        val parts = listOfNotNull(if (AudioBoost.dialogue) "dialog" else null, if (AudioBoost.night) "nattläge" else null)
+        val state = if (AudioBoost.working()) "verkar" else "verkar inte – ljudet går orört vidare"
+        add("Ljudförbättring: ${parts.joinToString(" + ")} ($state)")
+    }
     exo.videoDecoderCounters?.let { add("Tappade bildrutor: ${it.droppedBufferCount}") }
 }
 
@@ -2003,6 +2176,25 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
         shift = null
         behindMs = 0L
         pausedAt = 0L
+    }
+
+    /**
+     * Dialogförstärkning/nattläge i live-TV. Sänds kanalen med Dolby som går orört vidare, ansluts den
+     * på nytt så att ljudet avkodas här (strömmen stängs först, så att det aldrig blir två anslutningar).
+     */
+    fun liveBoost(dialogue: Boolean = vm.dialogueBoost, night: Boolean = vm.nightMode) {
+        val wasActive = AudioBoost.active
+        vm.changeAudioBoost(dialogue, night)
+        val ch = playingChannel() ?: return
+        if (shift != null || pausedAt != 0L) return
+        if (!AudioBoost.needsReload(exo.audioFormat?.sampleMimeType, wasActive)) return
+        exo.stop()
+        scope.launch {
+            delay(400)
+            exo.setMediaSource(liveSource(ch))
+            exo.prepare()
+            exo.play()
+        }
     }
 
     DisposableEffect(exo) {
@@ -2272,7 +2464,7 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                 }
             },
     ) {
-        VideoSurface(exo, vm.videoScale, keepContent = true)
+        VideoSurface(exo, vm.videoScale, keepContent = true, subtitles = vm.subtitleLook)
         // Pausad / efter live: hur långt efter, och vilka knappar som gäller.
         var shiftTick by remember { mutableIntStateOf(0) }
         LaunchedEffect(pausedAt != 0L || behindMs > 0L) {
@@ -2401,6 +2593,19 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                         ),
                     )
                 }
+                add(
+                    PanelSection(
+                        "Ljudförbättring",
+                        listOf(
+                            PanelOption("Dialogförstärkning", selected = vm.dialogueBoost, detail = "Tydligare röster") {
+                                liveBoost(dialogue = !vm.dialogueBoost)
+                            },
+                            PanelOption("Nattläge", selected = vm.nightMode, detail = "Jämnare volym") {
+                                liveBoost(night = !vm.nightMode)
+                            },
+                        ),
+                    ),
+                )
                 add(sleepSection(vm, now, includeEnd = false, done = close))
                 add(scaleSection(vm, done = close))
                 add(infoSection(vm, done = close))

@@ -406,6 +406,35 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Visa teknisk information (upplösning, codec, buffert) ovanpå bilden. */
     var showStreamInfo by mutableStateOf(false)
 
+    /** Hur textundertexter ritas i TV-spelaren. */
+    var subtitleLook by mutableStateOf(
+        se.jptv.player.SubtitleLook(prefs.subtitleSize, prefs.subtitleStyle, prefs.subtitleColor, prefs.subtitlePosition),
+    )
+        private set
+
+    fun changeSubtitleLook(look: se.jptv.player.SubtitleLook) {
+        subtitleLook = look
+        prefs.subtitleSize = look.size
+        prefs.subtitleStyle = look.style
+        prefs.subtitleColor = look.color
+        prefs.subtitlePosition = look.position
+    }
+
+    /** Dialogförstärkning och nattläge (gäller avkodat ljud i alla spelare). */
+    var dialogueBoost by mutableStateOf(prefs.dialogueBoost)
+        private set
+    var nightMode by mutableStateOf(prefs.nightMode)
+        private set
+
+    fun changeAudioBoost(dialogue: Boolean, night: Boolean) {
+        dialogueBoost = dialogue
+        nightMode = night
+        prefs.dialogueBoost = dialogue
+        prefs.nightMode = night
+        se.jptv.player.AudioBoost.dialogue = dialogue
+        se.jptv.player.AudioBoost.night = night
+    }
+
     fun setSleepTimer(minutes: Int?) {
         sleepAtEnd = false
         sleepAt = minutes?.let { System.currentTimeMillis() + it * 60_000L }
@@ -431,6 +460,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         se.jptv.player.DisplayModes.enabled = prefs.autoFrameRate
+        se.jptv.player.AudioBoost.dialogue = prefs.dialogueBoost
+        se.jptv.player.AudioBoost.night = prefs.nightMode
         se.jptv.ui.NavSounds.level = prefs.navSound
         se.jptv.ui.ThemePlayer.level = prefs.themeLevel
     }

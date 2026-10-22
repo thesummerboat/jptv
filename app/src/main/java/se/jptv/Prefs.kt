@@ -132,6 +132,33 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("auto_frame_rate", true)
         set(value) { sp.edit().putBoolean("auto_frame_rate", value).apply() }
 
+    /** Undertextstil: index i SubtitleLook.SIZES, STYLES, COLORS och POSITIONS. */
+    var subtitleSize: Int
+        get() = sp.getInt("subtitle_size", 1)
+        set(value) { sp.edit().putInt("subtitle_size", value).apply() }
+
+    var subtitleStyle: Int
+        get() = sp.getInt("subtitle_style", 0)
+        set(value) { sp.edit().putInt("subtitle_style", value).apply() }
+
+    var subtitleColor: Int
+        get() = sp.getInt("subtitle_color", 0)
+        set(value) { sp.edit().putInt("subtitle_color", value).apply() }
+
+    var subtitlePosition: Int
+        get() = sp.getInt("subtitle_position", 1)
+        set(value) { sp.edit().putInt("subtitle_position", value).apply() }
+
+    /** Dialogförstärkning: lyfter rösterna i avkodat ljud. */
+    var dialogueBoost: Boolean
+        get() = sp.getBoolean("dialogue_boost", false)
+        set(value) { sp.edit().putBoolean("dialogue_boost", value).apply() }
+
+    /** Nattläge: jämnar ut volymen i avkodat ljud. */
+    var nightMode: Boolean
+        get() = sp.getBoolean("night_mode", false)
+        set(value) { sp.edit().putBoolean("night_mode", value).apply() }
+
     /** Valt ljud-/undertextspråk per serie: "ljud|undertext", där undertext kan vara "off". */
     fun trackPreference(showKey: String): Pair<String?, String?>? {
         val raw = sp.getString("track_$showKey", null) ?: return null
