@@ -545,11 +545,12 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     fun setBoost(dialogue: Boolean = vm.dialogueBoost, night: Boolean = vm.nightMode) {
         val wasActive = AudioBoost.active
         vm.changeAudioBoost(dialogue, night)
-        val mime = exo.audioFormat?.sampleMimeType
+        val format = exo.audioFormat
+        val mime = format?.sampleMimeType
         val pos = exo.currentPosition
         when {
-            AudioBoost.needsReload(mime, wasActive) -> if (transcoding) restartTranscode(pos) else loadDirect(pos)
-            AudioBoost.active && AudioBoost.isEncoded(mime) && !AudioBoost.canDecode(mime) ->
+            AudioBoost.needsReload(format, wasActive) -> if (transcoding) restartTranscode(pos) else loadDirect(pos)
+            AudioBoost.active && AudioBoost.isEncoded(mime) && !AudioBoost.canDecode(format) ->
                 toast = "${codecName(mime) ?: "Ljudet"} går orört till förstärkaren/TV:n och kan inte ändras här. " +
                     "Välj ett annat ljudspår (t.ex. AAC) för att det ska verka."
         }
@@ -2187,7 +2188,7 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
         vm.changeAudioBoost(dialogue, night)
         val ch = playingChannel() ?: return
         if (shift != null || pausedAt != 0L) return
-        if (!AudioBoost.needsReload(exo.audioFormat?.sampleMimeType, wasActive)) return
+        if (!AudioBoost.needsReload(exo.audioFormat, wasActive)) return
         exo.stop()
         scope.launch {
             delay(400)
