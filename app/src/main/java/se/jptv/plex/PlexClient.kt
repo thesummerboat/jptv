@@ -480,6 +480,14 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
             val end = m.optLongOrNull("endTimeOffset") ?: return@mapNotNull null
             PlexMarker(m.optString("type"), start, end, final = m.optBoolean("final", false))
         }
+        val chapterArr = o.optJSONArray("Chapter")
+        val chapters = if (chapterArr == null) emptyList() else (0 until chapterArr.length()).mapNotNull { i ->
+            val c = chapterArr.optJSONObject(i) ?: return@mapNotNull null
+            val start = c.optLongOrNull("startTimeOffset") ?: return@mapNotNull null
+            val end = c.optLongOrNull("endTimeOffset") ?: start
+            val index = c.optIntOrNull("index") ?: (i + 1)
+            PlexChapter(c.optStringOrNull("tag") ?: "Kapitel $index", start, end)
+        }.sortedBy { it.startMs }.takeIf { it.size > 1 } ?: emptyList()
         fun tagList(name: String, prefix: String, limit: Int): List<String> {
             val arr = o.optJSONArray(name) ?: return emptyList()
             return (0 until minOf(arr.length(), limit)).mapNotNull { i ->
@@ -531,6 +539,7 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
             showKey = showKey,
             streams = streams,
             markers = markers,
+            chapters = chapters,
             contentRating = o.optStringOrNull("contentRating"),
             genres = genres,
             childCount = o.optIntOrNull("leafCount") ?: o.optIntOrNull("childCount"),
@@ -576,7 +585,7 @@ class PlexClient(private val clientId: String, private val http: OkHttpClient) {
 
     /** Full information om en titel: spår, markörer för intro/eftertexter och aktuell position. */
     suspend fun metadata(ratingKey: String): PlexItem? =
-        items("/library/metadata/$ratingKey?includeMarkers=1").firstOrNull()
+        items("/library/metadata/$ratingKey?includeMarkers=1&includeChapters=1").firstOrNull()
 
     /** Nästa avsnitt i serien, eller null om det här är sista. */
     suspend fun nextEpisode(episode: PlexItem): PlexItem? {

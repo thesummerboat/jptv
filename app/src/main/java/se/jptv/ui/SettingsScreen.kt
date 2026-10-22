@@ -221,6 +221,41 @@ fun SettingsScreen(vm: AppViewModel) {
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedButton(onClick = { vm.changeAudioBoost(!vm.dialogueBoost, vm.nightMode) }) {
+                Text(if (vm.dialogueBoost) "Dialogförstärkning: PÅ" else "Dialogförstärkning: AV")
+            }
+            OutlinedButton(onClick = { vm.changeAudioBoost(vm.dialogueBoost, !vm.nightMode) }) {
+                Text(if (vm.nightMode) "Nattläge: PÅ" else "Nattläge: AV")
+            }
+        }
+        Text(
+            "Dialog lyfter rösterna och sänker musik och effekter. Nattläge jämnar ut volymen. Gäller ljud som boxen " +
+                "avkodar själv, t.ex. till TV:ns högtalare. Dolby/DTS som går orört till en förstärkare påverkas inte.",
+            color = JptvColors.TextDim,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        val look = vm.subtitleLook
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedButton(onClick = { vm.changeSubtitleLook(look.nextSize()) }) {
+                Text("Undertexter, storlek: ${look.sizeLabel}")
+            }
+            OutlinedButton(onClick = { vm.changeSubtitleLook(look.nextStyle()) }) {
+                Text("Utseende: ${look.styleLabel}")
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedButton(onClick = { vm.changeSubtitleLook(look.nextColor()) }) {
+                Text("Textfärg: ${look.colorLabel}")
+            }
+            OutlinedButton(onClick = { vm.changeSubtitleLook(look.nextPosition()) }) {
+                Text("Höjd: ${look.positionLabel}")
+            }
+            // Alltid kvar (en knapp som försvinner tar fokus med sig).
+            OutlinedButton(onClick = { vm.changeSubtitleLook(se.jptv.player.SubtitleLook()) }) {
+                Text(if (look.isDefault) "Undertexter: TV:ns standard" else "Återställ undertexter")
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedButton(onClick = { vm.changeHeroTrailers(!vm.heroTrailers) }) {
                 Text(if (vm.heroTrailers) "Trailer på hemskärmen: PÅ" else "Trailer på hemskärmen: AV")
             }

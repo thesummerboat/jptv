@@ -64,6 +64,9 @@ data class PlexFilterOption(val id: String, val title: String)
 /** Intro- och eftertextsmarkörer som Plex-servern har hittat. */
 data class PlexMarker(val type: String, val startMs: Long, val endMs: Long, val final: Boolean = false)
 
+/** Ett kapitel i filen (från filens egen kapitellista, via Plex). */
+data class PlexChapter(val title: String, val startMs: Long, val endMs: Long)
+
 data class PlexItem(
     val ratingKey: String,
     val type: String,
@@ -86,6 +89,8 @@ data class PlexItem(
     val showKey: String? = null,
     val streams: List<PlexStream> = emptyList(),
     val markers: List<PlexMarker> = emptyList(),
+    /** Filens kapitel; tom lista om filen saknar kapitel (eller bara har ett). */
+    val chapters: List<PlexChapter> = emptyList(),
     val contentRating: String? = null,
     val genres: List<String> = emptyList(),
     val childCount: Int? = null,
