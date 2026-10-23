@@ -153,3 +153,54 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ElsewhereTest(unittest.IsolatedAsyncioTestCase):
+    """Pausad spelare: har man tittat vidare på en annan enhet sedan vi senast rapporterade?"""
+
+    asyncSetUp = ApiTest.asyncSetUp
+    asyncTearDown = ApiTest.asyncTearDown
+    get = ApiTest.get
+
+    def episode_with_offset(self):
+        return next(k for k, v in fake_plex.items.items() if v["type"] == "episode" and v.get("viewOffset"))
+
+    async def test_unchanged(self):
+        ek = self.episode_with_offset()
+        res = await self.get(f"/api/elsewhere/{ek}?pos=30000&since={(fake_plex.NOW + 60) * 1000}")
+        self.assertFalse(res["moved"])
+
+    async def test_position_moved_elsewhere(self):
+        ek = self.episode_with_offset()
+        old = fake_plex.items[ek]["viewOffset"]
+        fake_plex.items[ek]["viewOffset"] = 65000
+        try:
+            res = await self.get(f"/api/elsewhere/{ek}?pos=5000&since={(fake_plex.NOW + 60) * 1000}")
+        finally:
+            fake_plex.items[ek]["viewOffset"] = old
+        self.assertTrue(res["moved"])
+        # Seriens Fortsätt titta-avsnitt (här samma avsnitt, där den andra enheten kom).
+        self.assertEqual(res["target"]["key"], ek)
+        self.assertEqual(res["target"]["offset"], 65000)
+
+    async def test_watched_elsewhere_points_to_show_deck(self):
+        ek = self.episode_with_offset()
+        show = fake_plex.items[ek]["grandparentRatingKey"]
+        fake_plex.items[ek]["lastViewedAt"] = fake_plex.NOW + 600
+        try:
+            res = await self.get(f"/api/elsewhere/{ek}?pos=30000&since={(fake_plex.NOW + 60) * 1000}")
+        finally:
+            fake_plex.items[ek]["lastViewedAt"] = None
+        self.assertTrue(res["moved"])
+        self.assertEqual(res["target"]["showKey"], show)
+
+    async def test_movie_moved(self):
+        mk = next(k for k in fake_plex.order if fake_plex.items[k]["type"] == "movie" and fake_plex.items[k].get("viewOffset"))
+        res = await self.get(f"/api/elsewhere/{mk}?pos=0&since={(fake_plex.NOW + 60) * 1000}")
+        self.assertTrue(res["moved"])
+        self.assertEqual(res["target"]["key"], mk)
+
+    async def test_stop_without_timeline(self):
+        mk = fake_plex.order[0]
+        r = await self.client.post("/api/stop", json={"key": mk, "time": 1000, "duration": 5000, "timeline": False})
+        self.assertEqual(r.status, 200)

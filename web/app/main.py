@@ -18,7 +18,7 @@ from . import imdb
 from .arr import Arr, ArrError
 from .iptv import HwAccel, LiveStream
 from .library import Library
-from .plex import QUALITIES, Plex, PlexError, public
+from .plex import QUALITIES, Plex, PlexError, metadata_list, public, slim
 from .store import Store
 from .tv import Iptv
 from .wishes import Wishes
@@ -341,12 +341,47 @@ async def timeline(request: web.Request):
 async def stop(request: web.Request):
     c = ctx(request)
     b = await body(request)
-    if b.get("key"):
+    # timeline=false: visningen var redan avslutad (lång paus). Skicka inte den gamla positionen
+    # igen, den kan ha ändrats på en annan TV; stäng bara omkodningen.
+    if b.get("key") and b.get("timeline", True):
         await c["plex"].timeline(str(b["key"]), "stopped", int(b.get("time", 0)), int(b.get("duration", 0)), b.get("session"))
     if b.get("session"):
         await c["plex"].stop_transcode(str(b["session"]))
     c["library"].invalidate()
     return web.json_response({"ok": True})
+
+
+@routes.get("/api/elsewhere/{key}")
+async def elsewhere(request: web.Request):
+    """Har titeln spelats på en annan enhet sedan vi senast rapporterade?
+
+    pos = var spelaren står (ms), since = när vi senast rapporterade + marginal (ms sedan 1970).
+    Svarar moved och, i så fall, var man kan fortsätta: seriens Fortsätt titta-avsnitt eller
+    samma titel där den andra enheten kom.
+    """
+    plex = ctx(request)["plex"]
+    key = request.match_info["key"]
+    try:
+        pos = int(request.query.get("pos", 0))
+        since = int(request.query.get("since", 0))
+    except ValueError:
+        raise web.HTTPBadRequest(text="pos och since ska vara tal")
+    raw = metadata_list(await plex.get(f"/library/metadata/{key}"))
+    if not raw:
+        return web.json_response({"moved": False})
+    fresh = slim(raw[0])
+    changed = fresh.get("lastViewedAt", 0) * 1000 > since or (fresh["offset"] > 0 and abs(fresh["offset"] - pos) > 30_000)
+    if not changed:
+        return web.json_response({"moved": False})
+    target = None
+    if fresh.get("type") == "episode" and fresh.get("showKey"):
+        deck = [slim(x) for x in metadata_list(await plex.get("/library/onDeck"))]
+        target = next((d for d in deck if d.get("showKey") == fresh["showKey"]), None)
+        if target is None and fresh["offset"] > 0 and not fresh["watched"]:
+            target = fresh
+    elif fresh["offset"] > 0:
+        target = fresh
+    return web.json_response({"moved": True, "item": public(fresh), "target": public(target) if target else None})
 
 
 @routes.post("/api/watched/{key}")
