@@ -836,7 +836,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
 
     fun moveControlFocus(delta: Int) {
         val index = controlButtons.indexOfFirst { it.id == controlFocus }.coerceAtLeast(0)
-        controlFocus = controlButtons[(index + delta).coerceIn(0, controlButtons.lastIndex)].id
+        controlFocus = controlButtons[(index + delta).coerceIn(0, controlButtons.lastIndex)].id as VodButton
     }
 
     fun pressControl(id: VodButton, repeat: Int) {
@@ -1585,6 +1585,8 @@ private fun PanelColumn(section: PanelSection, focus: FocusRequester?, modifier:
 @Composable
 private fun OptionsPanel(title: String, sections: List<PanelSection>, modifier: Modifier = Modifier) {
     val firstFocus = remember { FocusRequester() }
+    // Fokus på första valet, även om första rubriken saknar val (t.ex. "inga undertexter").
+    val focusSection = sections.indexOfFirst { it.options.isNotEmpty() }
     Column(
         modifier
             .ignoreUnpairedOk()
@@ -1609,7 +1611,7 @@ private fun OptionsPanel(title: String, sections: List<PanelSection>, modifier: 
                     }
                 }
                 itemsIndexed(section.options, key = { oi, _ -> "o_${si}_$oi" }) { oi, option ->
-                    OptionItem(option, if (si == 0 && oi == 0) Modifier.focusRequester(firstFocus) else Modifier)
+                    OptionItem(option, if (si == focusSection && oi == 0) Modifier.focusRequester(firstFocus) else Modifier)
                 }
             }
         }
@@ -2041,6 +2043,13 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
     var retries by remember { mutableIntStateOf(0) }
     var listOpen by remember { mutableStateOf(false) }
     var optionsOpen by remember { mutableStateOf(false) }
+    /** Ljud och undertexter (från knappraden). */
+    var tracksOpen by remember { mutableStateOf(false) }
+    /** Knappraden: OK öppnar den, Tillbaka stänger den. ◀/▶ väljer knapp, ▲/▼ byter fortfarande kanal. */
+    var controlsOpen by remember { mutableStateOf(false) }
+    var liveFocus by remember { mutableStateOf(LiveButton.CHANNELS) }
+    /** Senaste knapptrycket med knappraden uppe; den göms efter en stund utan tryck. */
+    var controlsKeyAt by remember { mutableLongStateOf(0L) }
     var digits by remember { mutableStateOf("") }
     var tracksVersion by remember { mutableIntStateOf(0) }
     // OK-knappen: kort tryck = kanallista, håll inne = alternativ. Avgörs när knappen släpps.
@@ -2361,9 +2370,113 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
         if (target != null) jumpTo(target) else showBanner()
     }
 
-    BackHandler(enabled = listOpen || optionsOpen) {
+    val livePanelOpen = listOpen || optionsOpen || tracksOpen
+    val livePaused = pausedAt != 0L
+    val liveBehind = livePaused || behindMs > 0L
+    val favorite = vm.isFavorite(channel)
+    val previousChannel = previousKey?.let { key -> vm.playlist?.byKey?.get(key) }
+    val liveButtons = buildList {
+        add(ControlButton(LiveButton.CHANNELS, "Kanaler", PlayerIcons.ChannelList))
+        add(ControlButton(LiveButton.GUIDE, "Guide", PlayerIcons.Guide))
+        if (previousChannel != null) {
+            add(ControlButton(LiveButton.PREVIOUS, "Förra kanalen: ${previousChannel.name}", PlayerIcons.History))
+        }
+        add(
+            ControlButton(
+                LiveButton.PLAY_PAUSE,
+                if (livePaused) "Fortsätt" else "Pausa (spelas in på TV:n)",
+                if (livePaused) PlayerIcons.Play else PlayerIcons.Pause,
+            ),
+        )
+        if (liveBehind && (shift != null || !Timeshift.needsRecording(channel))) {
+            add(ControlButton(LiveButton.BACK, "Bakåt 30 s", text = "−30"))
+            add(ControlButton(LiveButton.FORWARD, "Framåt 30 s", text = "+30"))
+        }
+        if (liveBehind) add(ControlButton(LiveButton.GO_LIVE, "Till live", text = "LIVE"))
+        add(ControlButton(LiveButton.TRACKS, "Ljud och undertexter", PlayerIcons.Subtitles))
+        add(
+            ControlButton(
+                LiveButton.FAVORITE,
+                if (favorite) "Ta bort från favoriter" else "Lägg till i favoriter",
+                if (favorite) PlayerIcons.Star else PlayerIcons.StarOutline,
+            ),
+        )
+        add(ControlButton(LiveButton.MORE, "Sovtimer, bild och info", PlayerIcons.More))
+    }
+    val liveFocused = if (liveButtons.any { it.id == liveFocus }) liveFocus else LiveButton.CHANNELS
+
+    fun openControls(focusOn: LiveButton) {
+        controlsOpen = true
+        liveFocus = focusOn
+        controlsKeyAt = System.currentTimeMillis()
+        showBanner()
+    }
+
+    fun moveLiveFocus(delta: Int) {
+        val i = liveButtons.indexOfFirst { it.id == liveFocused }.coerceAtLeast(0)
+        liveFocus = liveButtons[(i + delta).coerceIn(0, liveButtons.lastIndex)].id as LiveButton
+    }
+
+    /** Guiden; med bild-i-bild fortsätter kanalen i hörnet, annars stängs strömmen. */
+    fun openGuide() {
+        if (vm.pipEnabled && error == null) DisplayModes.beginBlackout()
+        vm.replaceTop(Screen.Guide(channel.group))
+    }
+
+    fun pressLive(id: LiveButton) {
+        when (id) {
+            LiveButton.CHANNELS -> {
+                controlsOpen = false
+                listOpen = true
+            }
+            LiveButton.GUIDE -> {
+                controlsOpen = false
+                openGuide()
+            }
+            LiveButton.PREVIOUS -> {
+                controlsOpen = false
+                previousChannel?.let { jumpTo(it) }
+            }
+            LiveButton.PLAY_PAUSE -> if (pausedAt != 0L) resumeLive() else pauseLive()
+            LiveButton.BACK -> seekShift(-30_000)
+            LiveButton.FORWARD -> seekShift(30_000)
+            LiveButton.GO_LIVE -> {
+                goLive()
+                liveFocus = LiveButton.PLAY_PAUSE
+            }
+            LiveButton.TRACKS -> {
+                controlsOpen = false
+                tracksOpen = true
+            }
+            LiveButton.FAVORITE -> vm.toggleFavorite(channel)
+            LiveButton.MORE -> {
+                controlsOpen = false
+                optionsOpen = true
+            }
+        }
+    }
+
+    // Knappraden göms efter åtta sekunder utan tryck (inte när man har pausat).
+    LaunchedEffect(controlsOpen, controlsKeyAt) {
+        if (!controlsOpen) return@LaunchedEffect
+        delay(8_000)
+        if (pausedAt == 0L) controlsOpen = false
+    }
+
+    // Klockan uppe till höger går varje sekund medan knappraden är uppe.
+    LaunchedEffect(controlsOpen) {
+        while (controlsOpen) {
+            now = System.currentTimeMillis()
+            delay(1_000)
+        }
+    }
+
+    BackHandler(enabled = controlsOpen && !livePanelOpen) { controlsOpen = false }
+
+    BackHandler(enabled = livePanelOpen) {
         listOpen = false
         optionsOpen = false
+        tracksOpen = false
     }
 
     Box(
@@ -2373,7 +2486,7 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
             .focusRequester(focus)
             .focusable()
             .onKeyEvent { ev ->
-                if (listOpen || optionsOpen) return@onKeyEvent false
+                if (livePanelOpen) return@onKeyEvent false
                 val native = ev.nativeKeyEvent
                 val code = native.keyCode
                 if (isOk(code)) {
@@ -2385,8 +2498,14 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                         KeyEvent.ACTION_UP -> {
                             if (okDown) {
                                 when {
-                                    okLong -> optionsOpen = true
-                                    pausedAt != 0L -> resumeLive()
+                                    okLong -> {
+                                        controlsOpen = false
+                                        optionsOpen = true
+                                    }
+                                    controlsOpen -> {
+                                        controlsKeyAt = System.currentTimeMillis()
+                                        pressLive(liveFocused)
+                                    }
                                     error != null -> {
                                         // Ny källa: prepare() gör inget om strömmen redan har tagit slut.
                                         retries = 0
@@ -2395,7 +2514,9 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                                         exo.prepare()
                                         exo.play()
                                     }
-                                    else -> listOpen = true
+                                    // Först knappraden; pausad står "Fortsätt" redan vald.
+                                    pausedAt != 0L -> openControls(LiveButton.PLAY_PAUSE)
+                                    else -> openControls(LiveButton.CHANNELS)
                                 }
                             }
                             okDown = false
@@ -2405,6 +2526,17 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                     return@onKeyEvent true
                 }
                 if (native.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
+                if (controlsOpen) {
+                    controlsKeyAt = System.currentTimeMillis()
+                    if (code == KeyEvent.KEYCODE_DPAD_LEFT) {
+                        moveLiveFocus(-1)
+                        return@onKeyEvent true
+                    }
+                    if (code == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                        moveLiveFocus(1)
+                        return@onKeyEvent true
+                    }
+                }
                 val count = channels.size
                 when {
                     code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_CHANNEL_UP -> {
@@ -2432,6 +2564,7 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                         true
                     }
                     code == KeyEvent.KEYCODE_MENU -> {
+                        controlsOpen = false
                         optionsOpen = true
                         true
                     }
@@ -2482,31 +2615,40 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                 delay(1_000)
             }
         }
-        if ((pausedAt != 0L || behindMs > 0L) && !listOpen && !optionsOpen) {
+        if ((pausedAt != 0L || behindMs > 0L) && !livePanelOpen) {
             shiftTick.let { }
             val behind = formatTime(currentBehind())
             Chip(
                 if (pausedAt != 0L) {
-                    "⏸ Pausad · −$behind · OK/▶‖ fortsätt" + if (shift != null || !Timeshift.needsRecording(channel)) " · ⏪ ⏩" else ""
+                    "⏸ Pausad · −$behind" + if (controlsOpen) "" else " · OK meny · ▶‖ fortsätt"
                 } else {
-                    "−$behind efter live · ⏪ 30 s · ⏩ 30 s · Till live i alternativen"
+                    "−$behind efter live" + if (controlsOpen) "" else " · OK meny för −30/+30 och Till live"
                 },
                 Modifier
-                    .align(Alignment.TopEnd)
+                    .align(if (controlsOpen) Alignment.TopCenter else Alignment.TopEnd)
                     .padding(32.dp),
             )
         }
-        if ((bannerVisible || error != null) && !listOpen && !optionsOpen) {
+        if (controlsOpen && !livePanelOpen) {
+            PlayerTopBar(
+                now = now,
+                endsAt = vm.epg?.now(channel, now)?.stop,
+                modifier = Modifier.align(Alignment.TopCenter),
+            )
+        }
+        if ((bannerVisible || error != null || controlsOpen) && !livePanelOpen) {
             ChannelBanner(
                 vm = vm,
                 channel = channel,
                 now = now,
                 error = error,
                 sleep = sleepLabel(vm, now),
+                controls = if (controlsOpen) liveButtons else null,
+                focused = liveFocused,
                 modifier = Modifier.align(Alignment.BottomStart),
             )
         }
-        if (vm.showStreamInfo && !optionsOpen) {
+        if (vm.showStreamInfo && !optionsOpen && !tracksOpen) {
             StreamInfo(exo = exo, mode = "Live-TV · ${channel.name}", contentFps = liveFps, modifier = Modifier.align(Alignment.TopStart))
         }
         SleepTimer(
@@ -2542,48 +2684,19 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                 modifier = Modifier.align(Alignment.CenterStart),
             )
         }
-        if (optionsOpen) {
+        if (optionsOpen || tracksOpen) {
             val tracks = remember(tracksVersion) { exo.currentTracks }
             val audio = trackChoices(tracks, C.TRACK_TYPE_AUDIO)
             val text = trackChoices(tracks, C.TRACK_TYPE_TEXT)
             val textOff = exo.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT) ||
                 text.none { it.selected }
-            val close = { optionsOpen = false }
-            val favorite = vm.isFavorite(channel)
-            val sections = buildList {
-                add(
-                    PanelSection(
-                        "Kanal",
-                        listOf(
-                            PanelOption(if (favorite) "Ta bort från favoriter" else "Lägg till i favoriter") {
-                                vm.toggleFavorite(channel)
-                                showBanner()
-                                close()
-                            },
-                            if (pausedAt != 0L) {
-                                PanelOption("Fortsätt") {
-                                    resumeLive()
-                                    close()
-                                }
-                            } else {
-                                PanelOption("Pausa (spelas in på TV:n)") {
-                                    pauseLive()
-                                    close()
-                                }
-                            },
-                        ) + if (pausedAt != 0L || behindMs > 0L) {
-                            listOf(
-                                PanelOption("Till live (−${formatTime(currentBehind())})") {
-                                    goLive()
-                                    close()
-                                },
-                            )
-                        } else {
-                            emptyList()
-                        },
-                    ),
-                )
-                if (audio.size > 1) {
+            val close = {
+                optionsOpen = false
+                tracksOpen = false
+            }
+            val audioSections = buildList {
+                // I ljudpanelen syns även ett ensamt ljudspår, så att man ser vad som spelas.
+                if (audio.size > 1 || (tracksOpen && audio.isNotEmpty())) {
                     add(
                         PanelSection(
                             "Ljud",
@@ -2601,6 +2714,8 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                                 },
                         ),
                     )
+                } else if (tracksOpen) {
+                    add(PanelSection("Undertext", emptyList(), subtitle = "Kanalen sänder inga undertexter just nu"))
                 }
                 add(
                     PanelSection(
@@ -2615,20 +2730,59 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
                         ),
                     ),
                 )
-                add(sleepSection(vm, now, includeEnd = false, done = close))
-                add(scaleSection(vm, done = close))
-                add(infoSection(vm, done = close))
+            }
+            val sections = if (tracksOpen) {
+                audioSections
+            } else {
+                buildList {
+                    add(
+                        PanelSection(
+                            "Kanal",
+                            listOf(
+                                PanelOption(if (favorite) "Ta bort från favoriter" else "Lägg till i favoriter") {
+                                    vm.toggleFavorite(channel)
+                                    showBanner()
+                                    close()
+                                },
+                                if (pausedAt != 0L) {
+                                    PanelOption("Fortsätt") {
+                                        resumeLive()
+                                        close()
+                                    }
+                                } else {
+                                    PanelOption("Pausa (spelas in på TV:n)") {
+                                        pauseLive()
+                                        close()
+                                    }
+                                },
+                            ) + if (pausedAt != 0L || behindMs > 0L) {
+                                listOf(
+                                    PanelOption("Till live (−${formatTime(currentBehind())})") {
+                                        goLive()
+                                        close()
+                                    },
+                                )
+                            } else {
+                                emptyList()
+                            },
+                        ),
+                    )
+                    addAll(audioSections)
+                    add(sleepSection(vm, now, includeEnd = false, done = close))
+                    add(scaleSection(vm, done = close))
+                    add(infoSection(vm, done = close))
+                }
             }
             OptionsPanel(
-                title = "${channel.number}  ${channel.name}",
+                title = if (tracksOpen) "Ljud och undertexter" else "${channel.number}  ${channel.name}",
                 sections = sections,
                 modifier = Modifier.align(Alignment.CenterEnd),
             )
         }
     }
     // Tillbaka till spelaren efter paneler och påminnelsen.
-    LaunchedEffect(listOpen, optionsOpen, vm.dueReminder == null) {
-        if (!listOpen && !optionsOpen && vm.dueReminder == null) focus.requestWhenReady()
+    LaunchedEffect(livePanelOpen, vm.dueReminder == null) {
+        if (!livePanelOpen && vm.dueReminder == null) focus.requestWhenReady()
     }
 }
 
@@ -2686,61 +2840,70 @@ private fun ChannelBanner(
     error: String?,
     sleep: String?,
     modifier: Modifier = Modifier,
+    controls: List<ControlButton>? = null,
+    focused: Enum<*>? = null,
 ) {
     val current = vm.epg?.now(channel, now)
     val next = vm.epg?.next(channel, now)
-    Row(
+    Column(
         modifier
             .fillMaxWidth()
-            .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f))))
-            .padding(start = 48.dp, end = 48.dp, top = 64.dp, bottom = 32.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.6f), Color.Black.copy(alpha = 0.9f))))
+            .padding(start = 48.dp, end = 48.dp, top = 64.dp, bottom = if (controls != null) 22.dp else 32.dp),
     ) {
-        ChannelLogo(channel, size = 80)
-        Spacer(Modifier.width(24.dp))
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "${channel.number}  ${channel.name}${if (vm.isFavorite(channel)) "  ★" else ""}",
-                    style = MaterialTheme.typography.headlineSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                if (sleep != null) {
-                    Spacer(Modifier.width(16.dp))
-                    Text(sleep, color = JptvColors.Accent)
-                }
-            }
-            Text(channel.group, color = JptvColors.TextDim)
-            if (current != null) {
-                Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            ChannelLogo(channel, size = 80)
+            Spacer(Modifier.width(24.dp))
+            Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("${clock(current.start)}–${clock(current.stop)}", color = JptvColors.Accent)
-                    Spacer(Modifier.width(12.dp))
-                    Text(current.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        "${channel.number}  ${channel.name}${if (vm.isFavorite(channel)) "  ★" else ""}",
+                        style = MaterialTheme.typography.headlineSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (sleep != null) {
+                        Spacer(Modifier.width(16.dp))
+                        Text(sleep, color = JptvColors.Accent)
+                    }
                 }
-                Spacer(Modifier.height(4.dp))
-                ProgressBar(current.progress(now), Modifier.width(420.dp))
-                current.desc?.let {
+                Text(channel.group, color = JptvColors.TextDim)
+                if (current != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("${clock(current.start)}–${clock(current.stop)}", color = JptvColors.Accent)
+                        Spacer(Modifier.width(12.dp))
+                        Text(current.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                     Spacer(Modifier.height(4.dp))
-                    Text(it, color = JptvColors.TextDim, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+                    ProgressBar(current.progress(now), Modifier.width(420.dp))
+                    current.desc?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text(it, color = JptvColors.TextDim, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                if (next != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text("Sedan ${clock(next.start)}  ${next.title}", color = JptvColors.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (error != null) {
+                    Spacer(Modifier.height(6.dp))
+                    Text("$error · Tryck OK för att försöka igen", color = JptvColors.Error)
+                }
+                if (controls == null) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "OK meny · ▲▼ byt kanal · ◀ förra kanalen · siffror = kanalnummer",
+                        color = JptvColors.TextDim,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             }
-            if (next != null) {
-                Spacer(Modifier.height(4.dp))
-                Text("Sedan ${clock(next.start)}  ${next.title}", color = JptvColors.TextDim, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            if (error != null) {
-                Spacer(Modifier.height(6.dp))
-                Text("$error · Tryck OK för att försöka igen", color = JptvColors.Error)
-            }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "OK kanallista · håll OK alternativ · ▲▼ byt kanal · ◀ förra kanalen · siffror = kanalnummer",
-                color = JptvColors.TextDim,
-                style = MaterialTheme.typography.bodySmall,
-            )
+        }
+        if (controls != null) {
+            Spacer(Modifier.height(18.dp))
+            ControlRow(controls, focused)
         }
     }
 }

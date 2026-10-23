@@ -49,8 +49,11 @@ import kotlin.math.abs
 /** Knapparna i spelarens kontrollrad. */
 internal enum class VodButton { PLAY_PAUSE, BACK, FORWARD, SKIP_INTRO, TRACKS, NEXT, RESTART, MORE }
 
+/** Knapparna i live-TV:ns kontrollrad. */
+internal enum class LiveButton { CHANNELS, GUIDE, PREVIOUS, PLAY_PAUSE, BACK, FORWARD, GO_LIVE, TRACKS, FAVORITE, MORE }
+
 /** En knapp: ikon eller kort text (t.ex. "−10"), och namnet som visas under när den är vald. */
-internal class ControlButton(val id: VodButton, val label: String, val icon: ImageVector? = null, val text: String? = null)
+internal class ControlButton(val id: Enum<*>, val label: String, val icon: ImageVector? = null, val text: String? = null)
 
 /** Markeringar på tidslinjen. */
 internal class TimelineMarks(val intro: PlexMarker?, val credits: PlexMarker?, val chapters: List<PlexChapter>) {
@@ -79,6 +82,25 @@ internal object PlayerIcons {
     }
     val More by lazy {
         icon("more", "M6 10c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm-6 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z")
+    }
+    val ChannelList by lazy {
+        icon("list", "M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z")
+    }
+    val Guide by lazy {
+        icon("guide", "M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z")
+    }
+    val History by lazy {
+        icon(
+            "history",
+            "M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z",
+        )
+    }
+    val Star by lazy { icon("star", "M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z") }
+    val StarOutline by lazy {
+        icon(
+            "star_outline",
+            "M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z",
+        )
     }
     val Restart by lazy {
         icon("restart", "M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z")
@@ -118,7 +140,7 @@ internal fun VodControls(
     buffered: Long,
     marks: TimelineMarks,
     buttons: List<ControlButton>,
-    focused: VodButton?,
+    focused: Enum<*>?,
     status: List<Pair<String, Boolean>>,
     modifier: Modifier = Modifier,
 ) {
@@ -165,12 +187,7 @@ internal fun VodControls(
         }
         Spacer(Modifier.height(14.dp))
         Row(verticalAlignment = Alignment.Top) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                modifier = Modifier.alpha(if (focused == null) 0.8f else 1f),
-            ) {
-                buttons.forEach { b -> ControlButtonView(b, b.id == focused) }
-            }
+            ControlRow(buttons, focused, Modifier.alpha(if (focused == null) 0.8f else 1f))
             Spacer(Modifier.weight(1f))
             Row(
                 horizontalArrangement = Arrangement.spacedBy(18.dp),
@@ -185,6 +202,14 @@ internal fun VodControls(
                 }
             }
         }
+    }
+}
+
+/** En rad med runda knappar; den valda är vit och har sitt namn under sig. */
+@Composable
+internal fun ControlRow(buttons: List<ControlButton>, focused: Enum<*>?, modifier: Modifier = Modifier) {
+    Row(horizontalArrangement = Arrangement.spacedBy(14.dp), modifier = modifier) {
+        buttons.forEach { b -> ControlButtonView(b, b.id == focused) }
     }
 }
 
