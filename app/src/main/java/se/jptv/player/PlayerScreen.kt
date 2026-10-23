@@ -111,6 +111,7 @@ import se.jptv.ui.MessageBox
 import se.jptv.ui.ProgressBar
 import se.jptv.ui.clock
 import se.jptv.ui.formatTime
+import se.jptv.ui.ignoreUnpairedOk
 import se.jptv.ui.requestWhenReady
 import java.io.File
 import java.util.Locale
@@ -1330,6 +1331,7 @@ private fun SubtitleStylePanel(
     val first = remember { FocusRequester() }
     Column(
         modifier
+            .ignoreUnpairedOk()
             .fillMaxHeight()
             .width(560.dp)
             .background(Color.Black.copy(alpha = 0.9f))
@@ -1552,6 +1554,7 @@ private fun TrackPanel(audio: PanelSection, text: PanelSection, modifier: Modifi
     val firstFocus = remember { FocusRequester() }
     Row(
         modifier
+            .ignoreUnpairedOk()
             .fillMaxHeight()
             .width(760.dp)
             .background(Color.Black.copy(alpha = 0.88f))
@@ -1584,6 +1587,7 @@ private fun OptionsPanel(title: String, sections: List<PanelSection>, modifier: 
     val firstFocus = remember { FocusRequester() }
     Column(
         modifier
+            .ignoreUnpairedOk()
             .fillMaxHeight()
             .width(460.dp)
             .background(Color.Black.copy(alpha = 0.88f))
@@ -1755,6 +1759,7 @@ private fun SubtitleSearchPanel(
 
     Row(
         modifier
+            .ignoreUnpairedOk()
             .fillMaxHeight()
             .width(760.dp)
             .background(Color.Black.copy(alpha = 0.9f))
@@ -1811,6 +1816,7 @@ private fun SyncPanel(label: String, offsetMs: Long, onChange: (Long) -> Unit, m
     val focus = remember { FocusRequester() }
     Column(
         modifier
+            .ignoreUnpairedOk()
             .fillMaxHeight()
             .width(460.dp)
             .background(Color.Black.copy(alpha = 0.88f))
@@ -1938,6 +1944,7 @@ private fun NextEpisodeCard(
     val playFocus = remember { FocusRequester() }
     Column(
         modifier
+            .ignoreUnpairedOk()
             .padding(40.dp)
             .width(460.dp)
             .background(Color.Black.copy(alpha = 0.85f), MaterialTheme.shapes.medium)
@@ -1963,6 +1970,7 @@ private fun StillWatchingCard(onContinue: () -> Unit, onStop: () -> Unit, modifi
     val continueFocus = remember { FocusRequester() }
     Column(
         modifier
+            .ignoreUnpairedOk()
             .padding(40.dp)
             .width(460.dp)
             .background(Color.Black.copy(alpha = 0.88f), MaterialTheme.shapes.medium)
