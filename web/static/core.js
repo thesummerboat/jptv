@@ -308,6 +308,22 @@ JP.invalidate = function (rerenderCurrent) {
 
 JP.overlays = [];
 JP.overlay = (re, open, close) => JP.overlays.push({ re, open, close, active: false });
+
+// Tillbaka till fliken efter en stund: Fortsätt titta och sett-markeringar kan ha ändrats på en annan
+// TV. Plex-sidan som syns byggs om; övriga sparade sidor byggs om när man går till dem.
+(function () {
+  let hiddenAt = 0;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { hiddenAt = Date.now(); return; }
+    const away = hiddenAt && Date.now() - hiddenAt > 60e3;
+    hiddenAt = 0;
+    if (!away) return;
+    const overlay = JP.overlays.some((o) => o.active);
+    const path = JP.current ? JP.current.path : '';
+    const plexPage = /^\/($|section\/|show\/|item\/|collection\/)/.test(path);
+    JP.invalidate(!overlay && plexPage);
+  });
+})();
 JP.overlayRoute = function (path, query) {
   let handled = false;
   for (const o of JP.overlays) {

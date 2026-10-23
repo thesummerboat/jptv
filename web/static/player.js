@@ -72,6 +72,7 @@
     const top = h('div', { class: 'p-top' }, backBtn, title);
     const skip = h('button', { class: 'p-skip', hidden: true }, 'Hoppa över intro');
     const nextCard = h('div', { class: 'p-next', hidden: true });
+    const moved = h('div', { class: 'p-next p-moved', hidden: true });
     const played = h('div', { class: 'p-played' });
     const buffered = h('div', { class: 'p-buffered' });
     const knob = h('div', { class: 'p-knob' });
@@ -91,9 +92,9 @@
     const menu = h('div', { class: 'p-menu', hidden: true });
     const controls = h('div', { class: 'p-controls' }, playBtn, rewBtn, fwdBtn, volBtn, vol, time, h('div', { class: 'p-spacer' }), nextBtn, menuBtn, pipBtn, fullBtn);
     const bottom = h('div', { class: 'p-bottom' }, seek, controls);
-    const el = h('div', { class: 'player', hidden: true }, video, spinner, message, top, skip, nextCard, bottom, menu);
+    const el = h('div', { class: 'player', hidden: true }, video, spinner, message, top, skip, nextCard, moved, bottom, menu);
     document.body.append(el);
-    return { el, video, spinner, message, backBtn, title, top, skip, nextCard, seek, played, buffered, knob, hoverTime, playBtn, rewBtn, fwdBtn, volBtn, vol, time, nextBtn, menuBtn, pipBtn, fullBtn, menu, bottom };
+    return { el, video, spinner, message, backBtn, title, top, skip, nextCard, moved, seek, played, buffered, knob, hoverTime, playBtn, rewBtn, fwdBtn, volBtn, vol, time, nextBtn, menuBtn, pipBtn, fullBtn, menu, bottom };
   }
 
   let ui = null;
@@ -112,6 +113,16 @@
     countdown: null,
     idleTimer: null,
     loadToken: 0,
+    // Flera enheter: medan spelaren står pausad kan man titta vidare någon annanstans. Då ska den här
+    // inte skriva över Plex med sin gamla position, och inte fortsätta tyst där den var.
+    /** Pågående visning i Plex (positionen rapporteras). Stängs efter två minuters paus. */
+    open: false,
+    /** Visningen har varit igång minst en gång (första starten kollas inte). */
+    everOpen: false,
+    checking: false,
+    pauseTimer: null,
+    lastReportAt: 0,
+    lastReportPos: 0,
   };
 
   function ensureUi() {
@@ -135,8 +146,25 @@
     ui.skip.addEventListener('click', skipIntro);
     v.addEventListener('click', () => { if (!ui.menu.hidden) { ui.menu.hidden = true; return; } togglePlay(); });
     v.addEventListener('dblclick', toggleFull);
-    v.addEventListener('play', () => { updatePlayBtn(); report('playing'); });
-    v.addEventListener('pause', () => { updatePlayBtn(); report('paused'); showControls(); });
+    v.addEventListener('play', () => {
+      updatePlayBtn();
+      if (P.mode === 'plex' && P.item && !P.open) {
+        if (P.checking) { v.pause(); return; }
+        // Efter lång paus: kolla först om man har tittat vidare någon annanstans.
+        if (P.everOpen) { checkElsewhere(); return; }
+        P.open = true;
+        P.everOpen = true;
+      }
+      clearTimeout(P.pauseTimer);
+      report('playing');
+    });
+    v.addEventListener('pause', () => {
+      updatePlayBtn();
+      report('paused');
+      showControls();
+      clearTimeout(P.pauseTimer);
+      if (P.open) P.pauseTimer = setTimeout(closeIdle, 2 * 60e3);
+    });
     v.addEventListener('waiting', () => { ui.spinner.hidden = false; });
     v.addEventListener('playing', () => { ui.spinner.hidden = true; ui.message.hidden = true; });
     v.addEventListener('canplay', () => { ui.spinner.hidden = true; });
@@ -297,19 +325,96 @@
     ui.nextCard.hidden = true;
   }
 
-  function report(state) {
-    if (P.mode !== 'plex' || !P.item) return;
-    if (state === P.lastState && state !== 'playing') return;
+  function sendTimeline(state) {
+    const time = Math.round(ui.video.currentTime * 1000);
     P.lastState = state;
-    JP.post('/api/timeline', { key: P.item.key, state, time: Math.round(ui.video.currentTime * 1000), duration: P.item.duration, session: P.session }).catch(() => {});
+    P.lastReportAt = Date.now();
+    P.lastReportPos = time;
+    JP.post('/api/timeline', { key: P.item.key, state, time, duration: P.item.duration, session: P.session }).catch(() => {});
+  }
+
+  function report(state) {
+    if (P.mode !== 'plex' || !P.item || !P.open) return;
+    if (state === P.lastState && state !== 'playing') return;
+    sendTimeline(state);
+  }
+
+  /** Två minuters paus: avsluta visningen i Plex, så att en annan enhet kan ta över. */
+  function closeIdle() {
+    if (P.mode !== 'plex' || !P.item || !P.open || !ui.video.paused) return;
+    sendTimeline('stopped');
+    P.open = false;
+  }
+
+  async function checkElsewhere() {
+    const v = ui.video;
+    const key = P.item.key;
+    P.checking = true;
+    v.pause();
+    let res = null;
+    try {
+      // Jämför med det vi själva sist sa till Plex (strömmen kan ha startats om under pausen).
+      res = await JP.api(`/api/elsewhere/${key}?pos=${P.lastReportPos}&since=${P.lastReportAt + 30000}`);
+    } catch (e) {
+      res = null;
+    }
+    P.checking = false;
+    if (!P.item || P.item.key !== key) return;
+    if (res && res.moved) { showMovedCard(res.target); return; }
+    P.open = true;
+    v.play().catch(() => {});
+  }
+
+  function hideMovedCard() {
+    if (ui && ui.moved) ui.moved.hidden = true;
+  }
+
+  /** Man har tittat vidare på en annan enhet: välj var man fortsätter. target = null om det inte finns något. */
+  function showMovedCard(target) {
+    hideNextCard();
+    const item = P.item;
+    const same = target && target.key === item.key;
+    const from = target && target.offset > 0 ? JP.clock(target.offset / 1000) : null;
+    let detail;
+    if (!target) detail = item.type === 'episode' ? 'Avsnittet är redan sett där, och det finns inget nytt att fortsätta med.' : 'Filmen är redan sedd där.';
+    else if (same) detail = `Där kom du till ${from}.`;
+    else detail = `Nästa på tur: ${target.type === 'episode' ? JP.epCode(target) + ' · ' : ''}${target.title}${from ? ` (från ${from})` : ''}`;
+    const stay = () => { hideMovedCard(); P.open = true; ui.video.play().catch(() => {}); };
+    ui.moved.replaceChildren(
+      h('div', { class: 'p-next-text' },
+        h('div', { class: 'p-next-title' }, 'Du har tittat vidare på en annan enhet'),
+        h('div', { class: 'dim' }, detail),
+        h('div', { class: 'p-next-actions' },
+          target
+            ? h('button', { class: 'btn primary small', onclick: () => continueAt(target) }, JP.icon('play'), same ? `Fortsätt från ${from}` : 'Fortsätt där')
+            : h('button', { class: 'btn primary small', onclick: closeFromUi }, 'Tillbaka'),
+          h('button', { class: 'btn small', onclick: stay }, target ? 'Stanna här' : 'Spela ändå här'))));
+    ui.moved.hidden = false;
+    showControls();
+  }
+
+  function continueAt(target) {
+    hideMovedCard();
+    if (target.key === P.item.key) {
+      ui.video.currentTime = target.offset / 1000;
+      P.open = true;
+      ui.video.play().catch(() => {});
+      return;
+    }
+    stopPlex(false);
+    history.replaceState(null, '', '#/play/' + target.key);
+    loadPlex(target.key);
   }
 
   function stopPlex(beacon) {
     clearInterval(P.timelineTimer);
+    clearTimeout(P.pauseTimer);
     hideNextCard();
+    hideMovedCard();
     if (P.stream) { P.stream.destroy(); P.stream = null; }
     if (P.mode === 'plex' && P.item) {
-      const body = { key: P.item.key, time: Math.round((ui.video.currentTime || 0) * 1000), duration: P.item.duration, session: P.session };
+      // Avslutad visning (lång paus): skicka inte den gamla positionen igen, bara stäng omkodningen.
+      const body = { key: P.item.key, time: Math.round((ui.video.currentTime || 0) * 1000), duration: P.item.duration, session: P.session, timeline: P.open };
       if (beacon) JP.beacon('/api/stop', body);
       else JP.post('/api/stop', body).catch(() => {});
     }
@@ -366,7 +471,13 @@
     P.duration = (item.duration || 0) / 1000;
     P.nextDismissed = false;
     P.lastState = null;
+    P.open = false;
+    P.everOpen = false;
+    P.checking = false;
+    P.lastReportAt = Date.now();
+    clearTimeout(P.pauseTimer);
     hideNextCard();
+    hideMovedCard();
     ui.nextBtn.hidden = !P.next;
     setTitle(item);
     let start = opts.start;
@@ -374,6 +485,7 @@
       const resume = item.offset > 0 && item.offset < item.duration - 30000;
       start = opts.fromStart || !resume ? 0 : item.offset / 1000;
     }
+    P.lastReportPos = Math.round(start * 1000);
     P.stream = JP.attachHls(ui.video, data.url, {
       start,
       onError: (d) => showError(d && d.response && d.response.code ? `Plex svarade ${d.response.code}` : 'Strömmen avbröts', () => loadPlex(key, { start: ui.video.currentTime || start })),

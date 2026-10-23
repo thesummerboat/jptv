@@ -334,6 +334,8 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     var sessionOpen by remember { mutableStateOf(false) }
     /** Senaste rapporten till Plex (för att skilja våra egna ändringar från andra enheters). */
     var lastReportAt by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    /** Positionen vi senast skickade (det Plex har från oss). */
+    var lastReportPos by remember { mutableLongStateOf(startAt) }
     var backgroundedAt by remember { mutableLongStateOf(0L) }
     var checkingElsewhere by remember { mutableStateOf(false) }
     /** Satt när någon har tittat vidare på en annan enhet: kortet med val visas. */
@@ -560,7 +562,8 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         } catch (e: Exception) {
             null
         } ?: return null
-        val pos = exo.currentPosition
+        // Jämför med det vi själva sist sa till Plex.
+        val pos = lastReportPos
         // Plex sätter lastViewedAt även för våra egna rapporter; räkna bara det som hänt efter dem.
         val since = lastReportAt + 30_000
         // (Sett-status räknas inte: Plex markerar själv som sett när vi passerar ~90 %.)
@@ -801,6 +804,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                 }
                 vm.reportProgress(item, state, position, duration, if (transcoding) session else null)
                 lastReportAt = now
+                lastReportPos = position
                 if (pausedLong) sessionOpen = false
             }
             ticks++
@@ -896,6 +900,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         if (everReady && !isTrailer && sessionOpen) {
             vm.reportProgress(item, "stopped", exo.currentPosition, duration, if (transcoding) session else null)
             lastReportAt = System.currentTimeMillis()
+            lastReportPos = exo.currentPosition
         }
         sessionOpen = false
         backgroundedAt = System.currentTimeMillis()
