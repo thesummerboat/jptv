@@ -466,6 +466,11 @@ fun EpisodesScreen(vm: AppViewModel, container: PlexItem) {
             else -> runCatching { vm.plex.episodes(container.copy(type = "show", ratingKey = showKey)) }
         }
     }
+    // Tillbaka i appen efter en stund: hämta om, man kan ha tittat vidare på en annan TV.
+    val openedAtReturn = remember { vm.returnCount }
+    LaunchedEffect(vm.returnCount) {
+        if (vm.returnCount != openedAtReturn) reload++
+    }
     val firstFocus = remember { FocusRequester() }
     val seasonFocus = remember { FocusRequester() }
     val scope = rememberCoroutineScope()

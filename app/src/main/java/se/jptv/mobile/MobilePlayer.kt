@@ -96,6 +96,8 @@ fun MobileVodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var item by remember { mutableStateOf(request.item) }
+    /** Pågående visning i Plex; stängs vid lång paus och när appen läggs i bakgrunden. */
+    var sessionOpen by remember { mutableStateOf(false) }
     val exo = remember {
         ExoPlayer.Builder(context)
             .setSeekBackIncrementMs(10_000)
@@ -184,6 +186,10 @@ fun MobileVodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                 if (!transcoding) transcode(exo.currentPosition) else error = "Kan inte spela upp (${e.errorCodeName})"
             }
 
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) sessionOpen = true
+            }
+
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_READY) started = true
                 if (playbackState == Player.STATE_ENDED) {
@@ -198,7 +204,7 @@ fun MobileVodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
             if (!request.trailer) {
                 val pos = exo.currentPosition
                 val dur = exo.duration.takeIf { it > 0 } ?: item.durationMs
-                if (started) {
+                if (started && sessionOpen) {
                     vm.reportStopped(item, pos, dur, session.takeIf { transcoding }, ended = dur > 0 && pos > dur * 0.95)
                 } else {
                     vm.abandonPlayback(session.takeIf { transcoding })
@@ -209,13 +215,25 @@ fun MobileVodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     }
 
     // Position för "Hoppa över intro" och "Nästa avsnitt", och "Fortsätt titta" i Plex var tionde sekund.
+    // Lång paus: visningen avslutas i Plex, så att en annan enhet kan ta över utan att telefonen
+    // fortsätter skicka sin gamla position.
     LaunchedEffect(Unit) {
         var tick = 0
+        var pausedSince = 0L
         while (true) {
             delay(500)
             position = exo.currentPosition
-            if (++tick % 20 == 0 && started && !request.trailer && exo.duration > 0) {
-                vm.reportProgress(item, if (exo.isPlaying) "playing" else "paused", exo.currentPosition, exo.duration, session.takeIf { transcoding })
+            val now = System.currentTimeMillis()
+            pausedSince = if (exo.playWhenReady) 0L else pausedSince.takeIf { it > 0L } ?: now
+            if (++tick % 20 == 0 && started && sessionOpen && !request.trailer && exo.duration > 0) {
+                val pausedLong = !exo.isPlaying && pausedSince > 0L && now - pausedSince > 2 * 60_000L
+                val state = when {
+                    exo.isPlaying -> "playing"
+                    pausedLong -> "stopped"
+                    else -> "paused"
+                }
+                vm.reportProgress(item, state, exo.currentPosition, exo.duration, session.takeIf { transcoding })
+                if (pausedLong) sessionOpen = false
             }
         }
     }
@@ -228,7 +246,14 @@ fun MobileVodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         }
     }
 
-    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { exo.pause() }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        exo.pause()
+        // I bakgrunden: avsluta visningen i Plex och sluta skicka positionen.
+        if (started && sessionOpen && !request.trailer && exo.duration > 0) {
+            vm.reportProgress(item, "stopped", exo.currentPosition, exo.duration, session.takeIf { transcoding })
+        }
+        sessionOpen = false
+    }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(

@@ -47,7 +47,8 @@ fun DetailsScreen(vm: AppViewModel, initial: PlexItem) {
     var logo by remember { mutableStateOf(initial.logo) }
     var trailer by remember { mutableStateOf<PlexItem?>(null) }
 
-    LaunchedEffect(initial.ratingKey) {
+    // Även när appen kommer tillbaka: positionen kan ha ändrats på en annan TV.
+    LaunchedEffect(initial.ratingKey, vm.returnCount) {
         runCatching { vm.plex.metadata(initial.ratingKey) }.getOrNull()?.let {
             item = it
             watched = it.watched

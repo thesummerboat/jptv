@@ -275,6 +275,9 @@ private fun iso3(code: String?): String? {
     }
 }
 
+/** Så länge en pausad film räknas som pågående i Plex. Därefter avslutas visningen. */
+private const val PAUSE_SESSION_MS = 2 * 60_000L
+
 private enum class VodPanel { NONE, TRACKS, SEARCH, SYNC, STYLE, OPTIONS }
 
 // ======================================================================
@@ -325,6 +328,17 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     /** När användaren pausade (0 = spelar). Pausskärmen visas efter några sekunders paus. */
     var pausedSince by remember { mutableLongStateOf(0L) }
 
+    // Flera TV-apparater: medan den här står pausad eller ligger i bakgrunden kan man titta vidare på en
+    // annan. Då ska den här inte skriva över Plex med sin gamla position, och inte fortsätta tyst där den var.
+    /** Vi har en pågående visning i Plex (rapporterar position). Stängs vid lång paus och i bakgrunden. */
+    var sessionOpen by remember { mutableStateOf(false) }
+    /** Senaste rapporten till Plex (för att skilja våra egna ändringar från andra enheters). */
+    var lastReportAt by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var backgroundedAt by remember { mutableLongStateOf(0L) }
+    var checkingElsewhere by remember { mutableStateOf(false) }
+    /** Satt när någon har tittat vidare på en annan enhet: kortet med val visas. */
+    var movedOn by remember { mutableStateOf<MovedOn?>(null) }
+
     // Automatisk bildfrekvens: från Plex före start, annars uppmätt från de första bildrutorna.
     var switchingMode by remember { mutableStateOf(false) }
     var fpsHandled by remember { mutableStateOf(false) }
@@ -352,7 +366,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     val intro = item.intro
     val introActive = intro != null && position >= intro.startMs && position < intro.endMs - 1_000
     val countdownVisible = countdown >= 0
-    val cardVisible = countdownVisible || stillWatching
+    val cardVisible = countdownVisible || stillWatching || movedOn != null
     val panelOpen = panel != VodPanel.NONE
 
     fun externalSubs(): List<MediaItem.SubtitleConfiguration> =
@@ -535,8 +549,52 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
         exo.seekTo(target)
     }
 
+    /** Har filen spelats på en annan enhet sedan vi senast rapporterade? null = nej (eller okänt). */
+    suspend fun checkElsewhere(): MovedOn? {
+        val fresh = try {
+            withTimeout(5_000) { vm.plex.metadata(item.ratingKey) }
+        } catch (e: TimeoutCancellationException) {
+            null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        } ?: return null
+        val pos = exo.currentPosition
+        // Plex sätter lastViewedAt även för våra egna rapporter; räkna bara det som hänt efter dem.
+        val since = lastReportAt + 30_000
+        // (Sett-status räknas inte: Plex markerar själv som sett när vi passerar ~90 %.)
+        val changed = fresh.lastViewedAt > since ||
+            (fresh.viewOffsetMs > 0 && kotlin.math.abs(fresh.viewOffsetMs - pos) > 30_000)
+        if (!changed) return null
+        val target = if (item.type == "episode") {
+            val show = item.showKey
+            val deck = runCatching { withTimeout(5_000) { vm.plex.onDeck() } }.getOrNull()
+            deck?.firstOrNull { show != null && it.showKey == show }
+                ?: fresh.takeIf { it.viewOffsetMs > 0 && !it.watched }
+        } else {
+            fresh.takeIf { it.viewOffsetMs > 0 }
+        }
+        return MovedOn(fresh, target)
+    }
+
+    /** Spela. Efter lång paus eller bakgrund kollas först om man har tittat vidare någon annanstans. */
+    fun resume() {
+        if (sessionOpen || !everReady || isTrailer) {
+            exo.play()
+            return
+        }
+        if (checkingElsewhere) return
+        checkingElsewhere = true
+        scope.launch {
+            val moved = checkElsewhere()
+            checkingElsewhere = false
+            if (moved != null) movedOn = moved else exo.play()
+        }
+    }
+
     fun togglePlay() {
-        if (exo.playWhenReady) exo.pause() else exo.play()
+        if (exo.playWhenReady) exo.pause() else resume()
     }
 
     /**
@@ -603,6 +661,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 playing = isPlaying
+                if (isPlaying) sessionOpen = true
             }
 
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
@@ -634,8 +693,13 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
             val pos = exo.currentPosition
             val dur = if (exo.duration > 0) exo.duration else item.durationMs
             val transcodeSession = if (transcoding) session else null
-            if (everReady && !isTrailer) {
+            if (everReady && !isTrailer && sessionOpen) {
                 vm.reportStopped(item, pos, dur, transcodeSession, finished)
+            } else if (everReady && !isTrailer) {
+                // Visningen var redan avslutad (lång paus/bakgrund): skicka inte den gamla positionen igen,
+                // den kan ha ändrats på en annan TV.
+                vm.abandonPlayback(transcodeSession)
+                vm.refreshDeck()
             } else {
                 // Inget hann spelas: skriv inte över positionen i Plex med 0.
                 vm.abandonPlayback(transcodeSession)
@@ -726,11 +790,18 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
             }
             val credits = item.credits
             if (credits != null && position >= credits.startMs && exo.isPlaying) offerNext(15)
-            if (!isTrailer && everReady && ticks % 20 == 0 && exo.playbackState == Player.STATE_READY) {
-                vm.reportProgress(
-                    item, if (exo.isPlaying) "playing" else "paused", position, duration,
-                    if (transcoding) session else null,
-                )
+            if (!isTrailer && everReady && sessionOpen && ticks % 20 == 0 && exo.playbackState == Player.STATE_READY) {
+                val pausedLong = !exo.isPlaying && pausedSince > 0L && now - pausedSince > PAUSE_SESSION_MS
+                // Lång paus: avsluta visningen i Plex, så att en annan TV kan ta över utan att den här
+                // fortsätter skicka sin gamla position.
+                val state = when {
+                    exo.isPlaying -> "playing"
+                    pausedLong -> "stopped"
+                    else -> "paused"
+                }
+                vm.reportProgress(item, state, position, duration, if (transcoding) session else null)
+                lastReportAt = now
+                if (pausedLong) sessionOpen = false
             }
             ticks++
             delay(500)
@@ -808,6 +879,12 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
 
     // Tillbaka till appen: TV:n gick till sitt vanliga läge när appen lämnades; byt till filmens igen.
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        // Tillbaka efter en stund: har man tittat vidare på en annan TV visas valen direkt.
+        val away = backgroundedAt > 0L && System.currentTimeMillis() - backgroundedAt > 20_000
+        backgroundedAt = 0L
+        if (away && everReady && !isTrailer && movedOn == null) {
+            scope.launch { checkElsewhere()?.let { movedOn = it } }
+        }
         val fps = videoFps ?: return@LifecycleEventEffect
         scope.launch { if (DisplayModes.needsSwitch(fps)) DisplayModes.switchTo(fps) }
     }
@@ -815,9 +892,13 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     // Hem-knappen eller skärmsläckare: pausa, så att ljudet inte fortsätter i bakgrunden.
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
         exo.pause()
-        if (everReady && !isTrailer) {
-            vm.reportProgress(item, "paused", exo.currentPosition, duration, if (transcoding) session else null)
+        // Avsluta visningen i Plex: medan appen ligger i bakgrunden ska den inte skicka sin position.
+        if (everReady && !isTrailer && sessionOpen) {
+            vm.reportProgress(item, "stopped", exo.currentPosition, duration, if (transcoding) session else null)
+            lastReportAt = System.currentTimeMillis()
         }
+        sessionOpen = false
+        backgroundedAt = System.currentTimeMillis()
     }
 
     val timelineMarks = remember(item.markers, item.chapters) { TimelineMarks(item.intro, item.credits, item.chapters) }
@@ -880,6 +961,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
             panel == VodPanel.SEARCH || panel == VodPanel.SYNC || panel == VodPanel.STYLE -> panel = VodPanel.TRACKS
             panelOpen -> panel = VodPanel.NONE
             stillWatching -> vm.back()
+            movedOn != null -> vm.back()
             else -> dismissCountdown()
         }
     }
@@ -932,7 +1014,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                         true
                     }
                     code == KeyEvent.KEYCODE_MEDIA_PLAY -> {
-                        exo.play()
+                        resume()
                         true
                     }
                     code == KeyEvent.KEYCODE_MEDIA_PAUSE -> {
@@ -1187,6 +1269,28 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                 seconds = countdown,
                 onPlayNow = { playNext(auto = false) },
                 onCancel = { dismissCountdown() },
+                modifier = Modifier.align(Alignment.BottomEnd),
+            )
+        }
+        movedOn?.let { moved ->
+            MovedOnCard(
+                moved = moved,
+                current = item,
+                onContinue = { target ->
+                    movedOn = null
+                    if (target.ratingKey == item.ratingKey) {
+                        // Samma film/avsnitt: dit den andra TV:n kom.
+                        exo.seekTo(target.viewOffsetMs)
+                        exo.play()
+                    } else {
+                        vm.replaceTop(Screen.Player(PlayRequest.Vod(target)))
+                    }
+                },
+                onStay = {
+                    movedOn = null
+                    exo.play()
+                },
+                onExit = { vm.back() },
                 modifier = Modifier.align(Alignment.BottomEnd),
             )
         }
@@ -1965,6 +2069,58 @@ private fun NextEpisodeCard(
         }
     }
     LaunchedEffect(Unit) { playFocus.requestWhenReady() }
+}
+
+/** Någon har tittat vidare på en annan enhet. target = där man är nu (null = inget att fortsätta med). */
+internal class MovedOn(val fresh: PlexItem, val target: PlexItem?)
+
+/** Efter lång paus eller bakgrund: mitt i serien på en annan TV. Välj var du vill fortsätta. */
+@Composable
+private fun MovedOnCard(
+    moved: MovedOn,
+    current: PlexItem,
+    onContinue: (PlexItem) -> Unit,
+    onStay: () -> Unit,
+    onExit: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val first = remember { FocusRequester() }
+    val target = moved.target
+    val sameItem = target != null && target.ratingKey == current.ratingKey
+    Column(
+        modifier
+            .ignoreUnpairedOk()
+            .padding(40.dp)
+            .width(520.dp)
+            .background(Color.Black.copy(alpha = 0.9f), MaterialTheme.shapes.medium)
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text("Du har tittat vidare på en annan enhet", color = JptvColors.Accent, style = MaterialTheme.typography.titleLarge)
+        val detail = when {
+            target == null && current.type == "episode" -> "Avsnittet är redan sett där, och det finns inget nytt att fortsätta med."
+            target == null -> "${current.displayTitle} är redan sedd där."
+            sameItem -> "Där kom du till ${formatTime(target.viewOffsetMs)}."
+            else -> buildString {
+                append("Nästa på tur: ")
+                append(target.subtitle ?: target.title)
+                if (target.viewOffsetMs > 0) append(" (från ${formatTime(target.viewOffsetMs)})")
+            }
+        }
+        Text(detail, color = JptvColors.TextDim)
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (target != null) {
+                Button(onClick = { onContinue(target) }, modifier = Modifier.focusRequester(first)) {
+                    Text(if (sameItem) "Fortsätt från ${formatTime(target.viewOffsetMs)}" else "Fortsätt där")
+                }
+                OutlinedButton(onClick = onStay) { Text("Stanna här") }
+            } else {
+                Button(onClick = onExit, modifier = Modifier.focusRequester(first)) { Text("Tillbaka") }
+                OutlinedButton(onClick = onStay) { Text("Spela ändå här") }
+            }
+        }
+    }
+    LaunchedEffect(Unit) { first.requestWhenReady() }
 }
 
 @Composable
