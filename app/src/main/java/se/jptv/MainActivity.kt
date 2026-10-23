@@ -133,7 +133,10 @@ fun JptvApp(vm: AppViewModel = viewModel()) {
     // TV:n låter appen leva i dagar i bakgrunden: uppdatera spellista, guide och hemskärm vid återkomst.
     LifecycleEventEffect(Lifecycle.Event.ON_START) { vm.refreshIfStale() }
     // Appen lämnas: bild-i-bild stängs, så att strömmen inte tar en anslutning i onödan.
-    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { vm.closePip() }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        vm.closePip()
+        vm.onBackground()
+    }
 
     Box(
         Modifier

@@ -539,12 +539,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun refreshIfStale() {
         val now = System.currentTimeMillis()
+        // Borta en stund: man kan ha tittat på en annan TV under tiden.
+        val away = backgroundedAt > 0L && now - backgroundedAt > 30_000L
+        backgroundedAt = 0L
+        if (away) returnCount++
         val url = prefs.m3uUrl
         if (url != null && !iptvRestoring && !iptvLoading) {
             if (now - prefs.playlistLoadedAt > 24 * HOUR) loadPlaylist(url, quiet = true) else refreshEpg(force = false)
         }
         if (plex.server != null && !homeLoading && now - homeLoadedAt > 30 * 60_000L) {
             viewModelScope.launch { runCatching { loadHome() } }
+        } else if (away || now - deckLoadedAt > 5 * 60_000L) {
+            refreshDeck()
         }
         checkForUpdate(manual = false)
         refreshImdb(force = false)
@@ -779,6 +785,39 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private var leadRows: List<PlexHomeRow> = emptyList()
+    private var deckLoadedAt = 0L
+    private var backgroundedAt = 0L
+
+    /**
+     * Ökas när appen kommer tillbaka efter att ha legat i bakgrunden en stund. Öppna sidor
+     * (serie, detaljer) hämtar då om, eftersom man kan ha tittat vidare på en annan TV.
+     */
+    var returnCount by mutableStateOf(0)
+        private set
+
+    /** Appen lämnas (hem-knappen, TV:n stängs av). */
+    fun onBackground() {
+        backgroundedAt = System.currentTimeMillis()
+    }
+
+    /** Bara "Fortsätt titta" från Plex, utan resten av hemskärmen. */
+    fun refreshDeck() {
+        if (plex.server == null || homeLoading) return
+        viewModelScope.launch {
+            val deck = runCatching { plex.onDeck() }.getOrNull() ?: return@launch
+            val row = visible(deck).takeIf { it.isNotEmpty() }?.let { PlexHomeRow(DECK_TITLE, it) }
+            if (leadRows.isNotEmpty()) {
+                leadRows = listOfNotNull(row) + leadRows.filter { it.title != DECK_TITLE }
+                rebuildHome()
+            } else {
+                // Bara hemskärmen från cachen än så länge: byt raden där.
+                val hadDeck = homeRows.any { it.title == DECK_TITLE }
+                homeRows = listOfNotNull(row) + homeRows.filter { it.title != DECK_TITLE }
+                homeLeadRows = (homeLeadRows - (if (hadDeck) 1 else 0) + (if (row != null) 1 else 0)).coerceIn(0, homeRows.size)
+            }
+            deckLoadedAt = System.currentTimeMillis()
+        }
+    }
     private var hubRows: List<PlexHomeRow> = emptyList()
     private var imdbTopRows: List<PlexHomeRow> = emptyList()
     private val genreCache = HashMap<String, List<se.jptv.plex.PlexFilterOption>>()
@@ -795,7 +834,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val shown = visibleSections
         val lead = mutableListOf<PlexHomeRow>()
         val deck = visible(runCatching { plex.onDeck() }.getOrDefault(emptyList()))
-        if (deck.isNotEmpty()) lead += PlexHomeRow("Fortsätt titta", deck)
+        if (deck.isNotEmpty()) lead += PlexHomeRow(DECK_TITLE, deck)
+        deckLoadedAt = System.currentTimeMillis()
         val hubSections = shown.filter { favoriteSections.isEmpty() || it.key in favoriteSections }
         val (recent, hubs) = coroutineScope {
             val r = shown.map { s -> async { s to runCatching { plex.recentlyAdded(s.key) }.getOrDefault(emptyList()) } }
@@ -1015,7 +1055,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             else -> item.type in types
         }
         val rows = mutableListOf<PlexHomeRow>()
-        homeRows.firstOrNull { it.title == "Fortsätt titta" }?.let { r ->
+        homeRows.firstOrNull { it.title == DECK_TITLE }?.let { r ->
             val items = r.items.filter { it.sectionKey == key }
             if (items.isNotEmpty()) rows += r.copy(items = items)
         }
@@ -1593,6 +1633,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         const val HOUR = 60 * 60 * 1000L
+        const val DECK_TITLE = "Fortsätt titta"
         const val GROUP_FAVORITES = "★ Favoriter"
         const val GROUP_RECENTS = "Senaste"
         const val GROUP_SEARCH = "Sök kanal"
