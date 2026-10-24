@@ -390,18 +390,33 @@
         : im.error ? 'IMDb-betyg: kunde inte hämtas (' + im.error + ')' : 'IMDb-betyg: hämtas strax';
     // Radarr och Sonarr: godkända önskemål skickas dit.
     const arrBox = h('section', { class: 'card-box' }, h('h2', null, 'Önskemål'),
-      h('p', { class: 'dim' }, 'Önskade filmer och serier hamnar under Önskemål. Med Radarr (filmer) och Sonarr (serier) skickar OK titeln dit direkt; adressen och API-nyckeln finns i respektive app under Settings → General. Utan dem markerar OK bara önskemålet.'));
+      h('p', { class: 'dim' }, 'Önskade filmer och serier hamnar under Önskemål. Med Radarr (filmer) och Sonarr (serier) skickar OK titeln dit direkt; adressen och API-nyckeln finns i respektive app under Settings → General. Utan dem markerar OK bara önskemålet. Titeln läggs till med kvalitetsprofilen och rotmappen nedan och söks direkt; finns profilen eller mappen inte stoppar JPTV hellre än att gissa.'));
     for (const [kind, label] of [['radarr', 'Radarr'], ['sonarr', 'Sonarr']]) {
       const url = h('input', { type: 'text', value: s[kind + 'Url'] || '', placeholder: kind === 'radarr' ? 'http://192.168.x.x:7878' : 'http://192.168.x.x:8989', spellcheck: 'false' });
       const key = h('input', { type: 'password', value: '', placeholder: s[kind + 'Key'] ? 'Sparad – skriv en ny för att byta' : 'API-nyckel', autocomplete: 'off' });
+      // Profil och rotmapp väljs med namn. Förslagen hämtas från Radarr/Sonarr.
+      const profiles = h('datalist', { id: kind + '-profiles' });
+      const roots = h('datalist', { id: kind + '-roots' });
+      const profile = h('input', { type: 'text', value: s[kind + 'Profile'] || '', list: kind + '-profiles', spellcheck: 'false' });
+      const root = h('input', { type: 'text', value: s[kind + 'Root'] || '', list: kind + '-roots', spellcheck: 'false' });
+      const fill = (o) => {
+        profiles.replaceChildren(...(o.profiles || []).map((n) => h('option', { value: n })));
+        roots.replaceChildren(...(o.roots || []).map((n) => h('option', { value: n })));
+      };
+      if (s[kind + 'Url'] && s[kind + 'Key']) JP.api('/api/arr/options/' + kind).then(fill).catch(() => {});
       const state = h('span', { class: 'dim small' });
       arrBox.append(
         h('div', { class: 'arr-row' },
           field(label + ' – adress', url),
           field(label + ' – API-nyckel', key)),
+        h('div', { class: 'arr-row' },
+          field(label + ' – kvalitetsprofil', profile),
+          field(label + ' – rotmapp', root)),
+        profiles, roots,
         h('div', { class: 'actions' },
           h('button', { class: 'btn small', onclick: async () => {
-            await save({ [kind + 'Url']: url.value, [kind + 'Key']: key.value });
+            await save({ [kind + 'Url']: url.value, [kind + 'Key']: key.value, [kind + 'Profile']: profile.value, [kind + 'Root']: root.value });
+            JP.api('/api/arr/options/' + kind).then(fill).catch(() => {});
             key.value = '';
             key.placeholder = 'Sparad – skriv en ny för att byta';
             state.textContent = 'Testar …';

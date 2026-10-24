@@ -15,7 +15,7 @@ import aiohttp
 from aiohttp import web
 
 from . import imdb
-from .arr import Arr, ArrError
+from .arr import DEFAULTS as ARR_DEFAULTS, Arr, ArrError
 from .iptv import HwAccel, LiveStream
 from .library import Library
 from .plex import QUALITIES, Plex, PlexError, metadata_list, public, slim
@@ -93,8 +93,12 @@ def settings_public(c: dict) -> dict:
         "themeLevel": st.get("theme_level", 1),
         "radarrUrl": st.get("radarr_url", ""),
         "radarrKey": bool(st.get("radarr_key")),
+        "radarrRoot": st.get("radarr_root", "") or ARR_DEFAULTS["radarr"]["root"],
+        "radarrProfile": st.get("radarr_profile", "") or ARR_DEFAULTS["radarr"]["profile"],
         "sonarrUrl": st.get("sonarr_url", ""),
         "sonarrKey": bool(st.get("sonarr_key")),
+        "sonarrRoot": st.get("sonarr_root", "") or ARR_DEFAULTS["sonarr"]["root"],
+        "sonarrProfile": st.get("sonarr_profile", "") or ARR_DEFAULTS["sonarr"]["profile"],
     }
 
 
@@ -113,6 +117,9 @@ async def save_settings(request: web.Request):
     for kind in ("radarr", "sonarr"):
         if f"{kind}Url" in b:
             changes[f"{kind}_url"] = str(b[f"{kind}Url"] or "").strip()
+        for field in ("Root", "Profile"):
+            if f"{kind}{field}" in b:
+                changes[f"{kind}_{field.lower()}"] = str(b[f"{kind}{field}"] or "").strip()
         # Nyckeln visas aldrig igen; tom ruta = behåll den sparade, "-" = ta bort.
         key = str(b.get(f"{kind}Key") or "").strip()
         if key == "-":
@@ -405,7 +412,10 @@ async def deck_remove(request: web.Request):
 def arr_for(c: dict, typ: str) -> Arr:
     kind = "sonarr" if typ == "show" else "radarr"
     st = c["store"]
-    return Arr(c["http"], kind, st.get(f"{kind}_url", ""), st.get(f"{kind}_key", ""))
+    return Arr(
+        c["http"], kind, st.get(f"{kind}_url", ""), st.get(f"{kind}_key", ""),
+        root=st.get(f"{kind}_root", ""), profile=st.get(f"{kind}_profile", ""),
+    )
 
 
 @routes.get("/api/discover")
@@ -485,6 +495,19 @@ async def requests_decline(request: web.Request):
 @routes.delete("/api/requests/{id}")
 async def requests_delete(request: web.Request):
     return web.json_response({"ok": ctx(request)["wishes"].remove(request.match_info["id"])})
+
+
+@routes.get("/api/arr/options/{kind}")
+async def arr_options(request: web.Request):
+    """Kvalitetsprofiler och rotmappar som finns i Radarr/Sonarr (förslag under Inställningar)."""
+    c = ctx(request)
+    arr = arr_for(c, "show" if request.match_info["kind"] == "sonarr" else "movie")
+    if not arr.configured:
+        return web.json_response({"profiles": [], "roots": [], "profile": arr.profile, "root": arr.root})
+    try:
+        return web.json_response(await arr.options())
+    except ArrError as e:
+        return web.json_response({"error": str(e), "profiles": [], "roots": [], "profile": arr.profile, "root": arr.root})
 
 
 @routes.post("/api/arr/test/{kind}")

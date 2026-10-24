@@ -26,13 +26,33 @@ def fake_arr(kind: str, log: list) -> web.Application:
         auth(req)
         return web.json_response({"version": "5.2.0" if kind == "radarr" else "4.0.1"})
 
+    # Som en riktig installation: "Any" först (den tar gärna en remux), och en gammal mapp först.
     async def profiles(req):
         auth(req)
-        return web.json_response([{"id": 4, "name": "HD-1080p"}])
+        return web.json_response([
+            {"id": 1, "name": "Any"}, {"id": 2, "name": "SD"}, {"id": 3, "name": "HD-720p"},
+            {"id": 4, "name": "HD-1080p"}, {"id": 5, "name": "Ultra-HD"}, {"id": 6, "name": "HD - 720p/1080p"},
+        ])
 
     async def roots(req):
         auth(req)
-        return web.json_response([{"id": 1, "path": "/media/" + kind}])
+        if kind == "radarr":
+            return web.json_response([{"id": 1, "path": "/media/gamla"}, {"id": 2, "path": "/data/Filmer"}])
+        return web.json_response([{"id": 1, "path": "/media/gamla/"}, {"id": 2, "path": "/data/Serier/"}])
+
+    async def movie(req):
+        auth(req)
+        return web.json_response({"id": int(req.match_info["id"]), "title": "Polarexpressen 2", "hasFile": False, "monitored": False})
+
+    async def editor(req):
+        auth(req)
+        log.append({"editor": await req.json()})
+        return web.json_response([])
+
+    async def command(req):
+        auth(req)
+        log.append({"command": await req.json()})
+        return web.json_response({"id": 1}, status=201)
 
     async def lookup_movie(req):
         auth(req)
@@ -64,6 +84,9 @@ def fake_arr(kind: str, log: list) -> web.Application:
     app.router.add_get("/api/v3/series/lookup", lookup_series)
     app.router.add_post("/api/v3/movie", add)
     app.router.add_post("/api/v3/series", add)
+    app.router.add_get("/api/v3/movie/{id}", movie)
+    app.router.add_put("/api/v3/movie/editor", editor)
+    app.router.add_post("/api/v3/command", command)
     return app
 
 
@@ -147,26 +170,59 @@ class WishesTest(unittest.IsolatedAsyncioTestCase):
         st = await (await self.client.get("/api/status")).json()
         self.assertTrue(st["settings"]["radarrKey"])
         self.assertNotIn("nyckel", json.dumps(st))
-        self.assertIn("svarar", (await self.post("/api/arr/test/radarr"))["ok"])
+        # Standard: samma som läggs till för hand på Unraid.
+        self.assertEqual((st["settings"]["radarrProfile"], st["settings"]["radarrRoot"]), ("HD-1080p", "/data/Filmer"))
+        self.assertEqual((st["settings"]["sonarrProfile"], st["settings"]["sonarrRoot"]), ("HD - 720p/1080p", "/data/Serier"))
+        test = (await self.post("/api/arr/test/radarr"))["ok"]
+        self.assertIn("svarar", test)
+        self.assertIn("HD-1080p", test)
+        self.assertIn("/data/Filmer", test)
+        opts = await (await self.client.get("/api/arr/options/sonarr")).json()
+        self.assertIn("HD - 720p/1080p", opts["profiles"])
+        self.assertIn("/data/Serier/", opts["roots"])
 
         film = (await self.search("Polarexpressen"))[0]
         w = (await self.post("/api/requests", film | {"by": "Ebba"}))["request"]
         ok = await self.post(f"/api/requests/{w['id']}/approve")
         self.assertEqual(ok["request"]["note"], "Skickad till Radarr")
         sent = self.radarr_log[0]
-        self.assertEqual((sent["tmdbId"], sent["qualityProfileId"], sent["rootFolderPath"]), (424242, 4, "/media/radarr"))
+        # Inte den första profilen (Any) eller den första mappen.
+        self.assertEqual((sent["tmdbId"], sent["qualityProfileId"], sent["rootFolderPath"]), (424242, 4, "/data/Filmer"))
+        self.assertTrue(sent["monitored"])
         self.assertTrue(sent["addOptions"]["searchForMovie"])
 
         serie = (await self.search("Fjällstationen"))[0]
         s = (await self.post("/api/requests", serie | {"by": "Ebba"}))["request"]
         ok = await self.post(f"/api/requests/{s['id']}/approve")
         self.assertEqual(ok["request"]["note"], "Skickad till Sonarr")
-        self.assertEqual(self.sonarr_log[0]["tvdbId"], 373737)
-        self.assertTrue(self.sonarr_log[0]["addOptions"]["searchForMissingEpisodes"])
+        sent = self.sonarr_log[0]
+        self.assertEqual((sent["tvdbId"], sent["qualityProfileId"], sent["rootFolderPath"]), (373737, 6, "/data/Serier/"))
+        self.assertEqual(sent["addOptions"]["monitor"], "all")
+        self.assertTrue(sent["addOptions"]["searchForMissingEpisodes"])
+
+        # Finns redan i Radarr men saknar fil: bevaka och sök, i stället för att inget händer.
+        await self.post(f"/api/requests/{w['id']}/decline")
+        again = (await self.post("/api/requests", film | {"by": "Jonas"}))["request"]
+        ok = await self.post(f"/api/requests/{again['id']}/approve")
+        self.assertEqual(ok["request"]["note"], "Fanns redan i Radarr – sökning startad")
+        self.assertIn({"editor": {"movieIds": [9], "monitored": True}}, self.radarr_log)
+        self.assertIn({"command": {"name": "MoviesSearch", "movieIds": [9]}}, self.radarr_log)
+
+        # Profil som inte finns: stoppa med ett tydligt fel, gissa inte.
+        await self.post("/api/settings", {"radarrProfile": "Finns inte"})
+        err = await self.post("/api/arr/test/radarr", status=502)
+        self.assertIn("ingen kvalitetsprofil som heter Finns inte", err["error"])
+        self.assertIn("HD-1080p", err["error"])
+        await self.post("/api/settings", {"radarrProfile": "hd 1080p"})
+        self.assertIn("HD-1080p", (await self.post("/api/arr/test/radarr"))["ok"])
+        await self.post("/api/settings", {"radarrRoot": "/data/Fel"})
+        err = await self.post("/api/arr/test/radarr", status=502)
+        self.assertIn("ingen rotmapp /data/Fel", err["error"])
+        await self.post("/api/settings", {"radarrRoot": "", "radarrProfile": ""})
 
         # Fel nyckel: önskemålet ligger kvar som väntande med felet.
         await self.post("/api/settings", {"radarrKey": "fel"})
-        await self.post(f"/api/requests/{w['id']}/decline")
+        await self.post(f"/api/requests/{again['id']}/decline")
         w2 = (await self.post("/api/requests", film | {"by": "Ebba"}))["request"]
         err = await self.post(f"/api/requests/{w2['id']}/approve", status=502)
         self.assertIn("API-nyckeln", err["error"])
