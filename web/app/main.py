@@ -616,7 +616,7 @@ async def requests_approve(request: web.Request):
     if not w:
         raise web.HTTPNotFound()
     arr = arr_for(c, w["type"])
-    note = None
+    note, extra = None, {}
     if arr.configured:
         try:
             ids = dict(w.get("ids") or {})
@@ -625,11 +625,79 @@ async def requests_approve(request: web.Request):
             if not ids:
                 ids = await c["plex"].online_ids(w["key"])
             note = await arr.add(w, ids)
+            # Sparas så att statusen i listan kan hämtas utan att fråga Plex varje gång.
+            extra["ids"] = _clean_ids(ids) or None
         except (ArrError, PlexError, TmdbError) as e:
             c["wishes"].update(w["id"], error=str(e))
             return web.json_response({"error": str(e), "request": w}, status=502)
-    w = c["wishes"].update(w["id"], status="approved", note=note or "Godkänd", error=None)
+    w = c["wishes"].update(w["id"], status="approved", note=note or "Godkänd", error=None, **extra)
     return web.json_response({"request": w})
+
+
+def _clean_ids(ids: dict) -> dict:
+    return {k: v for k, v in (ids or {}).items() if k in ("tmdb", "imdb", "tvdb") and v}
+
+
+async def _wish_ids(c: dict, w: dict) -> dict:
+    """Id:n som Radarr/Sonarr känner igen titeln på. Äldre önskemål saknar dem: hämtas och sparas."""
+    ids = dict(w.get("ids") or {})
+    if ids:
+        return ids
+    try:
+        if w.get("tmdb") and c["tmdb"].configured:
+            ids = await c["tmdb"].external_ids(w["type"], int(w["tmdb"]))
+        elif w.get("tmdb"):
+            ids = {"tmdb": int(w["tmdb"])}
+        elif w.get("key"):
+            ids = await c["plex"].online_ids(w["key"])
+    except (PlexError, TmdbError, aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        return {}
+    ids = _clean_ids(ids)
+    if ids:
+        c["wishes"].update(w["id"], ids=ids)
+    return ids
+
+
+@routes.get("/api/requests/arr")
+async def requests_arr(request: web.Request):
+    """Radarrs och Sonarrs status för godkända önskemål: söker, laddar ner, fastnat, väntar på release …"""
+    c = ctx(request)
+
+    async def kind(typ: str) -> dict:
+        arr = arr_for(c, typ)
+        wishes = [w for w in c["wishes"].items if w["status"] == "approved" and w["type"] == typ]
+        if not wishes or not arr.configured:
+            return {}
+        ids = await asyncio.gather(*(_wish_ids(c, w) for w in wishes))
+        return await arr.statuses([(w["id"], w, i) for w, i in zip(wishes, ids)])
+
+    movies, shows = await asyncio.gather(kind("movie"), kind("show"))
+    return web.json_response({"items": movies | shows})
+
+
+async def _arr_action(request: web.Request, action: str):
+    c = ctx(request)
+    w = c["wishes"].get(request.match_info["id"])
+    if not w:
+        raise web.HTTPNotFound()
+    arr = arr_for(c, w["type"])
+    if not arr.configured:
+        return web.json_response({"error": f"{arr.name} är inte inställd"}, status=400)
+    try:
+        return web.json_response({"ok": await getattr(arr, action)(w, await _wish_ids(c, w))})
+    except ArrError as e:
+        return web.json_response({"error": str(e)}, status=502)
+
+
+@routes.post("/api/requests/{id}/search")
+async def requests_search(request: web.Request):
+    return await _arr_action(request, "search")
+
+
+@routes.post("/api/requests/{id}/retry")
+async def requests_retry(request: web.Request):
+    """Släng nedladdningen som fastnat, svartlista släppet och sök ett annat."""
+    return await _arr_action(request, "retry")
 
 
 @routes.post("/api/requests/{id}/decline")
@@ -644,6 +712,38 @@ async def requests_decline(request: web.Request):
 @routes.delete("/api/requests/{id}")
 async def requests_delete(request: web.Request):
     return web.json_response({"ok": ctx(request)["wishes"].remove(request.match_info["id"])})
+
+
+@routes.post("/api/library/scan")
+async def library_scan(request: web.Request):
+    """Skanna biblioteken i Plex (knappen Skanna). Webbappens egna listor byggs om när Plex är klar."""
+    c = ctx(request)
+    b = await body(request)
+    try:
+        secs = await c["plex"].scan(b.get("section") or None)
+    except PlexError as e:
+        return web.json_response({"error": str(e)}, status=502)
+    c["scan_started"] = time.monotonic()
+    c["library"].invalidate()
+    c["plex"].forget_cache()
+    return web.json_response({"sections": [s["title"] for s in secs]})
+
+
+@routes.get("/api/library/scan")
+async def library_scan_status(request: web.Request):
+    c = ctx(request)
+    try:
+        busy = await c["plex"].scanning()
+    except PlexError as e:
+        return web.json_response({"error": str(e)}, status=502)
+    started = c.get("scan_started")
+    if started and not busy:
+        # Plex hinner ibland inte börja innan första frågan: bygg om varje gång det är tyst en stund.
+        if time.monotonic() - started > 10:
+            c["scan_started"] = None
+        c["library"].invalidate()
+        c["plex"].forget_cache()
+    return web.json_response({"scanning": busy})
 
 
 @routes.get("/api/arr/options/{kind}")

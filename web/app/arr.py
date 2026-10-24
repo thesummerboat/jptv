@@ -8,8 +8,11 @@ Finns inte den valda profilen eller mappen stoppar vi med ett tydligt fel i stä
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import time
+from datetime import datetime, timezone
 
 import aiohttp
 
@@ -194,6 +197,338 @@ class Arr:
         """Serien finns redan i Sonarr: sök efter de bevakade avsnitt som saknas."""
         await self._call("POST", "/api/v3/command", json={"name": "SeriesSearch", "seriesId": series_id})
         return "Fanns redan i Sonarr – letar efter saknade avsnitt"
+
+    # ---------- status i önskelistan ----------
+
+    async def _find(self, item: dict, ids: dict) -> dict | None:
+        """Titeln som den ligger i Radarr/Sonarr, eller None om den inte finns där."""
+        if self.kind == "radarr":
+            if ids.get("tmdb"):
+                found = await self._call("GET", "/api/v3/movie", params={"tmdbId": str(ids["tmdb"])}) or []
+                found = found if isinstance(found, list) else [found]
+                # Äldre versioner struntar i filtret och skickar alla filmer.
+                return next((m for m in found if str(m.get("tmdbId")) == str(ids["tmdb"])), None)
+            if ids.get("imdb"):
+                m = await self._call("GET", "/api/v3/movie/lookup/imdb", params={"imdbId": ids["imdb"]})
+                m = (m[0] if m else None) if isinstance(m, list) else m
+                return await self._call("GET", f"/api/v3/movie/{m['id']}") if m and m.get("id") else None
+            raise ArrError("Hittar inget TMDB- eller IMDb-id för filmen")
+        if ids.get("tvdb"):
+            found = await self._call("GET", "/api/v3/series", params={"tvdbId": str(ids["tvdb"])}) or []
+            found = found if isinstance(found, list) else [found]
+            return next((s for s in found if str(s.get("tvdbId")) == str(ids["tvdb"])), None)
+        found = await self._call("GET", "/api/v3/series/lookup", params={"term": item.get("title", "")}) or []
+        mine = [s for s in found if s.get("id")]
+        return next((s for s in mine if s.get("year") == item.get("year")), mine[0] if mine else None)
+
+    def _link(self, found: dict, page: str = "") -> str:
+        if page:
+            return f"{self.url}/{page}"
+        kind = "movie" if self.kind == "radarr" else "series"
+        return f"{self.url}/{kind}/{found.get('titleSlug') or found.get('tmdbId') or found.get('id')}"
+
+    async def statuses(self, wanted: list[tuple[str, dict, dict]]) -> dict[str, dict]:
+        """Hur det går för godkända önskemål. wanted: (önskemålets id, önskemålet, ids)."""
+        params = {"includeEpisode": "true"} if self.kind == "sonarr" else None
+        queue, commands = await asyncio.gather(
+            self._call("GET", "/api/v3/queue/details", params=params),
+            self._call("GET", "/api/v3/command"),
+            return_exceptions=True,
+        )
+        if isinstance(queue, ArrError):
+            return {wid: _state("error", str(queue)) for wid, _, _ in wanted}
+        if isinstance(queue, BaseException):
+            raise queue
+        searching = _searching(commands if isinstance(commands, list) else [])
+
+        async def one(wid: str, item: dict, ids: dict):
+            try:
+                return wid, await self._status(item, ids, queue or [], searching)
+            except ArrError as e:
+                return wid, _state("error", str(e))
+
+        return dict(await asyncio.gather(*(one(*w) for w in wanted)))
+
+    async def _status(self, item: dict, ids: dict, queue: list, searching: set) -> dict:
+        found = await self._find(item, ids)
+        if not found:
+            return _state("gone", f"Finns inte i {self.name} längre", actions=["resend"])
+        fid = found.get("id")
+        key = "movieId" if self.kind == "radarr" else "seriesId"
+        mine = [q for q in queue if q.get(key) == fid]
+        if mine:
+            st = _queue_status(mine, self.kind == "sonarr", self.name)
+            st["link"] = self._link(found, "activity/queue") if st["state"] in PROBLEMS else self._link(found)
+            return st
+        st = _movie_status(found, fid in searching) if self.kind == "radarr" else _series_status(found, fid in searching)
+        st["link"] = self._link(found)
+        return st
+
+    async def search(self, item: dict, ids: dict) -> str:
+        """Sök igen (och bevaka, om titeln inte är bevakad)."""
+        found = await self._find(item, ids)
+        if not found:
+            raise ArrError(f"Finns inte i {self.name} – skicka den igen")
+        fid = int(found["id"])
+        if self.kind == "radarr":
+            if not found.get("monitored"):
+                await self._call("PUT", "/api/v3/movie/editor", json={"movieIds": [fid], "monitored": True})
+            await self._call("POST", "/api/v3/command", json={"name": "MoviesSearch", "movieIds": [fid]})
+        else:
+            if not found.get("monitored"):
+                await self._call("PUT", "/api/v3/series/editor", json={"seriesIds": [fid], "monitored": True})
+            await self._call("POST", "/api/v3/command", json={"name": "SeriesSearch", "seriesId": fid})
+        return f"{self.name} letar nu"
+
+    async def retry(self, item: dict, ids: dict) -> str:
+        """Släng nedladdningen som krånglar, svartlista släppet och leta efter ett annat."""
+        found = await self._find(item, ids)
+        if not found:
+            raise ArrError(f"Finns inte i {self.name} – skicka den igen")
+        fid = int(found["id"])
+        key = "movieId" if self.kind == "radarr" else "seriesId"
+        queue = await self._call("GET", "/api/v3/queue/details", params={key: str(fid)}) or []
+        queue = [q for q in queue if q.get(key) == fid]
+        bad = [q for q in queue if _queue_state(q) in PROBLEMS] or queue
+        removed, episodes = set(), []
+        for q in bad:
+            if q.get("episodeId"):
+                episodes.append(q["episodeId"])
+            download = q.get("downloadId") or q.get("id")
+            if download in removed:
+                continue
+            removed.add(download)
+            try:
+                # skipRedownload: vi startar sökningen själva nedan, så det blir likadant i alla versioner.
+                await self._call("DELETE", f"/api/v3/queue/{q['id']}", params={
+                    "removeFromClient": "true", "blocklist": "true", "skipRedownload": "true"})
+            except ArrError as e:
+                if e.status != 404:
+                    raise
+        if self.kind == "radarr":
+            if not found.get("monitored"):
+                await self._call("PUT", "/api/v3/movie/editor", json={"movieIds": [fid], "monitored": True})
+            await self._call("POST", "/api/v3/command", json={"name": "MoviesSearch", "movieIds": [fid]})
+        elif episodes:
+            await self._call("POST", "/api/v3/command", json={"name": "EpisodeSearch", "episodeIds": sorted(set(episodes))})
+        else:
+            await self._call("POST", "/api/v3/command", json={"name": "SeriesSearch", "seriesId": fid})
+        if removed:
+            return f"Släppet är svartlistat – {self.name} letar efter ett annat"
+        return f"{self.name} letar nu"
+
+
+# Nedladdningar som behöver en hand: knappen Släng och sök annan visas.
+PROBLEMS = ("stuck", "failed", "stalled")
+
+
+def _state(state: str, text: str, **kw) -> dict:
+    out = {"state": state, "text": text, "progress": None, "eta": None, "messages": [], "hint": None,
+           "searchedAt": None, "release": None, "actions": [], "link": None}
+    out.update(kw)
+    return out
+
+
+def _low(v) -> str:
+    return str(v or "").lower()
+
+
+def _searching(commands: list) -> set:
+    """Id:n för filmer/serier som Radarr/Sonarr letar efter just nu."""
+    out = set()
+    for c in commands:
+        if not isinstance(c, dict) or _low(c.get("status")) not in ("queued", "started"):
+            continue
+        body = c.get("body") or {}
+        out.update(i for i in body.get("movieIds") or [] if isinstance(i, int))
+        if isinstance(body.get("movieId"), int):
+            out.add(body["movieId"])
+        if isinstance(body.get("seriesId"), int):
+            out.add(body["seriesId"])
+    return out
+
+
+def _seconds(timeleft) -> int | None:
+    """Tid kvar skrivs "01:02:03" eller "2.01:02:03" (dagar först)."""
+    m = re.match(r"^(?:(\d+)\.)?(\d+):(\d+):(\d+)", str(timeleft or ""))
+    if not m:
+        return None
+    d, h, mi, s = (int(x or 0) for x in m.groups())
+    return ((d * 24 + h) * 60 + mi) * 60 + s
+
+
+def _when(text) -> float | None:
+    try:
+        return datetime.fromisoformat(str(text).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _size(b) -> str:
+    try:
+        b = float(b or 0)
+    except (TypeError, ValueError):
+        return ""
+    if b >= 1e9:
+        return f"{b / 1e9:.1f} GB".replace(".", ",")
+    return f"{b / 1e6:.0f} MB" if b > 0 else ""
+
+
+def _queue_state(q: dict) -> str:
+    st, tds, tdst = _low(q.get("status")), _low(q.get("trackedDownloadState")), _low(q.get("trackedDownloadStatus"))
+    if tds in ("failed", "failedpending") or st == "failed" or tdst == "error":
+        return "failed"
+    if tds == "importblocked" or (tds in ("importpending", "importing") and tdst == "warning") \
+            or (st == "completed" and tdst == "warning"):
+        return "stuck"
+    if tds in ("importpending", "importing", "imported") or st == "completed":
+        return "importing"
+    if st == "warning" or tdst == "warning":
+        return "stalled"
+    if st == "downloading":
+        return "downloading"
+    if st == "paused":
+        return "paused"
+    if st == "delay":
+        return "delay"
+    if st == "downloadclientunavailable":
+        return "client"
+    return "queued"
+
+
+def _messages(q: dict) -> list[str]:
+    out: list[str] = []
+    for sm in q.get("statusMessages") or []:
+        msgs = [m for m in sm.get("messages") or [] if m] or ([sm["title"]] if sm.get("title") else [])
+        out += [str(m) for m in msgs if str(m) not in out]
+    if q.get("errorMessage") and q["errorMessage"] not in out:
+        out.append(str(q["errorMessage"]))
+    return out
+
+
+def _episodes(items: list) -> str:
+    """S01E03, Säsong 1 eller 4 avsnitt (Sonarr)."""
+    eps = sorted({(e.get("seasonNumber"), e.get("episodeNumber")) for e in (q.get("episode") or {} for q in items)
+                  if isinstance(e.get("seasonNumber"), int) and isinstance(e.get("episodeNumber"), int)})
+    if not eps:
+        return ""
+    if len(eps) == 1:
+        return "S%02dE%02d" % eps[0]
+    seasons = {s for s, _ in eps}
+    return f"säsong {seasons.pop()}" if len(seasons) == 1 else f"{len(eps)} avsnitt"
+
+
+ORDER = ("stuck", "failed", "stalled", "downloading", "importing", "delay", "paused", "client", "queued")
+TEXTS = {
+    "stuck": "Nedladdad men inte importerad",
+    "failed": "Nedladdningen misslyckades",
+    "stalled": "Nedladdningen står still",
+    "downloading": "Laddar ner",
+    "importing": "Nedladdad – flyttas in i biblioteket",
+    "delay": "Hittad – väntar ut fördröjningen innan nedladdning",
+    "paused": "Pausad i nedladdaren",
+    "client": "Nedladdaren svarar inte",
+    "queued": "I kö hos nedladdaren",
+}
+
+
+def _queue_status(items: list, series: bool, name: str = "Radarr") -> dict:
+    by_download: dict = {}
+    for q in items:
+        by_download.setdefault(q.get("downloadId") or q.get("id"), []).append(q)
+    downloads = [(group[0], _queue_state(group[0]), group) for group in by_download.values()]
+    downloads.sort(key=lambda d: ORDER.index(d[1]))
+    q, state, group = downloads[0]
+    text = TEXTS[state]
+    what = _episodes(group) if series else ""
+    if state == "downloading" and series:
+        what = _episodes([x for d in downloads if d[1] == "downloading" for x in d[2]])
+    active = [d[0] for d in downloads if d[1] in ("downloading", "stalled", "queued", "paused", "delay")]
+    size = sum(float(d.get("size") or 0) for d in active)
+    left = sum(float(d.get("sizeleft") or 0) for d in active)
+    progress = round((size - left) / size, 3) if size > 0 and state in ("downloading", "stalled", "paused") else None
+    if progress is not None:
+        text += f" {int(progress * 100)} %"
+    if what:
+        text = f"{text} · {what}"
+    eta = None
+    if state == "downloading":
+        times = []
+        for d in active:
+            t = _seconds(d.get("timeleft"))
+            if t is None and _when(d.get("estimatedCompletionTime")):
+                t = max(0, int(_when(d["estimatedCompletionTime"]) - time.time()))
+            if t is not None:
+                times.append(t)
+        eta = max(times) if times else None
+    messages = []
+    for d in downloads:
+        if d[1] in PROBLEMS:
+            messages += [m for m in _messages(d[0]) if m not in messages]
+    quality = (((q.get("quality") or {}).get("quality") or {}).get("name")) or ""
+    hint = None
+    if state == "stuck":
+        hint = f"Importera för hand i {name} (Activity → Queue), eller släng släppet så letar {name} upp ett annat."
+    elif state == "failed":
+        hint = f"Släng släppet så letar {name} upp ett annat."
+    others = len(downloads) - 1
+    if others > 0:
+        hint = ((hint + " ") if hint else "") + f"Ytterligare {others} nedladdning{'ar' if others > 1 else ''} på gång."
+    return _state(
+        state, text, progress=progress, eta=eta, messages=messages[:4], hint=hint,
+        actions=["retry"] if state in PROBLEMS else [], quality=quality or None,
+        release_name=q.get("title") or None,
+    )
+
+
+def _movie_status(movie: dict, searching: bool) -> dict:
+    if movie.get("hasFile"):
+        f = movie.get("movieFile") or {}
+        quality = (((f.get("quality") or {}).get("quality") or {}).get("name")) or ""
+        extra = ", ".join(x for x in (quality, _size(f.get("size") or movie.get("sizeOnDisk"))) if x)
+        return _state("done", f"Nedladdad{f' ({extra})' if extra else ''} – syns i Plex efter nästa skanning",
+                      actions=["scan"])
+    if not movie.get("monitored"):
+        return _state("unmonitored", "Inte bevakad i Radarr – letar inte", actions=["search"])
+    if movie.get("isAvailable") is False:
+        now = time.time()
+        dates = [("digitalt", movie.get("digitalRelease")), ("på skiva", movie.get("physicalRelease"))]
+        future = sorted((_when(d), label, d) for label, d in dates if _when(d) and _when(d) > now)
+        cinema = movie.get("inCinemas")
+        if future:
+            release = {"label": "släpps " + future[0][1], "at": future[0][2]}
+        elif _when(cinema) and _when(cinema) > now:
+            release = {"label": "biopremiär", "at": cinema}
+        else:
+            release = {"label": "på bio sedan", "at": cinema} if cinema else None
+        return _state("waiting", "Väntar på release", release=release, actions=["search"],
+                      hint="Radarr börjar leta av sig själv när den släpps.")
+    if searching:
+        return _state("searching", "Söker…")
+    return _state(
+        "missing", "Inget släpp hittat än", searchedAt=movie.get("lastSearchTime"), actions=["search"],
+        hint="Nya släpp tas automatiskt när de dyker upp. Sök igen letar även bland äldre.",
+    )
+
+
+def _series_status(series: dict, searching: bool) -> dict:
+    stats = series.get("statistics") or {}
+    have, want = int(stats.get("episodeFileCount") or 0), int(stats.get("episodeCount") or 0)
+    nxt = {"label": "nästa avsnitt", "at": series["nextAiring"]} if series.get("nextAiring") else None
+    if not series.get("monitored"):
+        return _state("unmonitored", "Inte bevakad i Sonarr – letar inte", actions=["search"])
+    if want and have >= want:
+        return _state("done", f"Alla {want} avsnitt nedladdade", release=nxt, actions=["scan"])
+    if not want:
+        first = series.get("firstAired") or series.get("nextAiring")
+        return _state("waiting", "Väntar på premiär", release={"label": "premiär", "at": first} if first else None)
+    if searching:
+        return _state("searching", f"Söker… · {have} av {want} avsnitt" if have else "Söker…")
+    if have:
+        return _state("partial", f"{have} av {want} avsnitt nedladdade", release=nxt, actions=["search"],
+                      hint="Resten tas automatiskt när de dyker upp. Sök igen letar även bland äldre.")
+    return _state("missing", "Inga avsnitt hittade än", actions=["search"],
+                  hint="Nya släpp tas automatiskt när de dyker upp. Sök igen letar även bland äldre.")
 
 
 def _message(data) -> str | None:

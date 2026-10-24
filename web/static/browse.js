@@ -331,7 +331,7 @@
   JP.route(/^\/section\/([^/]+)$/, async (v, [key]) => {
     const sec = sectionOf(key);
     const genres = h('div', { class: 'chips' });
-    const header = h('div', { class: 'section-head' }, h('div', { class: 'section-title' }, h('h1', null, sec.title), sectionTabs(sec, 'browse')), genres);
+    const header = h('div', { class: 'section-head' }, h('div', { class: 'section-title' }, h('h1', null, sec.title), sectionTabs(sec, 'browse'), JP.scanButton(key, `Skanna ${sec.title} – leta efter nya filer`)), genres);
     JP.api(`/api/section/${key}/filters`).then((f) => {
       for (const g of f.genres.slice(0, 24)) genres.append(h('a', { class: 'chip', href: `#/section/${key}/all?genre=${encodeURIComponent(g.id)}` }, g.title));
       if (f.collections.length) genres.append(h('a', { class: 'chip', href: `#/section/${key}/all?view=collections` }, 'Samlingar'));
@@ -409,7 +409,7 @@
     const count = h('span', { class: 'dim count' });
     const toolbar = h('div', { class: 'toolbar' }, sortSel, genreSel, unwatched, collBtn, count);
     const body = h('div', null, JP.spinner());
-    v.el.append(h('div', { class: 'page' }, h('div', { class: 'section-title' }, h('h1', null, sec.title), sectionTabs(sec, 'all')), toolbar, body));
+    v.el.append(h('div', { class: 'page' }, h('div', { class: 'section-title' }, h('h1', null, sec.title), sectionTabs(sec, 'all'), JP.scanButton(key, `Skanna ${sec.title} – leta efter nya filer`)), toolbar, body));
 
     JP.api(`/api/section/${key}/filters`).then((f) => {
       for (const g of f.genres) genreSel.append(h('option', { value: g.id, selected: g.id === params.genre }, g.title));

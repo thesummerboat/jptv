@@ -217,6 +217,10 @@ def draw_logo(title: str) -> bytes:
 # ------------------------------------------------------------------ server
 
 
+scans: list[str] = []
+refreshing: set[str] = set()
+
+
 def make_app(media_dir: str, port: int) -> web.Application:
     app = web.Application()
     r = web.RouteTableDef()
@@ -227,7 +231,19 @@ def make_app(media_dir: str, port: int) -> web.Application:
 
     @r.get("/library/sections")
     async def sections(_):
-        return mc(Directory=[{"key": "1", "title": "Filmer", "type": "movie"}, {"key": "2", "title": "TV-serier", "type": "show"}, {"key": "3", "title": "Musik", "type": "artist"}])
+        dirs = [{"key": "1", "title": "Filmer", "type": "movie"}, {"key": "2", "title": "TV-serier", "type": "show"}, {"key": "3", "title": "Musik", "type": "artist"}]
+        # En skanning pågår tills den rapporterats en gång.
+        for d in dirs:
+            if d["key"] in refreshing:
+                d["refreshing"] = True
+                refreshing.discard(d["key"])
+        return mc(Directory=dirs)
+
+    @r.get("/library/sections/{s}/refresh")
+    async def refresh(req):
+        scans.append(req.match_info["s"])
+        refreshing.add(req.match_info["s"])
+        return web.Response(text="")
 
     @r.get("/library/onDeck")
     async def deck(_):

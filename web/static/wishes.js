@@ -128,6 +128,54 @@
     return new Date(ms).toLocaleDateString('sv-SE', { day: 'numeric', month: 'short' });
   }
 
+  /* ---------- Radarrs och Sonarrs status på godkända önskemål ---------- */
+
+  function dur(sec) {
+    const min = Math.max(1, Math.round(sec / 60));
+    if (min < 60) return min + ' min';
+    const hrs = Math.floor(min / 60), rest = min % 60;
+    if (hrs < 24) return hrs + ' h' + (rest && hrs < 10 ? ' ' + rest + ' min' : '');
+    return Math.round(hrs / 24) + ' dygn';
+  }
+
+  function day(iso) {
+    const d = new Date(iso);
+    if (isNaN(d)) return '';
+    const opts = { day: 'numeric', month: 'short' };
+    if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+    return d.toLocaleDateString('sv-SE', opts);
+  }
+
+  function since(iso) {
+    const d = new Date(iso);
+    if (isNaN(d)) return '';
+    const min = Math.round((Date.now() - d) / 60000);
+    if (min < 1) return 'nyss';
+    if (min < 60) return 'för ' + min + ' min sedan';
+    const clock = d.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' });
+    const days = Math.round((new Date(new Date().toDateString()) - new Date(d.toDateString())) / 86400000);
+    if (days === 0) return 'i dag ' + clock;
+    if (days === 1) return 'i går ' + clock;
+    if (days < 7) return 'för ' + days + ' dagar sedan';
+    return day(iso);
+  }
+
+  /** Statusraden: "Laddar ner 45 % · klar om 12 min", förlopp, Radarrs förklaring och en ledtråd. */
+  function arrView(st, name) {
+    const bits = [st.text];
+    if (st.eta != null) bits.push('klar om ' + dur(st.eta));
+    if (st.release && st.release.at) bits.push(st.release.label + ' ' + day(st.release.at));
+    if (st.searchedAt) bits.push('senast sökt ' + since(st.searchedAt));
+    return [
+      h('div', { class: 'arr-line' }, h('span', { class: 'arr-dot' }),
+        h('span', null, bits.filter(Boolean).join(' · ')),
+        st.link ? h('a', { class: 'arr-link', href: st.link, target: '_blank', rel: 'noopener' }, 'Öppna i ' + name) : null),
+      st.progress != null ? h('div', { class: 'arr-bar' }, h('i', { style: { width: Math.round(st.progress * 100) + '%' } })) : null,
+      st.messages && st.messages.length ? h('ul', { class: 'arr-msg' }, st.messages.map((m) => h('li', null, m))) : null,
+      st.hint ? h('div', { class: 'arr-hint' }, st.hint) : null,
+    ].filter(Boolean);
+  }
+
   JP.route(/^\/requests$/, async (v) => {
     const input = h('input', { type: 'search', class: 'search-input', placeholder: 'Önska en film eller serie – sök i Plex katalog', autocomplete: 'off' });
     const found = h('div');
@@ -146,8 +194,106 @@
       if (my === token) found.replaceChildren(JP.wishSection(q, { title: 'Träffar i Plex katalog', all: true }));
     }, 350));
 
+    // Statusen från Radarr/Sonarr hämtas efter listan och ritas in i raderna (sparas mellan omritningar).
+    const arrState = {};
+    const slots = new Map();
+    let cfg = {};
+    let arrTimer = 0;
+    let arrBusy = false;
+
+    function paint(id) {
+      const s = slots.get(id);
+      const st = arrState[id];
+      if (!s || !st) return;
+      const name = s.w.type === 'show' ? 'Sonarr' : 'Radarr';
+      s.info.className = 'arr-st arr-' + st.state;
+      s.info.replaceChildren(...arrView(st, name));
+      s.act.replaceChildren(...arrButtons(s.w, st));
+    }
+
+    async function loadArr() {
+      if (arrBusy || !v.isCurrent()) return;
+      arrBusy = true;
+      try {
+        const data = await JP.api('/api/requests/arr');
+        for (const k of Object.keys(arrState)) delete arrState[k];
+        Object.assign(arrState, data.items || {});
+        for (const id of slots.keys()) paint(id);
+        // Följ nedladdningar lite tätare än listan.
+        clearTimeout(arrTimer);
+        if (Object.values(arrState).some((st) => ['downloading', 'searching', 'importing'].includes(st.state))) {
+          arrTimer = setTimeout(loadArr, 10000);
+        }
+      } catch (e) {
+        /* listan fungerar ändå */
+      } finally {
+        arrBusy = false;
+      }
+    }
+
+    function later(ms) { setTimeout(() => { if (v.isCurrent()) loadArr(); }, ms); }
+
+    function arrButtons(w, st) {
+      const out = [];
+      const run = (btn, path, after) => async () => {
+        btn.disabled = true;
+        try {
+          const r = await JP.post(path);
+          JP.toast(`${w.title}: ${r.ok || (r.request && r.request.note) || 'klart'}`);
+        } catch (e) {
+          JP.toast(e.message);
+          btn.disabled = false;
+          return;
+        }
+        if (after) after();
+        later(3000);
+        later(12000);
+      };
+      const searching = () => {
+        arrState[w.id] = Object.assign({}, st, { state: 'searching', text: 'Söker…', actions: [], messages: [], hint: null, searchedAt: null, eta: null, progress: null, release: null });
+        paint(w.id);
+      };
+      for (const a of st.actions || []) {
+        if (a === 'search') {
+          const b = h('button', { class: 'btn small' }, st.state === 'waiting' ? 'Sök ändå' : 'Sök igen');
+          b.addEventListener('click', run(b, `/api/requests/${w.id}/search`, searching));
+          out.push(b);
+        } else if (a === 'retry') {
+          // Tar bort nedladdningen: två klick, så det inte händer av misstag.
+          const label = 'Släng och sök annan';
+          const b = h('button', { class: 'btn small', title: 'Tar bort nedladdningen (även i nedladdaren), svartlistar släppet så att det inte tas igen, och letar efter ett annat.' }, label);
+          let armed = 0;
+          const go = run(b, `/api/requests/${w.id}/retry`, searching);
+          b.addEventListener('click', () => {
+            if (Date.now() - armed < 4000) { armed = 0; go(); return; }
+            armed = Date.now();
+            b.textContent = 'Säker? Klicka igen';
+            b.classList.add('danger');
+            setTimeout(() => { if (armed && Date.now() - armed >= 4000) { armed = 0; b.textContent = label; b.classList.remove('danger'); } }, 4100);
+          });
+          out.push(b);
+        } else if (a === 'scan') {
+          const b = h('button', { class: 'btn small', title: 'Be Plex leta efter nya filer' }, JP.icon('refresh'), 'Skanna Plex');
+          b.addEventListener('click', async () => {
+            b.disabled = true;
+            b.classList.add('busy');
+            await JP.scanLibrary();
+            if (v.isCurrent()) load().catch(() => {});
+          });
+          out.push(b);
+        } else if (a === 'resend') {
+          const b = h('button', { class: 'btn small' }, 'Skicka igen');
+          b.addEventListener('click', run(b, `/api/requests/${w.id}/approve`, () => load()));
+          out.push(b);
+        }
+      }
+      return out;
+    }
+
     async function load() {
       const data = await JP.api('/api/requests');
+      cfg = { movie: data.radarr, show: data.sonarr };
+      slots.clear();
       const arr = [data.radarr ? 'Radarr' : null, data.sonarr ? 'Sonarr' : null].filter(Boolean);
       head.replaceChildren(arr.length
         ? `OK skickar filmer${data.radarr ? ' till Radarr' : ''}${data.radarr && data.sonarr ? ' och' : ''}${data.sonarr ? ' serier till Sonarr' : ''}.`
@@ -163,6 +309,7 @@
       list.replaceChildren(...(parts.length ? parts : [h('div', { class: 'empty' }, h('div', { class: 'empty-title' }, 'Inga önskemål än'), h('div', { class: 'dim' }, 'Sök ovan, eller i vanliga sökningen – det som saknas i Plex kan önskas.'))]));
       JP.status.requests = data.pending;
       JP.refreshBadge();
+      if (slots.size) loadArr();
     }
 
     function row(w) {
@@ -185,7 +332,16 @@
       if (w.status === 'available' && w.libraryKey) {
         act.append(h('a', { class: 'btn small', href: (w.type === 'show' ? '#/show/' : '#/item/') + w.libraryKey }, JP.icon('play'), 'Öppna'));
       }
-      const del = h('button', { class: 'p-btn', title: 'Ta bort' }, JP.icon('close'));
+      // Godkänd och Radarr/Sonarr inställd: plats för deras status och knappar.
+      let info = w.note && w.status !== 'pending' ? h('div', { class: 'small' }, w.note) : null;
+      if (w.status === 'approved' && cfg[w.type]) {
+        info = h('div', { class: 'arr-st' }, info);
+        const arrAct = h('span', { class: 'arr-acts' });
+        act.append(arrAct);
+        slots.set(w.id, { w, info, act: arrAct });
+        paint(w.id);
+      }
+      const del = h('button', { class: 'p-btn', title: 'Ta bort önskemålet' }, JP.icon('close'));
       del.addEventListener('click', busy(del, () => JP.api(`/api/requests/${w.id}`, { method: 'DELETE' })));
       act.append(del);
       const who = [w.by, ...(w.also || [])].join(', ');
@@ -194,13 +350,13 @@
         h('div', { class: 'wish-info' },
           h('div', { class: 'wish-title' }, w.title, w.year ? h('span', { class: 'dim' }, ` (${w.year})`) : null, h('span', { class: 'wish-type' }, w.type === 'show' ? 'Serie' : 'Film')),
           h('div', { class: 'dim small' }, `Önskad av ${who} · ${ago(w.at)}`),
-          w.note && w.status !== 'pending' ? h('div', { class: 'small' }, w.note) : null,
+          info,
           w.error ? h('div', { class: 'small err' }, w.error) : null),
         act);
     }
 
     await load();
     const timer = setInterval(() => { if (v.isCurrent()) load().catch(() => {}); }, 30000);
-    v.onLeave(() => clearInterval(timer));
+    v.onLeave(() => { clearInterval(timer); clearTimeout(arrTimer); });
   }, { nocache: true, page: 'requests' });
 })();

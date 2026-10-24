@@ -13,10 +13,28 @@ from app.plex import Plex
 from tests import fake_plex
 
 
-def fake_arr(kind: str, log: list) -> web.Application:
-    """Minsta möjliga Radarr/Sonarr: uppslag, profiler, rotmapp och tillägg."""
+MOVIE_ID, SERIES_ID = 9, 7
+
+
+def fake_arr(kind: str, log: list, state: dict | None = None) -> web.Application:
+    """Minsta möjliga Radarr/Sonarr: uppslag, profiler, rotmapp, tillägg, kö och kommandon.
+    state: "title" (fält som skrivs över på filmen/serien), "queue" och "commands" – ändras av testerna."""
     app = web.Application()
     added = set()
+    state = state if state is not None else {}
+    state.setdefault("title", {})
+    state.setdefault("queue", [])
+    state.setdefault("commands", [])
+    state["added"] = added
+
+    def record(key):
+        if kind == "radarr":
+            out = {"id": MOVIE_ID, "tmdbId": key, "title": "Polarexpressen 2", "titleSlug": "polarexpressen-2-2026",
+                   "monitored": True, "hasFile": False, "isAvailable": True, "lastSearchTime": "2026-10-23T12:00:00Z"}
+        else:
+            out = {"id": SERIES_ID, "tvdbId": key, "title": "Fjällstationen", "titleSlug": "fjallstationen",
+                   "monitored": True, "statistics": {"episodeFileCount": 0, "episodeCount": 8, "totalEpisodeCount": 8}}
+        return out | state["title"]
 
     def auth(req):
         if req.headers.get("X-Api-Key") != "nyckel":
@@ -59,7 +77,7 @@ def fake_arr(kind: str, log: list) -> web.Application:
         tmdb = int(req.query["tmdbId"])
         out = {"title": "Polarexpressen 2", "tmdbId": tmdb, "year": 2026}
         if tmdb in added:
-            out["id"] = 9
+            out["id"] = MOVIE_ID
         return web.json_response(out)
 
     async def lookup_series(req):
@@ -77,6 +95,37 @@ def fake_arr(kind: str, log: list) -> web.Application:
         added.add(key)
         return web.json_response(body | {"id": 1}, status=201)
 
+    async def library(req):
+        auth(req)
+        want = req.query.get("tmdbId") if kind == "radarr" else req.query.get("tvdbId")
+        return web.json_response([record(k) for k in added if want is None or str(k) == want])
+
+    async def queue(req):
+        auth(req)
+        key = "movieId" if kind == "radarr" else "seriesId"
+        want = req.query.get(key)
+        return web.json_response([q for q in state["queue"] if want is None or str(q.get(key)) == want])
+
+    async def queue_delete(req):
+        auth(req)
+        qid = int(req.match_info["id"])
+        if not any(q["id"] == qid for q in state["queue"]):
+            raise web.HTTPNotFound()
+        log.append({"delete": qid, "params": dict(req.query)})
+        gone = next(q for q in state["queue"] if q["id"] == qid).get("downloadId")
+        state["queue"] = [q for q in state["queue"] if q.get("downloadId") != gone]
+        return web.json_response({})
+
+    async def commands(req):
+        auth(req)
+        return web.json_response(state["commands"])
+
+    app.router.add_get("/api/v3/movie", library)
+    app.router.add_get("/api/v3/series", library)
+    app.router.add_get("/api/v3/queue/details", queue)
+    app.router.add_delete("/api/v3/queue/{id}", queue_delete)
+    app.router.add_get("/api/v3/command", commands)
+    app.router.add_put("/api/v3/series/editor", editor)
     app.router.add_get("/api/v3/system/status", status)
     app.router.add_get("/api/v3/qualityprofile", profiles)
     app.router.add_get("/api/v3/rootfolder", roots)
@@ -101,8 +150,9 @@ class WishesTest(unittest.IsolatedAsyncioTestCase):
         self.saved = (Plex.DISCOVER, Plex.METADATA)
         Plex.DISCOVER, Plex.METADATA = base + "/discover", base + "/meta"
         self.radarr_log, self.sonarr_log = [], []
-        self.radarr = TestServer(fake_arr("radarr", self.radarr_log))
-        self.sonarr = TestServer(fake_arr("sonarr", self.sonarr_log))
+        self.radarr_state, self.sonarr_state = {}, {}
+        self.radarr = TestServer(fake_arr("radarr", self.radarr_log, self.radarr_state))
+        self.sonarr = TestServer(fake_arr("sonarr", self.sonarr_log, self.sonarr_state))
         await self.radarr.start_server()
         await self.sonarr.start_server()
         cfg = os.path.join(self.tmp, "config")
@@ -228,6 +278,143 @@ class WishesTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("API-nyckeln", err["error"])
         lst = await (await self.client.get("/api/requests")).json()
         self.assertEqual(next(x for x in lst["items"] if x["id"] == w2["id"])["status"], "pending")
+
+    async def arr_status(self):
+        r = await self.client.get("/api/requests/arr")
+        self.assertEqual(r.status, 200, await r.text())
+        return (await r.json())["items"]
+
+    async def test_arr_status_in_list(self):
+        await self.post("/api/settings", {
+            "radarrUrl": f"127.0.0.1:{self.radarr.port}", "radarrKey": "nyckel",
+            "sonarrUrl": f"127.0.0.1:{self.sonarr.port}", "sonarrKey": "nyckel",
+        })
+        film = (await self.search("Polarexpressen"))[0]
+        w = (await self.post("/api/requests", film | {"by": "Ebba"}))["request"]
+        await self.post(f"/api/requests/{w['id']}/approve")
+        serie = (await self.search("Fjällstationen"))[0]
+        s = (await self.post("/api/requests", serie | {"by": "Ebba"}))["request"]
+        await self.post(f"/api/requests/{s['id']}/approve")
+        wishes = self.app[jptv.JPTV]["wishes"]
+        # Id:n sparas vid OK, så statusen slipper fråga Plex.
+        self.assertEqual(str(wishes.get(w["id"])["ids"]["tmdb"]), "424242")
+
+        # Inget hittat än: senast sökt, knappen Sök igen.
+        st = await self.arr_status()
+        self.assertEqual((st[w["id"]]["state"], st[w["id"]]["text"]), ("missing", "Inget släpp hittat än"))
+        self.assertEqual(st[w["id"]]["searchedAt"], "2026-10-23T12:00:00Z")
+        self.assertEqual(st[w["id"]]["actions"], ["search"])
+        self.assertTrue(st[w["id"]]["link"].endswith("/movie/polarexpressen-2-2026"))
+        self.assertEqual(st[s["id"]]["state"], "missing")
+
+        # Radarr letar just nu.
+        self.radarr_state["commands"] = [{"name": "MoviesSearch", "status": "started", "body": {"movieIds": [9]}}]
+        self.assertEqual((await self.arr_status())[w["id"]]["text"], "Söker…")
+        self.radarr_state["commands"] = []
+
+        # Laddar ner: procent och tid kvar.
+        self.radarr_state["queue"] = [{
+            "id": 50, "movieId": 9, "downloadId": "abc", "status": "downloading", "trackedDownloadState": "downloading",
+            "trackedDownloadStatus": "ok", "size": 1000, "sizeleft": 550, "timeleft": "00:12:00",
+            "title": "Polarexpressen.2.2026.1080p.WEB-DL", "quality": {"quality": {"name": "WEBDL-1080p"}},
+        }]
+        got = (await self.arr_status())[w["id"]]
+        self.assertEqual((got["state"], got["text"], got["progress"], got["eta"]), ("downloading", "Laddar ner 45 %", 0.45, 720))
+        self.assertEqual(got["actions"], [])
+        # Dagar skrivs först: 1.02:00:00.
+        self.radarr_state["queue"][0]["timeleft"] = "1.02:00:00"
+        self.assertEqual((await self.arr_status())[w["id"]]["eta"], 26 * 3600)
+
+        # Nedladdad men fast (BR-DISK): Radarrs förklaring och Släng och sök annan.
+        self.radarr_state["queue"] = [{
+            "id": 51, "movieId": 9, "downloadId": "bad", "status": "completed", "trackedDownloadState": "importBlocked",
+            "trackedDownloadStatus": "warning", "size": 50e9, "sizeleft": 0, "title": "Polarexpressen.2.COMPLETE.BLURAY",
+            "statusMessages": [{"title": "Polarexpressen.2.COMPLETE.BLURAY", "messages": ["BR-DISK is not supported"]}],
+        }]
+        got = (await self.arr_status())[w["id"]]
+        self.assertEqual((got["state"], got["text"]), ("stuck", "Nedladdad men inte importerad"))
+        self.assertEqual(got["messages"], ["BR-DISK is not supported"])
+        self.assertEqual(got["actions"], ["retry"])
+        self.assertTrue(got["link"].endswith("/activity/queue"))
+        ok = await self.post(f"/api/requests/{w['id']}/retry")
+        self.assertIn("svartlistat", ok["ok"])
+        self.assertIn({"delete": 51, "params": {"removeFromClient": "true", "blocklist": "true", "skipRedownload": "true"}}, self.radarr_log)
+        self.assertEqual(self.radarr_log[-1], {"command": {"name": "MoviesSearch", "movieIds": [9]}})
+        self.assertEqual(self.radarr_state["queue"], [])
+
+        # Sök igen.
+        ok = await self.post(f"/api/requests/{w['id']}/search")
+        self.assertEqual(ok["ok"], "Radarr letar nu")
+        self.assertEqual(self.radarr_log[-1], {"command": {"name": "MoviesSearch", "movieIds": [9]}})
+
+        # Väntar på digital release (som Clayface).
+        self.radarr_state["title"] = {"isAvailable": False, "inCinemas": "2026-10-23T00:00:00Z",
+                                      "digitalRelease": "2099-11-24T00:00:00Z", "physicalRelease": "2099-12-20T00:00:00Z"}
+        got = (await self.arr_status())[w["id"]]
+        self.assertEqual((got["state"], got["text"]), ("waiting", "Väntar på release"))
+        self.assertEqual(got["release"], {"label": "släpps digitalt", "at": "2099-11-24T00:00:00Z"})
+
+        # Nedladdad, väntar på Plex.
+        self.radarr_state["title"] = {"hasFile": True, "movieFile": {"size": 8.2e9, "quality": {"quality": {"name": "Bluray-1080p"}}}}
+        got = (await self.arr_status())[w["id"]]
+        self.assertEqual(got["state"], "done")
+        self.assertIn("Bluray-1080p, 8,2 GB", got["text"])
+        self.radarr_state["title"] = {}
+
+        # Serie: säsongspaket som fastnat (en rad per avsnitt i kön, samma nedladdning).
+        self.sonarr_state["queue"] = [
+            {"id": 60 + e, "seriesId": 7, "episodeId": 100 + e, "downloadId": "pack", "status": "completed",
+             "trackedDownloadState": "importPending", "trackedDownloadStatus": "warning", "size": 9e9, "sizeleft": 0,
+             "episode": {"seasonNumber": 1, "episodeNumber": e},
+             "statusMessages": [{"title": "x", "messages": ["One or more episodes expected in this release were not imported"]}]}
+            for e in (1, 2, 3)
+        ]
+        got = (await self.arr_status())[s["id"]]
+        self.assertEqual((got["state"], got["text"]), ("stuck", "Nedladdad men inte importerad · säsong 1"))
+        ok = await self.post(f"/api/requests/{s['id']}/retry")
+        self.assertIn("svartlistat", ok["ok"])
+        self.assertEqual(sum(1 for x in self.sonarr_log if "delete" in x), 1)
+        self.assertEqual(self.sonarr_log[-1], {"command": {"name": "EpisodeSearch", "episodeIds": [101, 102, 103]}})
+
+        # Delvis nedladdad serie.
+        self.sonarr_state["title"] = {"statistics": {"episodeFileCount": 3, "episodeCount": 8}, "nextAiring": "2099-01-01T20:00:00Z"}
+        got = (await self.arr_status())[s["id"]]
+        self.assertEqual((got["state"], got["text"]), ("partial", "3 av 8 avsnitt nedladdade"))
+        self.assertEqual(got["release"]["label"], "nästa avsnitt")
+
+        # Äldre önskemål utan sparade id:n: hämtas från Plex och sparas.
+        wishes.update(w["id"], ids=None)
+        self.assertEqual((await self.arr_status())[w["id"]]["state"], "missing")
+        self.assertEqual(str(wishes.get(w["id"])["ids"]["tmdb"]), "424242")
+
+        # Borttagen ur Radarr: Skicka igen.
+        self.radarr_state["added"].clear()
+        got = (await self.arr_status())[w["id"]]
+        self.assertEqual((got["state"], got["actions"]), ("gone", ["resend"]))
+        err = await self.post(f"/api/requests/{w['id']}/search", status=502)
+        self.assertIn("Finns inte i Radarr", err["error"])
+
+        # Radarr svarar inte rätt: felet visas på raden, sidan fungerar.
+        await self.post("/api/settings", {"radarrKey": "fel"})
+        got = (await self.arr_status())[w["id"]]
+        self.assertEqual(got["state"], "error")
+        self.assertIn("API-nyckeln", got["text"])
+
+    async def test_scan_library(self):
+        fake_plex.scans.clear()
+        r = await self.post("/api/library/scan")
+        self.assertEqual(r["sections"], ["Filmer", "TV-serier"])
+        self.assertEqual(sorted(fake_plex.scans), ["1", "2"])
+        st = await (await self.client.get("/api/library/scan")).json()
+        self.assertEqual(st["scanning"], ["Filmer", "TV-serier"])
+        st = await (await self.client.get("/api/library/scan")).json()
+        self.assertEqual(st["scanning"], [])
+        # Ett bibliotek.
+        fake_plex.scans.clear()
+        r = await self.post("/api/library/scan", {"section": "2"})
+        self.assertEqual((r["sections"], fake_plex.scans), (["TV-serier"], ["2"]))
+        await self.post("/api/library/scan", {"section": "99"}, status=502)
+        fake_plex.refreshing.clear()
 
     async def test_marked_available_when_in_plex(self):
         film = (await self.search("Polarexpressen"))[0]

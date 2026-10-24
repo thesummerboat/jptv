@@ -69,6 +69,43 @@ JP.icons = {
   panel: '<rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M9.5 4.5v15"/><path d="M5.5 8.5h1.5M5.5 11.5h1.5M5.5 14.5h1.5"/>',
   eye: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>',
 };
+JP.icons.refresh = '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4.2h-4.2"/>';
+
+/** Skanna biblioteken i Plex (alla, eller ett) och bygg om sidorna när Plex är klar. */
+JP.scanLibrary = function (section) {
+  if (JP._scan) { JP.toast('Plex skannar redan'); return JP._scan; }
+  JP._scan = (async () => {
+    document.body.classList.add('scanning');
+    try {
+      const r = await JP.post('/api/library/scan', section ? { section } : {});
+      JP.toast('Plex skannar ' + r.sections.join(' och ') + ' …');
+      const t0 = Date.now();
+      let idle = 0;
+      // Två tomma svar i rad = klar (Plex hinner ibland inte börja före första frågan).
+      while (idle < 2 && Date.now() - t0 < 15 * 60e3) {
+        await new Promise((ok) => setTimeout(ok, 2000));
+        const st = await JP.api('/api/library/scan');
+        idle = st.scanning.length ? 0 : idle + 1;
+      }
+      JP.toast('Klart – biblioteket är uppdaterat');
+      JP.invalidate(true);
+      return true;
+    } catch (e) {
+      JP.toast(e.message);
+      return false;
+    } finally {
+      JP._scan = null;
+      document.body.classList.remove('scanning');
+    }
+  })();
+  return JP._scan;
+};
+
+/** Knappen Skanna bredvid bibliotekets flikar (ikonen snurrar medan Plex jobbar). */
+JP.scanButton = function (section, title) {
+  return h('button', { class: 'scan-btn', title: title || 'Skanna biblioteket i Plex', onclick: () => JP.scanLibrary(section) }, JP.icon('refresh'), 'Skanna');
+};
+
 JP.icon = (name, cls) => JP.svg(JP.icons[name] || '', 'ico ' + (cls || ''));
 
 JP.api = async function (path, opts = {}) {

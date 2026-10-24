@@ -322,6 +322,7 @@
         field('Serverns adress', uri, 'Hittas automatiskt. Ändra bara om servern har bytt adress och inte hittas.'),
         h('div', { class: 'actions' },
           h('button', { class: 'btn', onclick: async () => { await save({ serverUri: uri.value }, 'Adressen sparad'); } }, 'Spara adress'),
+          h('button', { class: 'btn', title: 'Be Plex leta efter nya filer i film- och seriebiblioteken', onclick: () => JP.scanLibrary() }, JP.icon('refresh'), 'Skanna bibliotek'),
           h('button', { class: 'btn ghost', onclick: async () => { await JP.post('/api/logout'); await JP.refreshStatus(); JP.invalidate(); JP.go('#/login'); } }, 'Logga ut')));
     } else {
       plexBox.append(h('p', { class: 'dim' }, 'Inte inloggad.'), h('a', { class: 'btn primary', href: '#/login' }, 'Logga in på Plex'));

@@ -451,6 +451,28 @@ class Plex:
             if d.get("type") in ("movie", "show")
         ]
 
+    async def scan(self, key: str | None = None) -> list[dict]:
+        """Be Plex leta efter nya filer i film- och seriebiblioteken (eller ett av dem)."""
+        secs = [s for s in await self.sections() if key is None or s["key"] == str(key)]
+        if not secs:
+            raise PlexError("Hittade inget sådant bibliotek")
+        for s in secs:
+            status = await self.send("GET", f"/library/sections/{s['key']}/refresh")
+            if status == 401:
+                raise PlexError("Plex nekade åtkomst – logga in igen")
+            if status >= 400:
+                raise PlexError(f"Plex svarade HTTP {status}")
+        return secs
+
+    async def scanning(self) -> list[str]:
+        """Bibliotek som Plex skannar just nu."""
+        mc = await self.get("/library/sections")
+        return [
+            str(d.get("title"))
+            for d in mc.get("Directory") or []
+            if d.get("type") in ("movie", "show") and d.get("refreshing") in (True, 1, "1", "true")
+        ]
+
     async def on_deck(self) -> list[dict]:
         return await self.items("/library/onDeck", cache=20)
 
