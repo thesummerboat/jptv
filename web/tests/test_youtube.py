@@ -5,13 +5,15 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from app import main as jptv
-from app.youtube import parse_import, parse_index, parse_rss, pick_formats, pick_subtitles
+from app.youtube import (parse_ago, parse_clock, parse_count, parse_import, parse_index, parse_related, parse_rss,
+                         pick_formats, pick_subtitles)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CID = "UCabcdefghijklmnopqrstuv"
@@ -44,6 +46,84 @@ RSS = """<?xml version="1.0" encoding="UTF-8"?>
 </feed>"""
 
 VTT = "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHej!\n"
+
+CH_A = "UCaaaaaaaaaaaaaaaaaaaaaa"
+CH_B = "UCbbbbbbbbbbbbbbbbbbbbbb"
+
+
+def lockup(vid, title, chan, cid, views="1.2M views", ago="3 days ago", dur="12:34", live=False,
+           kind="LOCKUP_CONTENT_TYPE_VIDEO", link_channel=True):
+    """En video i YouTubes nyare format (lockupViewModel), som bredvid en video på youtube.com."""
+    channel_text = {"content": chan}
+    if link_channel:
+        channel_text["commandRuns"] = [{"startIndex": 0, "length": len(chan),
+                                        "onTap": {"innertubeCommand": {"browseEndpoint": {"browseId": cid}}}}]
+    second = [{"text": {"content": "12K watching"}}] if live else [{"text": {"content": views}}, {"text": {"content": ago}}]
+    return {"lockupViewModel": {
+        "contentImage": {"thumbnailViewModel": {
+            "image": {"sources": [
+                {"url": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg?sqp=small", "width": 168, "height": 94},
+                {"url": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg?sqp=big", "width": 336, "height": 188}]},
+            "overlays": [{"thumbnailBottomOverlayViewModel": {"badges": [{"thumbnailBadgeViewModel": {
+                "text": "LIVE" if live else dur,
+                "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE" if live else "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT"}}]}}]}},
+        "metadata": {"lockupMetadataViewModel": {
+            "title": {"content": title},
+            "image": {"decoratedAvatarViewModel": {
+                "avatar": {"avatarViewModel": {"image": {"sources": [{"url": f"https://yt3.ggpht.com/{cid}=s68", "width": 68, "height": 68}]}}},
+                "rendererContext": {"commandContext": {"onTap": {"innertubeCommand": {"browseEndpoint": {"browseId": cid}}}}}}},
+            "metadata": {"contentMetadataViewModel": {"metadataRows": [
+                {"metadataParts": [{"text": channel_text}]},
+                {"metadataParts": second}], "delimiter": " • "}}}},
+        "contentId": vid, "contentType": kind,
+        "rendererContext": {"commandContext": {"onTap": {"innertubeCommand": {"watchEndpoint": {"videoId": vid}}}}}}}
+
+
+def compact(vid, title, chan, cid):
+    """Samma sak i YouTubes äldre format (compactVideoRenderer)."""
+    return {"compactVideoRenderer": {
+        "videoId": vid, "title": {"simpleText": title},
+        "longBylineText": {"runs": [{"text": chan, "navigationEndpoint": {"browseEndpoint": {"browseId": cid}}}]},
+        "publishedTimeText": {"simpleText": "2 weeks ago"}, "viewCountText": {"simpleText": "1,234 views"},
+        "lengthText": {"simpleText": "1:02:03"},
+        "thumbnail": {"thumbnails": [{"url": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg", "width": 480, "height": 360}]},
+        "channelThumbnail": {"thumbnails": [{"url": f"//yt3.ggpht.com/{cid}=s68", "width": 68, "height": 68}]}}}
+
+
+RELATED = {
+    # Bredvid den nyaste videon: kanal A och B, en spellista och en livesändning (hoppas över).
+    "abcdefghijk": [
+        lockup("rel00000001", "Förslag 1", "Kanal A", CH_A),
+        lockup("rel00000002", "Förslag 2", "Kanal B", CH_B, link_channel=False),
+        lockup("RDabcdefghi", "Mix", "YouTube", CH_A, kind="LOCKUP_CONTENT_TYPE_PLAYLIST"),
+        lockup("live0000001", "Live nu", "Kanal A", CH_A, live=True),
+        lockup("rel00000003", "Förslag 3", "Kanal B", CH_B, views="12K views", ago="1 year ago"),
+        compact("cmp00000001", "Gammalt format", "Kanal A", CH_A),
+        lockup("rel00000004", "Förslag 4", "Kanal A", CH_A),
+        lockup("olderolder1", "Äldre video", "Testkanalen", "UCabcdefghijklmnopqrstuv"),
+    ],
+    # Bredvid den äldre: förslag 3 igen (då hamnar den först) och några till.
+    "olderolder1": [
+        lockup("rel00000003", "Förslag 3", "Kanal B", CH_B, views="12K views", ago="1 year ago"),
+        lockup("rel00000005", "Förslag 5", "Kanal A", CH_A),
+        lockup("rel00000006", "Förslag 6", "Kanal B", CH_B),
+        lockup("rel00000007", "Förslag 7", "Kanal A", CH_A),
+    ],
+}
+
+
+def next_response(vid):
+    items = RELATED.get(vid, [])
+    return {
+        "contents": {"twoColumnWatchNextResults": {
+            "results": {"results": {"contents": [{"videoPrimaryInfoRenderer": {"title": {"runs": [{"text": "Videon"}]}}}]}},
+            "secondaryResults": {"secondaryResults": {"results": [
+                {"itemSectionRenderer": {"contents": items + [{"continuationItemRenderer": {"trigger": "CONTINUATION_TRIGGER_ON_ITEM_SHOWN"}}]}}]}},
+        }},
+        # Slutskärmen räknas inte som förslag.
+        "playerOverlays": {"playerOverlayRenderer": {"endScreen": {"watchNextEndScreenRenderer": {"results": [
+            {"endScreenVideoRenderer": {"videoId": "endscreen01"}}, {"compactVideoRenderer": {"videoId": "endscreen02", "title": {"simpleText": "x"}}}]}}}},
+    }
 
 
 def make_media(directory: str) -> None:
@@ -87,10 +167,18 @@ def fake_youtube(media: str, log: list) -> web.Application:
     async def sub(_):
         return web.Response(text=VTT, content_type="text/vtt")
 
+    async def watch_next(req):
+        body = await req.json()
+        log.append(("next", body.get("videoId"), body["context"]["client"].get("hl")))
+        if body.get("videoId") == "failfailfai":
+            return web.Response(status=500, text="nej")
+        return web.json_response(next_response(body.get("videoId")))
+
     app.router.add_get("/media/{name}", media_file)
     app.router.add_get("/rss/{cid}", rss)
     app.router.add_get("/sb/api/skipSegments/{prefix}", sponsor)
     app.router.add_get("/sub.vtt", sub)
+    app.router.add_post("/youtubei/v1/next", watch_next)
     return app
 
 
@@ -129,6 +217,40 @@ class ParseTest(unittest.TestCase):
         subs = pick_subtitles(info)
         self.assertEqual([(s["lang"], s["name"]) for s in subs], [("sv", "Svenska"), ("en", "Engelska (automatisk)")])
 
+    def test_related(self):
+        items = parse_related(next_response("abcdefghijk"))
+        ids = [i["id"] for i in items]
+        # Spellistan och slutskärmen räknas inte; livesändningen markeras.
+        self.assertEqual(ids, ["rel00000001", "rel00000002", "live0000001", "rel00000003", "cmp00000001", "rel00000004", "olderolder1"])
+        first = items[0]
+        self.assertEqual((first["title"], first["channel"], first["channelId"]), ("Förslag 1", "Kanal A", CH_A))
+        self.assertEqual((first["views"], first["duration"]), (1_200_000, 754))
+        self.assertAlmostEqual(first["published"] / 1000, time.time() - 3 * 86400, delta=60)
+        self.assertEqual(first["thumb"], "https://i.ytimg.com/vi/rel00000001/hqdefault.jpg?sqp=big")
+        self.assertEqual(first["avatar"], f"https://yt3.ggpht.com/{CH_A}=s68")
+        # Kanal utan länk i texten: id:t tas från profilbilden.
+        self.assertEqual((items[1]["channel"], items[1]["channelId"]), ("Kanal B", CH_B))
+        self.assertTrue(items[2]["live"])
+        old = items[4]
+        self.assertEqual((old["channel"], old["channelId"], old["views"], old["duration"]), ("Kanal A", CH_A, 1234, 3723))
+        self.assertEqual(old["avatar"], f"https://yt3.ggpht.com/{CH_A}=s68")
+        self.assertEqual(parse_related({}), [])
+
+    def test_counts_and_times(self):
+        self.assertEqual(parse_count("1.2M views"), 1_200_000)
+        self.assertEqual(parse_count("12K views"), 12_000)
+        self.assertEqual(parse_count("1,234,567 views"), 1_234_567)
+        self.assertEqual(parse_count("1 view"), 1)
+        self.assertEqual(parse_count("No views"), 0)
+        self.assertEqual(parse_count("2.5B views"), 2_500_000_000)
+        self.assertIsNone(parse_count(""))
+        now = 1_800_000_000
+        self.assertEqual(parse_ago("3 years ago", now), (now - 3 * 31536000) * 1000)
+        self.assertEqual(parse_ago("Streamed 2 weeks ago", now), (now - 2 * 604800) * 1000)
+        self.assertEqual(parse_ago("1 day ago", now), (now - 86400) * 1000)
+        self.assertIsNone(parse_ago("igår", now))
+        self.assertEqual((parse_clock("12:34"), parse_clock("1:02:03"), parse_clock("LIVE")), (754, 3723, None))
+
     def test_parse_index_needs_more(self):
         self.assertIsNone(parse_index(b"\x00\x00\x00\x08moof"))
         head = b"\x00\x00\x00\x10ftypisom\x00\x00\x00\x00" + b"\x00\x00\x10\x00sidx"
@@ -153,6 +275,7 @@ class YouTubeApiTest(unittest.IsolatedAsyncioTestCase):
             "FAKE_YT_BASE": base,
             "JPTV_YT_RSS": base + "/rss/{}",
             "JPTV_SPONSORBLOCK": base + "/sb",
+            "JPTV_YT_API": base,
         }
         self.saved_env = {k: os.environ.get(k) for k in self.env}
         os.environ.update(self.env)
@@ -218,13 +341,82 @@ class YouTubeApiTest(unittest.IsolatedAsyncioTestCase):
     async def test_search_and_channel(self):
         res = await self.get_json("/api/yt/search?q=test")
         self.assertEqual(len(res["videos"]), 5)  # utan short
+        # Datum ("för 1 dag sedan") och visningar finns i sökträffarna.
+        self.assertEqual(res["videos"][0]["published"], (1760000000 - 86400) * 1000)
+        self.assertEqual(res["videos"][0]["views"], 1000)
         self.assertEqual(res["channels"][0]["id"], CID)
         self.assertEqual(res["channels"][0]["avatar"], "https://yt3.ggpht.com/avatar=s88")
         ch = await self.get_json(f"/api/yt/channel/{CID}")
         self.assertEqual((ch["name"], ch["subscribed"]), ("Testkanalen", False))
         self.assertEqual(ch["avatar"], "https://yt3.googleusercontent.com/avatar=s900")
-        self.assertEqual(len(ch["videos"]), 3)
+        self.assertEqual(len(ch["videos"]), 4)
+        # Exakt datum ur RSS-flödet för den som finns där, ungefärligt för resten.
+        rss = {v["id"]: v for v in parse_rss(RSS, CID)[1]}
+        self.assertEqual(ch["videos"][0]["published"], rss["abcdefghijk"]["published"])
+        self.assertEqual(ch["videos"][1]["published"], (1760000000 - 86400) * 1000)
         await self.get("/api/yt/channel/inte-en-kanal", status=404)
+
+    async def test_recommendations(self):
+        y = self.app[jptv.JPTV]["youtube"]
+        # Ingenting sett och inga kanaler: tomt, men inget fel.
+        recs = await self.get_json("/api/yt/recommended")
+        self.assertEqual((recs["recommended"], recs["because"], recs["channels"]), ([], [], []))
+
+        await self.post("/api/yt/subs", {"id": CID, "name": "Testkanalen"})
+        # Bara prenumeration: förslagen utgår från nya videor i flödet.
+        recs = await self.get_json("/api/yt/recommended")
+        self.assertEqual(recs["seeds"], 0)
+        self.assertIn("rel00000001", [v["id"] for v in recs["recommended"]])
+        self.assertEqual(recs["because"], [])
+
+        # Sett två videor (uppgifterna om videon fylls i av servern).
+        await self.get_json(f"/api/yt/video/{VID}")
+        await self.post("/api/yt/progress", {"id": VID, "pos": 590, "dur": 600})
+        await self.post("/api/yt/progress", {"id": "olderolder1", "pos": 400, "dur": 410, "title": "Äldre video", "channelId": CID})
+        hist = (await self.get_json("/api/yt/history"))["videos"]
+        self.assertEqual([v["id"] for v in hist], ["olderolder1", VID])
+        self.assertEqual((hist[1]["title"], hist[1]["views"], hist[1]["published"]), ("Testvideo", 4242, 1760000000 * 1000))
+
+        recs = await self.get_json("/api/yt/recommended")
+        ids = [v["id"] for v in recs["recommended"]]
+        # Föreslås från båda hållen: först. Sett, live och spellistor: inte med.
+        self.assertEqual(ids[0], "rel00000003")
+        for gone in (VID, "olderolder1", "live0000001", "RDabcdefghi"):
+            self.assertNotIn(gone, ids)
+        self.assertIn("cmp00000001", ids)
+        self.assertEqual(recs["seeds"], 2)
+        self.assertEqual(recs["because"][0]["seed"], {"id": "olderolder1", "title": "Äldre video"})
+        # Kanaler man inte prenumererar på men som föreslås ofta.
+        self.assertEqual({c["id"] for c in recs["channels"]}, {CH_A, CH_B})
+        self.assertTrue(all(c["avatar"] for c in recs["channels"]))
+        # Frågat på engelska (för att kunna läsa "3 days ago").
+        self.assertIn(("next", VID, "en"), self.log)
+
+        # Inte intresserad, och dölj kanal B.
+        await self.post("/api/yt/dismiss", {"id": "rel00000001"})
+        await self.post("/api/yt/block", {"id": CH_B, "name": "Kanal B"})
+        recs = await self.get_json("/api/yt/recommended")
+        ids = [v["id"] for v in recs["recommended"]]
+        self.assertNotIn("rel00000001", ids)
+        self.assertFalse([v for v in recs["recommended"] if v["channelId"] == CH_B])
+        self.assertEqual([c["id"] for c in recs["channels"]], [CH_A])
+        self.assertEqual((await self.get_json("/api/yt/status"))["blocked"], [{"id": CH_B, "name": "Kanal B"}])
+        r = await self.client.delete(f"/api/yt/block/{CH_B}")
+        self.assertEqual((await r.json())["blocked"], [])
+
+        # YouTubes förslag går inte att hämta: sökning på titeln i stället.
+        await self.post("/api/yt/progress", {"id": "failfailfai", "pos": 300, "dur": 300, "title": "Något helt annat"})
+        recs = await self.get_json("/api/yt/recommended")
+        self.assertIn("vid00000001", [v["id"] for v in recs["recommended"]])
+        self.assertEqual(y.recs_stats["search"], 1)
+
+        # Historiken: ta bort en, sedan allt.
+        r = await self.client.delete("/api/yt/history/failfailfai")
+        self.assertEqual(len((await r.json())["videos"]), 2)
+        r = await self.client.delete("/api/yt/history")
+        self.assertEqual((await r.json())["removed"], 2)
+        self.assertEqual((await self.get_json("/api/yt/history"))["videos"], [])
+        await self.post("/api/yt/dismiss", {"id": "nej"}, status=400)
 
     async def test_video_hls_and_proxy(self):
         v = await self.get_json(f"/api/yt/video/{VID}")
@@ -286,6 +478,7 @@ class YouTubeApiTest(unittest.IsolatedAsyncioTestCase):
         await self.get("/yt/inte-giltigt/master.m3u8", status=404)
         ok = await self.post("/api/yt/test")
         self.assertIn("fungerar", ok["ok"])
+        self.assertIn("YouTubes förslag", ok["ok"])
 
     async def test_import(self):
         text = json.dumps({"subscriptions": [{"url": f"https://www.youtube.com/channel/{CID}", "name": "Testkanalen"}]})

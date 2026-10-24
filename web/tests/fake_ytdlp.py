@@ -14,13 +14,18 @@ CID = "UCabcdefghijklmnopqrstuv"
 OTHER = "UCzyxwvutsrqponmlkjihgfe"
 
 
-def video_entry(i: int, short: bool = False) -> dict:
-    vid = f"vid{i:08d}"
+APPROX = False  # sätts av --extractor-args youtubetab:approximate_date, som riktiga yt-dlp
+
+
+def video_entry(i: int, short: bool = False, vid: str | None = None) -> dict:
+    vid = vid or f"vid{i:08d}"
     return {
         "_type": "url", "ie_key": "Youtube", "id": vid, "title": f"Video {i}",
         "url": f"https://www.youtube.com/{'shorts/' if short else 'watch?v='}{vid}",
         "channel": "Testkanalen", "channel_id": CID, "duration": 600 + i, "view_count": 1000 * i,
         "thumbnails": [{"url": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg", "width": 480, "height": 360}],
+        # Ungefärligt datum ("för i dagar sedan") bara när det efterfrågas.
+        "timestamp": 1760000000 - i * 86400 if APPROX else None,
     }
 
 
@@ -59,7 +64,9 @@ def info(vid: str) -> dict:
 
 
 def main() -> int:
+    global APPROX
     args = sys.argv[1:]
+    APPROX = any(a == "youtubetab:approximate_date" for a in args)
     if "--version" in args:
         print("2099.01.01")
         return 0
@@ -82,7 +89,8 @@ def main() -> int:
                 {"url": "https://yt3.googleusercontent.com/banner=w1060", "width": 1060, "height": 175, "id": "banner"},
                 {"url": "https://yt3.googleusercontent.com/avatar=s900", "width": 900, "height": 900, "id": "avatar_uncropped"},
             ],
-            "entries": [video_entry(i) for i in range(1, 4)],
+            # Den första finns också i RSS-flödet (där med exakt datum).
+            "entries": [video_entry(0, vid="abcdefghijk")] + [video_entry(i) for i in range(1, 4)],
         }
     elif "watch?v=" in url:
         vid = url.split("v=", 1)[1]

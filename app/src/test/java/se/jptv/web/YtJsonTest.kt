@@ -21,6 +21,33 @@ class YtJsonTest {
         {"id": "abcdefghijk", "title": "Testvideo", "channel": "Testkanalen", "channelId": "UCabcdefghijklmnopqrstuv", "description": "En video för testerna.", "duration": 12, "views": 4242, "likes": 42, "published": 1760000000000, "thumb": "https://i.ytimg.com/vi/abcdefghijk/maxresdefault.jpg", "chapters": [{"title": "Början", "start": 0.0, "end": 6.0}, {"title": "Slutet", "start": 6.0, "end": 12.0}], "sponsor": [{"start": 2.0, "end": 4.5, "category": "sponsor"}], "subtitles": [{"lang": "sv", "name": "Svenska"}], "hls": "/yt/abcdefghijk/master.m3u8", "position": 125.5, "subscribed": true, "maxHeight": 180}
     """.trimIndent()
 
+    private val recs = """
+        {"recommended": [{"id": "rel00000001", "title": "Förslag 1", "channel": "Kanal A", "channelId": "UCaaaaaaaaaaaaaaaaaaaaaa", "avatar": "https://yt3.ggpht.com/UCaaaaaaaaaaaaaaaaaaaaaa=s68", "duration": 754, "views": 1200000, "published": 1792583305640, "thumb": "https://i.ytimg.com/vi/rel00000001/hqdefault.jpg?sqp=big", "live": false, "short": false}, {"id": "rel00000005", "title": "Förslag 5", "channel": "Kanal A", "channelId": "UCaaaaaaaaaaaaaaaaaaaaaa", "avatar": null, "duration": 754, "views": 1200000, "published": 1792583314229, "thumb": "https://i.ytimg.com/vi/rel00000005/hqdefault.jpg?sqp=big", "live": false, "short": false}],
+         "because": [{"seed": {"id": "abcdefghijk", "title": "Testvideo"}, "videos": [{"id": "rel00000001", "title": "Förslag 1", "channel": "Kanal A", "channelId": "UCaaaaaaaaaaaaaaaaaaaaaa", "duration": 754, "views": 1200000, "published": 1792583305640, "thumb": "https://i.ytimg.com/vi/rel00000001/hqdefault.jpg?sqp=big", "live": false, "short": false}]},
+                     {"seed": {"id": "tomtomtomto", "title": "Tom rad"}, "videos": []}],
+         "channels": [{"id": "UCaaaaaaaaaaaaaaaaaaaaaa", "name": "Kanal A", "avatar": "https://yt3.ggpht.com/UCaaaaaaaaaaaaaaaaaaaaaa=s68", "videos": 5, "subscribed": false}],
+         "seeds": 2}
+    """.trimIndent()
+
+    @Test
+    fun forslagen() {
+        val r = YtJson.recs(JSONObject(recs))
+        assertEquals(listOf("rel00000001", "rel00000005"), r.recommended.map { it.id })
+        assertEquals(754_000L, r.recommended[0].durationMs)
+        assertEquals(1_200_000L, r.recommended[0].views)
+        assertEquals(1792583305640L, r.recommended[0].published)
+        // Rader utan videor visas inte.
+        assertEquals(1, r.because.size)
+        assertEquals("Testvideo", r.because[0].seedTitle)
+        assertEquals("Kanal A", r.channels[0].name)
+        assertFalse(r.channels[0].subscribed)
+        assertEquals(2, r.seeds)
+        // Tomt svar (inget sett, inga kanaler).
+        val empty = YtJson.recs(JSONObject("""{"recommended": [], "because": [], "channels": [], "seeds": 0}"""))
+        assertTrue(empty.recommended.isEmpty() && empty.because.isEmpty() && empty.channels.isEmpty())
+        assertEquals("1 visning", YtJson.views(1))
+    }
+
     @Test
     fun hemmet() {
         val h = YtJson.home(JSONObject(home))

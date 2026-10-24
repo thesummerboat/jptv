@@ -680,10 +680,66 @@ async def yt_unsubscribe(request: web.Request):
 async def yt_progress(request: web.Request):
     b = await body(request)
     try:
-        p = yt(request).data.set_progress(str(b.get("id") or ""), float(b.get("pos") or 0), float(b.get("dur") or 0), b)
+        p = yt(request).save_progress(str(b.get("id") or ""), float(b.get("pos") or 0), float(b.get("dur") or 0), b)
     except (ValueError, TypeError) as e:
         return web.json_response({"error": str(e)}, status=400)
     return web.json_response({"progress": p})
+
+
+@routes.get("/api/yt/recommended")
+async def yt_recommended(request: web.Request):
+    """Startsidans förslag (räknas här av YouTubes förslag bredvid det man har sett)."""
+    return web.json_response(await yt(request).recommendations(fresh=request.query.get("fresh") == "1"))
+
+
+@routes.get("/api/yt/history")
+async def yt_history(request: web.Request):
+    return web.json_response({"videos": yt(request).data.history()})
+
+
+@routes.delete("/api/yt/history/{id}")
+async def yt_forget(request: web.Request):
+    y = yt(request)
+    y.data.forget(_video_id(request))
+    return web.json_response({"videos": y.data.history()})
+
+
+@routes.delete("/api/yt/history")
+async def yt_forget_all(request: web.Request):
+    y = yt(request)
+    n = y.data.forget()
+    y.invalidate_recs()
+    return web.json_response({"removed": n, "videos": []})
+
+
+@routes.post("/api/yt/dismiss")
+async def yt_dismiss(request: web.Request):
+    """Inte intresserad: videon föreslås inte igen."""
+    b = await body(request)
+    try:
+        yt(request).data.dismiss(str(b.get("id") or ""))
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    return web.json_response({"ok": True})
+
+
+@routes.post("/api/yt/block")
+async def yt_block(request: web.Request):
+    """Föreslå inte den här kanalen."""
+    b = await body(request)
+    y = yt(request)
+    try:
+        y.data.block(str(b.get("id") or ""), str(b.get("name") or ""))
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    return web.json_response({"blocked": y.data.blocked})
+
+
+@routes.delete("/api/yt/block/{id}")
+async def yt_unblock(request: web.Request):
+    y = yt(request)
+    y.data.unblock(request.match_info["id"])
+    return web.json_response({"blocked": y.data.blocked})
 
 
 @routes.post("/api/yt/import")
@@ -1045,6 +1101,8 @@ def create_app(config_dir: str | None = None) -> web.Application:
         state["imdb"].cancel()
         for t in state.get("yt_tasks", []):
             t.cancel()
+        if "youtube" in state:
+            state["youtube"].close()
         await state["live"].stop()
         await state["http"].close()
 

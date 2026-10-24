@@ -591,6 +591,40 @@ input.search-input { width: 100%; font-size: 22px; padding: 14px 18px; border-ra
 .yt-chan-head { display: flex; align-items: center; gap: 22px; margin-bottom: 8px; }
 .yt-chan-head h1 { font-size: 28px; margin: 0; }
 .yt-desc { margin-top: 6px; max-width: 800px; white-space: pre-line; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.yt-head h1 a { color: inherit; }
+.yt-tabs { margin-left: auto; }
+@media (max-width: 700px) { .yt-tabs { margin-left: 0; } }
+.yt-page .yt-row h2 { margin: 18px 0 2px; font-size: 17px; }
+.yt-h2-link { display: inline-flex; align-items: baseline; gap: 14px; }
+.yt-h2-link a:hover { color: var(--text); }
+.yt-because { display: inline-block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.yt-because q { color: var(--accent); quotes: "”" "”"; }
+.yt-recs { margin-bottom: 8px; }
+.yt-more { display: block; margin: 18px auto 0; }
+.yt-welcome { padding: 40px 20px; max-width: 640px; margin: 0 auto; }
+.yt-text { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 4px; align-items: start; }
+.yt-text > :not(.yt-menu-btn) { grid-column: 1; }
+.yt-menu-btn {
+  grid-column: 2; grid-row: 1 / span 3; width: 30px; height: 30px; margin: -4px -6px 0 0; border: 0; border-radius: 50%;
+  background: transparent; color: var(--dim); display: grid; place-items: center; cursor: pointer; opacity: 0; transition: opacity 0.15s;
+}
+.yt-menu-btn .ico { width: 18px; height: 18px; }
+.yt-card:hover .yt-menu-btn, .yt-card:focus-within .yt-menu-btn, .yt-menu-btn[aria-expanded="true"] { opacity: 1; }
+.yt-menu-btn:hover, .yt-menu-btn[aria-expanded="true"] { background: rgba(255, 255, 255, 0.12); color: var(--text); }
+@media (hover: none) { .yt-menu-btn { opacity: 1; } }
+.yt-menu { position: fixed; z-index: 1000; min-width: 230px; max-width: 320px; background: var(--high); border-radius: 10px; padding: 6px; box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55); }
+.yt-menu button { display: block; width: 100%; text-align: left; padding: 9px 12px; border: 0; border-radius: 6px; background: none; color: var(--text); font: inherit; font-size: 14px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.yt-menu button:hover, .yt-menu button:focus-visible { background: rgba(255, 255, 255, 0.1); outline: none; }
+.yt-card { transition: opacity 0.25s, transform 0.25s; }
+.yt-card.yt-gone { opacity: 0; transform: scale(0.92); pointer-events: none; }
+.strip.yt-suggests { gap: 14px; }
+.yt-suggest { flex: 0 0 150px; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 8px; border-radius: 12px; background: var(--surface); text-align: center; }
+.yt-suggest:hover { background: var(--high); }
+.yt-suggest .yt-chan-name { margin-top: 2px; }
+.yt-suggest .btn { margin-top: 4px; }
+.strip.yt-chans { gap: 18px; }
+.yt-history-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
+.yt-history-head p { margin: 0; max-width: 720px; }
 .field.check { display: flex; align-items: center; gap: 10px; }
 .field.check input { width: auto; }
 .p-chap { position: absolute; top: -1px; bottom: -1px; width: 3px; margin-left: -1px; background: rgba(14, 17, 22, 0.9); z-index: 2; }

@@ -360,7 +360,8 @@ internal fun YouTubePlayer(vm: AppViewModel, request: PlayRequest.YouTube) {
             )
             VodControls(
                 title = v.title,
-                subtitle = v.channel,
+                subtitle = listOfNotNull(v.channel.takeIf { it.isNotBlank() }, se.jptv.web.YtJson.views(v.views), se.jptv.web.YtJson.ago(v.published))
+                    .joinToString(" · "),
                 scrubTarget = scrubTarget,
                 preview = null,
                 position = position,

@@ -635,8 +635,10 @@
     P.yt = v;
     P.duration = v.duration || 0;
     P.skipped = new Set();
+    const meta = [JP.viewCount(v.views), JP.ago(v.published)].filter(Boolean).join(' · ');
     ui.title.replaceChildren(h('div', { class: 'p-title-main' }, v.title),
-      h('div', { class: 'p-title-sub' }, h('a', { href: '#/youtube/channel/' + v.channelId, onclick: (e) => { e.preventDefault(); JP.playerReturn = null; location.hash = '#/youtube/channel/' + v.channelId; } }, v.channel)));
+      h('div', { class: 'p-title-sub' }, h('a', { href: '#/youtube/channel/' + v.channelId, onclick: (e) => { e.preventDefault(); JP.playerReturn = null; location.hash = '#/youtube/channel/' + v.channelId; } }, v.channel),
+        meta ? ' · ' + meta : null));
     const start = opts.fromStart ? 0 : v.position > 0 && v.position < v.duration - 20 ? v.position : 0;
     P.stream = JP.attachHls(ui.video, v.hls, {
       start,
