@@ -25,8 +25,13 @@ DEFAULTS = {
     # Radarr/Sonarr: godkända önskemål skickas dit (valfritt).
     "radarr_url": "",
     "radarr_key": "",
+    # Tomt = standard i arr.DEFAULTS (/data/Filmer, HD-1080p / /data/Serier, HD - 720p/1080p).
+    "radarr_root": "",
+    "radarr_profile": "",
     "sonarr_url": "",
     "sonarr_key": "",
+    "sonarr_root": "",
+    "sonarr_profile": "",
     "recent": [],
 }
 
