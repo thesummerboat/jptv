@@ -10,7 +10,8 @@
     declined: 'Nej',
   };
 
-  const poster = (path, w = 240, hh = 360) => (path ? JP.img(path, w, hh) : null);
+  // Affischer från Upptäck är TMDB-adresser (via servern); övriga från Plex katalog.
+  const poster = (path, w = 240, hh = 360) => (!path ? null : /image\.tmdb\.org/.test(path) && JP.tmdbImg ? JP.tmdbImg(path, w > 200 ? 'w342' : 'w185') : JP.img(path, w, hh));
 
   /** Vem som önskar: frågas en gång och sparas i webbläsaren. */
   JP.wisher = () => JP.store.get('name', '');
@@ -132,7 +133,10 @@
     const found = h('div');
     const list = h('div', { class: 'wish-list' }, JP.spinner());
     const head = h('div', { class: 'dim wish-arr' });
-    v.el.append(h('div', { class: 'page narrow wide-ish' }, h('div', { class: 'section-title' }, h('h1', null, 'Önskemål')), head, input, found, list));
+    // Med TMDB söker man i sidhuvudet (Upptäck); annars i Plex katalog här.
+    const tmdb = JP.status && JP.status.tmdb;
+    v.el.append(h('div', { class: 'page narrow wide-ish' }, JP.wishHead ? JP.wishHead('requests') : h('div', { class: 'section-title' }, h('h1', null, 'Önskemål')),
+      head, tmdb ? null : input, found, list));
 
     let token = 0;
     input.addEventListener('input', JP.debounce(() => {

@@ -343,7 +343,9 @@ JP.overlayRoute = function (path, query) {
 JP.updateNav = function (path) {
   for (const a of document.querySelectorAll('#nav a')) {
     const target = a.getAttribute('href').replace(/^#/, '');
-    const active = target === '/' ? path === '/' : path === target || path.startsWith(target + '/');
+    const also = (a.dataset.also || '').split(' ').filter(Boolean);
+    const active = target === '/' ? path === '/'
+      : [target, ...also].some((t) => path === t || path.startsWith(t + '/'));
     a.classList.toggle('active', active);
   }
 };
@@ -362,7 +364,7 @@ JP.buildNav = function () {
     nav.append(h('a', { href: '#/guide' }, 'TV-guide'));
   }
   if (st.plex) {
-    nav.append(h('a', { href: '#/requests' }, 'Önskemål', h('span', { class: 'nav-badge', hidden: !st.requests }, st.requests || '')));
+    nav.append(h('a', { href: st.tmdb ? '#/discover' : '#/requests', 'data-also': '/requests /discover' }, 'Önskemål', h('span', { class: 'nav-badge', hidden: !st.requests }, st.requests || '')));
   }
 };
 

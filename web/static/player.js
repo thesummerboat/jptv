@@ -443,7 +443,7 @@
   }
   window.addEventListener('pagehide', () => {
     if (P.mode === 'plex') stopPlex(true);
-    if (P.mode === 'yt' && P.yt) JP.beacon('/api/yt/progress', ytBody());
+    if (P.mode === 'yt' && P.yt && !P.ytTrailer) JP.beacon('/api/yt/progress', ytBody());
   });
 
   /* ---------- Om videon och kommentarer (YouTube) ---------- */
@@ -729,7 +729,7 @@
   }
 
   function ytReport(pos) {
-    if (P.mode !== 'yt' || !P.yt) return;
+    if (P.mode !== 'yt' || !P.yt || P.ytTrailer) return;
     JP.post('/api/yt/progress', ytBody(pos)).catch(() => {});
   }
 
@@ -829,9 +829,11 @@
     showControls();
   }
 
+  /** opts.trailer: en trailer (Upptäck) – sparas inte i historiken och ger inga förslag. */
   JP.playYt = function (id, opts = {}) {
     JP.playerReturn = location.hash || '#/youtube';
-    location.hash = '#/yt/' + id + (opts.fromStart ? '?start=0' : '');
+    const q = [opts.fromStart ? 'start=0' : null, opts.trailer ? 'trailer=1' : null].filter(Boolean).join('&');
+    location.hash = '#/yt/' + id + (q ? '?' + q : '');
   };
 
   JP.overlay(/^\/yt\/([0-9A-Za-z_-]{11})$/, ([id], q) => {
@@ -840,7 +842,8 @@
     ui.title.replaceChildren();
     ui.played.style.width = '0%';
     ui.time.textContent = '';
-    loadYt(id, { fromStart: q.get('start') === '0' });
+    P.ytTrailer = q.get('trailer') === '1';
+    loadYt(id, { fromStart: q.get('start') === '0' || P.ytTrailer });
   }, closeShell);
 
   /* ---------- öppna och stänga ---------- */

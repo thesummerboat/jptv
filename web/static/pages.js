@@ -391,6 +391,31 @@
     // Radarr och Sonarr: godkända önskemål skickas dit.
     const arrBox = h('section', { class: 'card-box' }, h('h2', null, 'Önskemål'),
       h('p', { class: 'dim' }, 'Önskade filmer och serier hamnar under Önskemål. Med Radarr (filmer) och Sonarr (serier) skickar OK titeln dit direkt; adressen och API-nyckeln finns i respektive app under Settings → General. Utan dem markerar OK bara önskemålet. Titeln läggs till med kvalitetsprofilen och rotmappen nedan och söks direkt; finns profilen eller mappen inte stoppar JPTV hellre än att gissa.'));
+    // TMDB: Upptäck (trendande, populärt, kommande …) som i Seerr.
+    {
+      const key = h('input', { type: 'password', value: '', placeholder: s.tmdbKey ? 'Sparad – skriv en ny för att byta' : 'API-nyckel eller läs-token', autocomplete: 'off' });
+      const state = h('span', { class: 'dim small' });
+      arrBox.append(
+        h('h3', { class: 'box-sub' }, 'Upptäck (TMDB)'),
+        h('p', { class: 'dim small' }, 'Trendande, populära och kommande filmer och serier, som i Seerr. Kräver en gratis nyckel: konto på themoviedb.org → Inställningar → API → "API-nyckel" eller "API Read Access Token".'),
+        h('div', { class: 'arr-row' }, field('TMDB – nyckel', key)),
+        h('div', { class: 'actions' },
+          h('button', { class: 'btn small', onclick: async () => {
+            await save({ tmdbKey: key.value });
+            key.value = '';
+            key.placeholder = 'Sparad – skriv en ny för att byta';
+            state.textContent = 'Testar …';
+            try {
+              state.textContent = '✓ ' + (await JP.post('/api/tmdb/test')).ok;
+              JP.status.tmdb = true;
+              JP.buildNav();
+              JP.updateNav(JP.parseHash().path);
+            } catch (e) { state.textContent = e.message; }
+          } }, 'Spara och testa'),
+          s.tmdbKey ? h('button', { class: 'btn ghost small', onclick: async () => { await save({ tmdbKey: '-' }, 'TMDB-nyckeln borttagen'); JP.status.tmdb = false; JP.buildNav(); state.textContent = ''; } }, 'Ta bort') : null,
+          state),
+        h('h3', { class: 'box-sub' }, 'Radarr och Sonarr'));
+    }
     for (const [kind, label] of [['radarr', 'Radarr'], ['sonarr', 'Sonarr']]) {
       const url = h('input', { type: 'text', value: s[kind + 'Url'] || '', placeholder: kind === 'radarr' ? 'http://192.168.x.x:7878' : 'http://192.168.x.x:8989', spellcheck: 'false' });
       const key = h('input', { type: 'password', value: '', placeholder: s[kind + 'Key'] ? 'Sparad – skriv en ny för att byta' : 'API-nyckel', autocomplete: 'off' });

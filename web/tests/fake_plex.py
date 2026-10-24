@@ -72,7 +72,7 @@ def build() -> None:
             "Genre": [{"tag": g} for g in genres], "Director": [{"tag": ["Anna Lund", "Erik Holm", "Sara Nyberg"][i % 3]}],
             "Role": [{"tag": n, "role": r} for n, r in [("Lisa Ek", "Maja"), ("Johan Berg", "Nils"), ("Karin Sjö", "Eva"), ("Per Ström", "Olle")]],
             "Rating": [{"image": "imdb://image.rating", "value": rating, "type": "audience"}, {"image": "rottentomatoes://image.rating.ripe", "value": min(10, rating + 1.1), "type": "critic"}],
-            "Guid": [{"id": f"imdb://tt{1000000 + i}"}],
+            "Guid": [{"id": f"imdb://tt{1000000 + i}"}, {"id": f"tmdb://{500 + i}"}],
             "Media": [{"videoResolution": "4k" if i % 4 == 0 else "1080", "audioChannels": 6, "videoCodec": "hevc" if i % 4 == 0 else "h264", "audioCodec": "eac3",
                        "Part": [{"id": int(k) * 10, "key": f"/library/parts/{k}/file.mkv", "container": "mkv",
                                  "Stream": [{"id": 1, "streamType": 1, "codec": "h264", "height": 2160 if i % 4 == 0 else 1080, "colorTrc": "smpte2084" if i % 4 == 0 else None},
@@ -87,6 +87,7 @@ def build() -> None:
         sk = nk()
         show = {
             "ratingKey": sk, "key": f"/library/metadata/{sk}/children", "type": "show", "title": title, "titleSort": title, "year": year, "guid": f"plex://show/s{sk}",
+            "Guid": [{"id": f"tmdb://{900 + i}"}],
             "summary": SUMMARY, "thumb": f"/library/metadata/{sk}/thumb/1", "art": f"/library/metadata/{sk}/art/1", "librarySectionID": 2,
             "contentRating": "15", "addedAt": NOW - i * 86400 * 2, "childCount": nseasons, "leafCount": nseasons * 6,
             "viewedLeafCount": 8 if i in (0, 1, 3) else 0, "theme": f"/library/metadata/{sk}/theme/1",

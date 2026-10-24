@@ -22,6 +22,8 @@ from .plex import QUALITIES, Plex, PlexError, metadata_list, public, slim
 from .store import Store
 from .tv import Iptv
 from .wishes import Wishes
+from .tmdb import IMG_RE, Tmdb, TmdbError, img_base
+from .tmdb import guid as tmdb_guid
 from .youtube import CHANNEL_RE, IMAGE_HOSTS, VIDEO_RE, YouTube, YtError, parse_import, subtitle_playlist
 
 VERSION = os.environ.get("JPTV_VERSION", "dev")
@@ -75,6 +77,8 @@ async def status(request: web.Request):
             "plex": bool(server),
             # Klienterna (TV:n) ser om den här versionen har YouTube.
             "youtube": True,
+            # Upptäck (TMDB) har en nyckel.
+            "tmdb": c["tmdb"].configured,
             "server": server and {"name": server.get("name"), "uri": server.get("uri")},
             "iptv": c["iptv"].status(),
             "live": c["live"].status(),
@@ -104,6 +108,7 @@ def settings_public(c: dict) -> dict:
         "sonarrKey": bool(st.get("sonarr_key")),
         "sonarrRoot": st.get("sonarr_root", "") or ARR_DEFAULTS["sonarr"]["root"],
         "sonarrProfile": st.get("sonarr_profile", "") or ARR_DEFAULTS["sonarr"]["profile"],
+        "tmdbKey": bool(st.get("tmdb_key")),
         "youtubeMaxHeight": int(st.get("youtube_max_height", 1080) or 1080),
         "youtubeShorts": bool(st.get("youtube_shorts", False)),
     }
@@ -133,6 +138,12 @@ async def save_settings(request: web.Request):
             changes[f"{kind}_key"] = ""
         elif key:
             changes[f"{kind}_key"] = key
+    # TMDB-nyckeln som Radarr/Sonarr: visas aldrig igen; tom = behåll, "-" = ta bort.
+    tkey = str(b.get("tmdbKey") or "").strip()
+    if tkey == "-":
+        changes["tmdb_key"] = ""
+    elif tkey:
+        changes["tmdb_key"] = tkey
     if "themeLevel" in b:
         changes["theme_level"] = max(0, min(int(b["themeLevel"]), 2))
     if "youtubeMaxHeight" in b and int(b["youtubeMaxHeight"]) in (480, 720, 1080):
@@ -444,6 +455,121 @@ async def discover(request: web.Request):
     return web.json_response({"results": out})
 
 
+# ------------------------------------------------------------------ Upptäck (TMDB)
+
+
+def _tmdb_error(e: TmdbError) -> web.Response:
+    return web.json_response({"error": str(e)}, status=e.status if e.status in (400, 401, 404, 429) else 502)
+
+
+async def _annotate(c: dict, items: list[dict], library: dict | None = None) -> list[dict]:
+    """Finns i Plex? Önskad? (samma nyckel tmdb://movie/603 i biblioteket och önskemålen)."""
+    if library is None:
+        library = await c["library"].guid_map()
+    for it in items:
+        g = tmdb_guid(it["type"], it["tmdb"])
+        it["libraryKey"] = library.get(g)
+        w = c["wishes"].find(g)
+        it["request"] = {"id": w["id"], "status": w["status"]} if w else None
+    return items
+
+
+@routes.get("/api/tmdb/home")
+async def tmdb_home(request: web.Request):
+    c = ctx(request)
+    try:
+        rows, library = await asyncio.gather(c["tmdb"].home(), c["library"].guid_map())
+    except TmdbError as e:
+        return _tmdb_error(e)
+    for r in rows:
+        if r["kind"] == "titles":
+            await _annotate(c, r["items"], library)
+    try:
+        recent = await c["library"].recent_all(20)
+    except Exception:
+        recent = []
+    wishes = sorted(c["wishes"].items, key=lambda w: -w.get("at", 0))[:12]
+    return web.json_response({"rows": rows, "recent": recent, "requests": wishes})
+
+
+@routes.get("/api/tmdb/list/{what}")
+async def tmdb_list(request: web.Request):
+    c = ctx(request)
+    q = request.query
+    try:
+        ident = int(q["id"]) if q.get("id") else None
+        data = await c["tmdb"].titles(request.match_info["what"], int(q.get("page") or 1), ident)
+    except ValueError:
+        raise web.HTTPBadRequest()
+    except TmdbError as e:
+        return _tmdb_error(e)
+    await _annotate(c, data["items"])
+    return web.json_response(data)
+
+
+@routes.get("/api/tmdb/title/{type}/{id:[0-9]+}")
+async def tmdb_title(request: web.Request):
+    c = ctx(request)
+    kind = request.match_info["type"]
+    if kind not in ("movie", "show", "tv"):
+        raise web.HTTPNotFound()
+    try:
+        t = await c["tmdb"].title(kind, int(request.match_info["id"]))
+    except TmdbError as e:
+        return _tmdb_error(e)
+    library = await c["library"].guid_map()
+    await _annotate(c, [t] + t["recommendations"] + t["similar"], library)
+    return web.json_response(t)
+
+
+@routes.get("/api/tmdb/person/{id:[0-9]+}")
+async def tmdb_person(request: web.Request):
+    c = ctx(request)
+    try:
+        p = await c["tmdb"].person(int(request.match_info["id"]))
+    except TmdbError as e:
+        return _tmdb_error(e)
+    await _annotate(c, p["items"])
+    return web.json_response(p)
+
+
+@routes.get("/api/tmdb/search")
+async def tmdb_search(request: web.Request):
+    c = ctx(request)
+    try:
+        res = await c["tmdb"].search(request.query.get("q", ""), int(request.query.get("page") or 1))
+    except ValueError:
+        raise web.HTTPBadRequest()
+    except TmdbError as e:
+        return _tmdb_error(e)
+    await _annotate(c, res["items"])
+    return web.json_response(res)
+
+
+@routes.post("/api/tmdb/test")
+async def tmdb_test(request: web.Request):
+    try:
+        return web.json_response({"ok": await ctx(request)["tmdb"].test()})
+    except TmdbError as e:
+        return web.json_response({"error": str(e)}, status=502)
+
+
+@routes.get("/tmdb/img/{size}/{file}")
+async def tmdb_image(request: web.Request):
+    """TMDB:s bilder via servern (bara image.tmdb.org, bara vanliga storlekar)."""
+    path = f"{request.match_info['size']}/{request.match_info['file']}"
+    if not IMG_RE.match(path):
+        raise web.HTTPNotFound()
+    try:
+        r = await ctx(request)["http"].get(f"{img_base()}/{path}", timeout=aiohttp.ClientTimeout(total=20))
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        raise web.HTTPBadGateway()
+    if r.status != 200:
+        r.release()
+        raise web.HTTPNotFound()
+    return await _relay(request, r, "public, max-age=2592000")
+
+
 @routes.get("/api/requests")
 async def requests_list(request: web.Request):
     c = ctx(request)
@@ -466,6 +592,14 @@ async def requests_list(request: web.Request):
 async def requests_add(request: web.Request):
     c = ctx(request)
     b = await body(request)
+    if str(b.get("tmdb") or "").isdigit() and b.get("title"):
+        kind = "show" if b.get("type") in ("show", "tv") else "movie"
+        b["type"], b["guid"], b["key"] = kind, tmdb_guid(kind, b["tmdb"]), str(b["tmdb"])
+        if not b.get("ids") or (kind == "show" and not (b.get("ids") or {}).get("tvdb")):
+            try:
+                b["ids"] = await c["tmdb"].external_ids(kind, int(b["tmdb"]))
+            except TmdbError:
+                b["ids"] = {"tmdb": int(b["tmdb"])}
     if not b.get("guid") or not b.get("title"):
         raise web.HTTPBadRequest(text="Titel saknas")
     library = await c["library"].guid_map()
@@ -485,9 +619,13 @@ async def requests_approve(request: web.Request):
     note = None
     if arr.configured:
         try:
-            ids = await c["plex"].online_ids(w["key"])
+            ids = dict(w.get("ids") or {})
+            if w.get("tmdb") and w["type"] == "show" and not ids.get("tvdb"):
+                ids.update(await c["tmdb"].external_ids("show", w["tmdb"]))
+            if not ids:
+                ids = await c["plex"].online_ids(w["key"])
             note = await arr.add(w, ids)
-        except (ArrError, PlexError) as e:
+        except (ArrError, PlexError, TmdbError) as e:
             c["wishes"].update(w["id"], error=str(e))
             return web.json_response({"error": str(e), "request": w}, status=502)
     w = c["wishes"].update(w["id"], status="approved", note=note or "Godkänd", error=None)
@@ -1122,6 +1260,7 @@ def create_app(config_dir: str | None = None) -> web.Application:
             state["library"].invalidate()
         state["imdb"] = asyncio.create_task(imdb.RATINGS.keep_fresh(http, state["library"].invalidate))
         # YouTube: yt-dlp uppdateras varje dygn, flödet hämtas i bakgrunden.
+        state["tmdb"] = Tmdb(http, store, config_dir)
         state["youtube"] = YouTube(http, store, config_dir)
         state["yt_tasks"] = [
             asyncio.create_task(state["youtube"].ytdlp.keep_fresh()),

@@ -169,12 +169,17 @@ class Library:
             for i in lst:
                 if i.get("guid"):
                     out[i["guid"]] = i["key"]
+                # Samma titel med TMDB-nyckeln (önskemål från Upptäck).
+                if i.get("_tmdb") and i.get("type") in ("movie", "show"):
+                    out.setdefault(f"tmdb://{'tv' if i['type'] == 'show' else 'movie'}/{i['_tmdb']}", i["key"])
         sections = await self._safe(self.plex.sections())
         recent = await asyncio.gather(*(self._safe(self.plex.recently_added(s["key"], 50)) for s in sections))
         for lst in recent:
             for i in lst:
                 if i.get("guid") and i["type"] in ("movie", "show"):
                     out.setdefault(i["guid"], i["key"])
+                if i.get("_tmdb") and i["type"] in ("movie", "show"):
+                    out.setdefault(f"tmdb://{'tv' if i['type'] == 'show' else 'movie'}/{i['_tmdb']}", i["key"])
                 if i.get("showGuid") and i.get("showKey"):
                     out.setdefault(i["showGuid"], i["showKey"])
         return out
@@ -204,6 +209,16 @@ class Library:
                 rows.append(row(r["title"], r["items"]))
         rows = _unique(rows)
         return {"featured": pick_featured(rows), "rows": rows}
+
+    async def recent_all(self, limit: int = 20) -> list[dict]:
+        """Nyligen tillagt i alla filmer och serier, nyast först (Upptäck:s första rad)."""
+        sections = [s for s in await self.plex.sections() if s["type"] in ("movie", "show")]
+        recent = await asyncio.gather(*(self._safe(self.plex.recently_added(s["key"], 30)) for s in sections))
+        items = []
+        for s, lst in zip(sections, recent):
+            items += group_new_episodes(lst) if s["type"] == "show" else (lst or [])
+        items.sort(key=lambda i: i.get("addedAt") or 0, reverse=True)
+        return [public(i) for i in items[:limit]]
 
     async def section(self, key: str) -> dict:
         sections = await self.plex.sections()

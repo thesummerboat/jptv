@@ -60,6 +60,9 @@ class Wishes:
                 "summary": (item.get("summary") or "")[:600] or None,
                 "thumb": item.get("thumb"),
                 "art": item.get("art"),
+                # Från Upptäck (TMDB): id:n som Radarr och Sonarr behöver.
+                "tmdb": int(item["tmdb"]) if str(item.get("tmdb") or "").isdigit() else None,
+                "ids": {k: v for k, v in (item.get("ids") or {}).items() if k in ("tmdb", "imdb", "tvdb") and v} or None,
                 "by": (by or "Någon")[:40],
                 "at": int(time.time() * 1000),
                 "status": "pending",

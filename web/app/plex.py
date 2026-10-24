@@ -130,6 +130,7 @@ def slim(o: dict, full: bool = False) -> dict:
             break
     guids = [g.get("id", "") for g in (o.get("Guid") or []) if isinstance(g, dict)] + [o.get("guid") or ""]
     imdb = next((m.group(0) for m in (IMDB_RE.search(g) for g in guids) if m), None)
+    tmdb = next((g.split("://", 1)[1] for g in guids if g.startswith("tmdb://") and g.split("://", 1)[1].isdigit()), None)
     show_key = o.get("grandparentRatingKey") or (o.get("parentRatingKey") if t == "season" else None)
     year = o.get("year")
     item = {
@@ -163,6 +164,8 @@ def slim(o: dict, full: bool = False) -> dict:
         "addedAt": int(o.get("addedAt") or 0),
         "lastViewedAt": int(o.get("lastViewedAt") or 0),
         "imdb": imdb,
+        # TMDB-id (för Upptäck: finns titeln redan i Plex?). Visas inte i webbläsaren.
+        "_tmdb": int(tmdb) if tmdb else None,
         # Plex egna id (plex://movie/…) – samma i Plex katalog, så att önskemål känns igen i biblioteket.
         "guid": o.get("guid") if str(o.get("guid") or "").startswith("plex://") else None,
         "showGuid": o.get("grandparentGuid") or (o.get("parentGuid") if t == "season" else None),
