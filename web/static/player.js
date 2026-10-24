@@ -123,6 +123,9 @@
     pauseTimer: null,
     lastReportAt: 0,
     lastReportPos: 0,
+    /** YouTube: videon som spelas (från /api/yt/video) och sponsordelar som redan hoppats över. */
+    yt: null,
+    skipped: null,
   };
 
   function ensureUi() {
@@ -161,6 +164,7 @@
     v.addEventListener('pause', () => {
       updatePlayBtn();
       report('paused');
+      if (P.mode === 'yt') ytReport();
       showControls();
       clearTimeout(P.pauseTimer);
       if (P.open) P.pauseTimer = setTimeout(closeIdle, 2 * 60e3);
@@ -179,7 +183,10 @@
     });
     v.addEventListener('ended', () => {
       if (P.mode === 'plex' && P.next) playNext();
-      else if (P.mode) closeFromUi();
+      else if (P.mode) {
+        if (P.mode === 'yt') ytReport(P.duration);
+        closeFromUi();
+      }
     });
 
     // Spolning med musen.
@@ -193,7 +200,8 @@
       const t = posAt(e);
       const r = ui.seek.getBoundingClientRect();
       ui.hoverTime.hidden = false;
-      ui.hoverTime.textContent = JP.clock(t);
+      const chapter = P.mode === 'yt' && P.yt ? [...(P.yt.chapters || [])].reverse().find((c) => c.start <= t) : null;
+      ui.hoverTime.textContent = JP.clock(t) + (chapter && chapter.title ? ' · ' + chapter.title : '');
       ui.hoverTime.style.left = Math.min(r.width - 30, Math.max(30, e.clientX - r.left)) + 'px';
       if (dragging) { v.currentTime = t; onTime(); }
     });
@@ -278,6 +286,7 @@
     ui.played.style.width = pct + '%';
     ui.knob.style.left = pct + '%';
     ui.time.textContent = d ? `${JP.clock(t)} / ${JP.clock(d)}` : JP.clock(t);
+    if (P.mode === 'yt') { ytTime(t); return; }
     if (P.mode !== 'plex' || !P.item) return;
     const ms = t * 1000;
     const intro = (P.item.markers || []).find((m) => m.type === 'intro');
@@ -421,7 +430,10 @@
     P.item = null;
     P.session = null;
   }
-  window.addEventListener('pagehide', () => { if (P.mode === 'plex') stopPlex(true); });
+  window.addEventListener('pagehide', () => {
+    if (P.mode === 'plex') stopPlex(true);
+    if (P.mode === 'yt' && P.yt) JP.beacon('/api/yt/progress', ytBody());
+  });
 
   function setTitle(item) {
     if (item.type === 'episode') {
@@ -507,6 +519,7 @@
   function openMenu() {
     const item = P.item;
     const sections = [];
+    if (P.mode === 'yt') ytMenu(sections);
     if (P.mode === 'plex' && item) {
       if (item.audio && item.audio.length > 1) {
         sections.push(h('div', { class: 'p-menu-sec' }, h('h3', null, 'Ljud'),
@@ -530,6 +543,125 @@
     ui.menu.hidden = false;
   }
 
+  /* ---------- YouTube ---------- */
+
+  const SPONSOR_NAMES = { sponsor: 'sponsorsnack', selfpromo: 'egenreklam', interaction: 'prenumerera-påminnelse' };
+
+  function ytBody(pos) {
+    const v = P.yt;
+    return {
+      id: v.id, pos: pos ?? ui.video.currentTime ?? 0, dur: P.duration || v.duration,
+      title: v.title, channel: v.channel, channelId: v.channelId, thumb: v.thumb,
+    };
+  }
+
+  function ytReport(pos) {
+    if (P.mode !== 'yt' || !P.yt) return;
+    JP.post('/api/yt/progress', ytBody(pos)).catch(() => {});
+  }
+
+  function ytStop() {
+    clearInterval(P.timelineTimer);
+    if (P.yt) ytReport();
+    P.yt = null;
+  }
+
+  /** Kapitel (streck) och sponsordelar (färgade) på tidslinjen. */
+  function ytMarks() {
+    const track = ui.seek.querySelector('.p-track');
+    track.querySelectorAll('.p-chap, .p-sponsor').forEach((e) => e.remove());
+    const v = P.yt;
+    const d = P.duration;
+    if (!v || !d) return;
+    for (const c of (v.chapters || []).slice(1)) track.append(h('div', { class: 'p-chap', style: { left: (c.start / d) * 100 + '%' } }));
+    for (const s of v.sponsor || []) {
+      track.append(h('div', { class: 'p-sponsor', title: SPONSOR_NAMES[s.category] || s.category, style: { left: (s.start / d) * 100 + '%', width: ((s.end - s.start) / d) * 100 + '%' } }));
+    }
+  }
+
+  /** SponsorBlock: hoppa över varje del en gång (spolar man tillbaka in i den får den spelas). */
+  function ytTime(t) {
+    const v = P.yt;
+    if (!v || ui.video.paused) return;
+    for (const s of v.sponsor || []) {
+      const key = s.start + ':' + s.end;
+      if (t >= s.start && t < s.end - 0.5 && !P.skipped.has(key)) {
+        P.skipped.add(key);
+        ui.video.currentTime = s.end;
+        JP.toast('Hoppade över ' + (SPONSOR_NAMES[s.category] || 'sponsor') + ` (${Math.round(s.end - s.start)} s)`);
+        return;
+      }
+    }
+  }
+
+  function ytMenu(sections) {
+    const hls = P.stream && P.stream.hls;
+    const v = ui.video;
+    if (hls) {
+      const subs = hls.subtitleTracks || [];
+      sections.push(h('div', { class: 'p-menu-sec' }, h('h3', null, 'Undertexter'),
+        h('button', { class: hls.subtitleTrack < 0 || !hls.subtitleDisplay ? 'on' : '', onclick: () => { hls.subtitleTrack = -1; ui.menu.hidden = true; } }, 'Av'),
+        subs.map((t, i) => h('button', { class: hls.subtitleDisplay && hls.subtitleTrack === i ? 'on' : '', onclick: () => { hls.subtitleDisplay = true; hls.subtitleTrack = i; ui.menu.hidden = true; } }, t.name)),
+        subs.length ? null : h('div', { class: 'dim small' }, 'Videon har inga svenska eller engelska undertexter')));
+      const levels = hls.levels || [];
+      sections.push(h('div', { class: 'p-menu-sec' }, h('h3', null, 'Kvalitet'),
+        h('button', { class: hls.autoLevelEnabled ? 'on' : '', onclick: () => { hls.currentLevel = -1; ui.menu.hidden = true; } },
+          'Automatisk' + (hls.autoLevelEnabled && levels[hls.currentLevel] ? ` (${levels[hls.currentLevel].height}p)` : '')),
+        levels.map((l, i) => ({ l, i })).sort((a, b) => b.l.height - a.l.height).map(({ l, i }) =>
+          h('button', { class: !hls.autoLevelEnabled && hls.currentLevel === i ? 'on' : '', onclick: () => { hls.currentLevel = i; ui.menu.hidden = true; } }, l.height + 'p'))));
+    }
+    sections.push(h('div', { class: 'p-menu-sec' }, h('h3', null, 'Hastighet'),
+      [0.75, 1, 1.25, 1.5, 2].map((r) => h('button', { class: v.playbackRate === r ? 'on' : '', onclick: () => { v.playbackRate = r; ui.menu.hidden = true; } }, r === 1 ? 'Normal' : String(r).replace('.', ',') + '×'))));
+    const sponsors = (P.yt && P.yt.sponsor) || [];
+    sections.push(h('div', { class: 'p-menu-info dim' }, sponsors.length ? `SponsorBlock: ${sponsors.length} delar hoppas över` : 'Ingen reklam · SponsorBlock'));
+  }
+
+  async function loadYt(id, opts = {}) {
+    const my = ++P.loadToken;
+    ui.spinner.hidden = false;
+    ui.message.hidden = true;
+    ui.menu.hidden = true;
+    ui.nextBtn.hidden = true;
+    clearInterval(P.timelineTimer);
+    if (P.stream) { P.stream.destroy(); P.stream = null; }
+    let v;
+    try {
+      v = await JP.api('/api/yt/video/' + id);
+    } catch (e) {
+      if (my === P.loadToken) showError(e.message, () => loadYt(id, opts));
+      return;
+    }
+    if (my !== P.loadToken) return;
+    P.yt = v;
+    P.duration = v.duration || 0;
+    P.skipped = new Set();
+    ui.title.replaceChildren(h('div', { class: 'p-title-main' }, v.title),
+      h('div', { class: 'p-title-sub' }, h('a', { href: '#/youtube/channel/' + v.channelId, onclick: (e) => { e.preventDefault(); JP.playerReturn = null; location.hash = '#/youtube/channel/' + v.channelId; } }, v.channel)));
+    const start = opts.fromStart ? 0 : v.position > 0 && v.position < v.duration - 20 ? v.position : 0;
+    P.stream = JP.attachHls(ui.video, v.hls, {
+      start,
+      onError: (d) => showError(d && d.response && d.response.code ? `YouTube svarade ${d.response.code}` : 'Videon gick inte att spela', () => loadYt(id, { start: ui.video.currentTime })),
+    });
+    JP.playWithSound(ui.video, P);
+    P.timelineTimer = setInterval(() => { if (!ui.video.paused) ytReport(); }, 10000);
+    ytMarks();
+    showControls();
+  }
+
+  JP.playYt = function (id, opts = {}) {
+    JP.playerReturn = location.hash || '#/youtube';
+    location.hash = '#/yt/' + id + (opts.fromStart ? '?start=0' : '');
+  };
+
+  JP.overlay(/^\/yt\/([0-9A-Za-z_-]{11})$/, ([id], q) => {
+    openShell('yt');
+    if (P.yt && P.yt.id === id) return;
+    ui.title.replaceChildren();
+    ui.played.style.width = '0%';
+    ui.time.textContent = '';
+    loadYt(id, { fromStart: q.get('start') === '0' });
+  }, closeShell);
+
   /* ---------- öppna och stänga ---------- */
 
   function openShell(mode) {
@@ -545,7 +677,7 @@
     ui.el.dataset.mode = mode;
     document.body.classList.add('playing');
     ui.seek.hidden = false;
-    ui.menuBtn.hidden = mode !== 'plex';
+    ui.menuBtn.hidden = mode !== 'plex' && mode !== 'yt';
     ui.rewBtn.hidden = ui.fwdBtn.hidden = false;
     showControls();
   }
@@ -553,7 +685,10 @@
   function closeShell() {
     if (!ui || ui.el.hidden) return;
     if (P.mode === 'plex') stopPlex(false);
-    else if (P.stream) { P.stream.destroy(); P.stream = null; }
+    else {
+      if (P.mode === 'yt') ytStop();
+      if (P.stream) { P.stream.destroy(); P.stream = null; }
+    }
     ui.video.pause();
     ui.video.removeAttribute('src');
     ui.video.load();
@@ -564,8 +699,9 @@
     ui.message.hidden = true;
     document.body.classList.remove('playing');
     JP.playerOpen = false;
-    const wasPlex = P.mode === 'plex';
+    const wasPlex = P.mode === 'plex' || P.mode === 'yt';
     P.mode = null;
+    ui.video.playbackRate = 1;
     if (wasPlex) JP.invalidate(true);
     else if (JP.current) JP.current.show.forEach((f) => f());
   }

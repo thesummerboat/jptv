@@ -565,3 +565,35 @@ input.search-input { width: 100%; font-size: 22px; padding: 14px 18px; border-ra
   .groups, .channels { border-right: 0; }
   .channel-list { max-height: 60vh; }
 }
+
+/* ---------- YouTube ---------- */
+.yt-page h1 { font-size: 30px; }
+.yt-head { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; margin-bottom: 18px; }
+.yt-search-form { flex: 1 1 320px; max-width: 560px; }
+.yt-search-form input { width: 100%; }
+.yt-h2 { font-size: 17px; font-weight: 650; margin: 26px 0 12px; color: #e3e7ed; }
+.yt-page .row h2 { margin-left: 0; }
+.yt-page .strip { padding-left: 0; }
+.yt-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 24px 16px; }
+.yt-card .card-title.yt-title { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.3; }
+.yt-dur { position: absolute; right: 6px; bottom: 8px; background: rgba(0, 0, 0, 0.82); font-size: 12px; font-weight: 700; padding: 1px 6px; border-radius: 4px; }
+.yt-avatar { flex: none; border-radius: 50%; overflow: hidden; background: var(--high); display: grid; place-items: center; font-weight: 800; font-size: 22px; color: var(--dim); }
+.yt-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.yt-chans { gap: 18px; }
+.yt-chan { flex: 0 0 96px; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; }
+.yt-chan:hover .yt-avatar { box-shadow: 0 0 0 3px var(--accent); }
+.yt-chan-name { font-size: 13px; font-weight: 600; width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.yt-chan-list { display: grid; gap: 10px; }
+.yt-chan-row { display: flex; align-items: center; gap: 16px; padding: 10px 14px; border-radius: 12px; background: var(--surface); }
+.yt-chan-row:hover { background: var(--high); }
+.yt-chan-info { flex: 1; min-width: 0; }
+.yt-chan-title { font-weight: 700; font-size: 16px; }
+.yt-chan-head { display: flex; align-items: center; gap: 22px; margin-bottom: 8px; }
+.yt-chan-head h1 { font-size: 28px; margin: 0; }
+.yt-desc { margin-top: 6px; max-width: 800px; white-space: pre-line; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.field.check { display: flex; align-items: center; gap: 10px; }
+.field.check input { width: auto; }
+.p-chap { position: absolute; top: -1px; bottom: -1px; width: 3px; margin-left: -1px; background: rgba(14, 17, 22, 0.9); z-index: 2; }
+.p-sponsor { position: absolute; top: 0; bottom: 0; background: #2fb36b; opacity: 0.85; z-index: 1; }
+.p-title-sub a { color: inherit; }
+.p-title-sub a:hover { text-decoration: underline; }

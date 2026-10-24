@@ -320,7 +320,7 @@ JP.overlay = (re, open, close) => JP.overlays.push({ re, open, close, active: fa
     if (!away) return;
     const overlay = JP.overlays.some((o) => o.active);
     const path = JP.current ? JP.current.path : '';
-    const plexPage = /^\/($|section\/|show\/|item\/|collection\/)/.test(path);
+    const plexPage = /^\/($|section\/|show\/|item\/|collection\/|youtube)/.test(path);
     JP.invalidate(!overlay && plexPage);
   });
 })();
@@ -356,6 +356,7 @@ JP.buildNav = function () {
     nav.append(h('a', { href: '#/' }, 'Hem'));
     for (const s of JP.sections) nav.append(h('a', { href: '#/section/' + s.key }, s.title));
   }
+  if (st.youtube) nav.append(h('a', { href: '#/youtube' }, 'YouTube'));
   if (st.iptv && st.iptv.configured) {
     nav.append(h('a', { href: '#/live' }, 'Live-TV'));
     nav.append(h('a', { href: '#/guide' }, 'TV-guide'));

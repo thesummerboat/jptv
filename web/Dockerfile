@@ -10,6 +10,9 @@ RUN sed -i 's/^Components: main$/Components: main non-free non-free-firmware/' /
 WORKDIR /srv
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# YouTube: yt-dlp med Deno (JavaScript-motorn som yt-dlp behöver för YouTube sedan 2025).
+# Nyare yt-dlp hämtas varje dygn till /config/ytdlp och går före den här.
+RUN pip install --no-cache-dir "yt-dlp[default]" deno && deno --version && python -m yt_dlp --version
 
 COPY app ./app
 COPY static ./static
