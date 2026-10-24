@@ -756,7 +756,7 @@ async def yt_sub_vtt(request: web.Request):
     return web.Response(text=text, content_type="text/vtt", headers={"Cache-Control": "private, max-age=3600"})
 
 
-@routes.get("/yt/{id}/s/{itag:[0-9A-Za-z-]+}")
+@routes.get("/yt/{id}/s/{itag:[0-9A-Za-z-]+}.mp4")
 async def yt_segment(request: web.Request):
     """Bild- och ljudfilerna från YouTube via servern (byte-intervall). 403: adressen förnyas en gång."""
     y = yt(request)

@@ -409,10 +409,10 @@ def media_playlist(itag: str, init_len: int, segments: list) -> str:
     lines = [
         "#EXTM3U", "#EXT-X-VERSION:7", f"#EXT-X-TARGETDURATION:{target}", "#EXT-X-MEDIA-SEQUENCE:0",
         "#EXT-X-PLAYLIST-TYPE:VOD", "#EXT-X-INDEPENDENT-SEGMENTS",
-        f'#EXT-X-MAP:URI="s/{itag}",BYTERANGE="{init_len}@0"',
+        f'#EXT-X-MAP:URI="s/{itag}.mp4",BYTERANGE="{init_len}@0"',
     ]
     for offset, length, dur in segments:
-        lines += [f"#EXTINF:{dur:.3f},", f"#EXT-X-BYTERANGE:{length}@{offset}", f"s/{itag}"]
+        lines += [f"#EXTINF:{dur:.3f},", f"#EXT-X-BYTERANGE:{length}@{offset}", f"s/{itag}.mp4"]
     lines.append("#EXT-X-ENDLIST")
     return "\n".join(lines) + "\n"
 
