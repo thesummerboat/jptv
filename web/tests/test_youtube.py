@@ -248,13 +248,13 @@ class YouTubeApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(ranges), 5)
         last_len, last_off = map(int, ranges[-1].split("@"))
         self.assertLessEqual(last_off + last_len, size)
-        self.assertIn('#EXT-X-MAP:URI="s/134",BYTERANGE=', playlist)
+        self.assertIn('#EXT-X-MAP:URI="s/134.mp4",BYTERANGE=', playlist)
         durations = [float(l[8:-1]) for l in playlist.splitlines() if l.startswith("#EXTINF:")]
         self.assertAlmostEqual(sum(durations), 12.0, delta=0.2)
 
         # Ett segment genom proxyn: samma byte som filen.
         length, offset = map(int, ranges[1].split("@"))
-        r = await self.client.get(f"/yt/{VID}/s/134", headers={"Range": f"bytes={offset}-{offset + length - 1}"})
+        r = await self.client.get(f"/yt/{VID}/s/134.mp4", headers={"Range": f"bytes={offset}-{offset + length - 1}"})
         self.assertEqual(r.status, 206)
         data = await r.read()
         with open(os.path.join(self.media, "v.mp4"), "rb") as f:
