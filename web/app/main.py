@@ -9,7 +9,7 @@ import random
 import re
 import tempfile
 import time
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 
 import aiohttp
 from aiohttp import web
@@ -22,6 +22,7 @@ from .plex import QUALITIES, Plex, PlexError, metadata_list, public, slim
 from .store import Store
 from .tv import Iptv
 from .wishes import Wishes
+from .youtube import CHANNEL_RE, IMAGE_HOSTS, VIDEO_RE, YouTube, YtError, parse_import, subtitle_playlist
 
 VERSION = os.environ.get("JPTV_VERSION", "dev")
 STATIC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
@@ -50,6 +51,8 @@ async def errors(request: web.Request, handler):
         return await handler(request)
     except PlexError as e:
         return web.json_response({"error": str(e)}, status=502)
+    except YtError as e:
+        return web.json_response({"error": str(e)}, status=502)
     except (aiohttp.ClientError, asyncio.TimeoutError):
         return web.json_response({"error": "Plex-servern svarar inte"}, status=504)
 
@@ -70,6 +73,8 @@ async def status(request: web.Request):
         {
             "version": VERSION,
             "plex": bool(server),
+            # Klienterna (TV:n) ser om den här versionen har YouTube.
+            "youtube": True,
             "server": server and {"name": server.get("name"), "uri": server.get("uri")},
             "iptv": c["iptv"].status(),
             "live": c["live"].status(),
@@ -99,6 +104,8 @@ def settings_public(c: dict) -> dict:
         "sonarrKey": bool(st.get("sonarr_key")),
         "sonarrRoot": st.get("sonarr_root", "") or ARR_DEFAULTS["sonarr"]["root"],
         "sonarrProfile": st.get("sonarr_profile", "") or ARR_DEFAULTS["sonarr"]["profile"],
+        "youtubeMaxHeight": int(st.get("youtube_max_height", 1080) or 1080),
+        "youtubeShorts": bool(st.get("youtube_shorts", False)),
     }
 
 
@@ -128,6 +135,10 @@ async def save_settings(request: web.Request):
             changes[f"{kind}_key"] = key
     if "themeLevel" in b:
         changes["theme_level"] = max(0, min(int(b["themeLevel"]), 2))
+    if "youtubeMaxHeight" in b and int(b["youtubeMaxHeight"]) in (480, 720, 1080):
+        changes["youtube_max_height"] = int(b["youtubeMaxHeight"])
+    if "youtubeShorts" in b:
+        changes["youtube_shorts"] = bool(b["youtubeShorts"])
     iptv_changed = False
     for key, name in (("m3uUrl", "m3u_url"), ("epgUrl", "epg_url")):
         if key in b:
@@ -602,6 +613,210 @@ async def _proxy(request: web.Request, url: str, token: str, cache: str | None =
         r.release()
 
 
+# ------------------------------------------------------------------ YouTube
+
+
+def yt(request: web.Request) -> YouTube:
+    return ctx(request)["youtube"]
+
+
+def _video_id(request: web.Request) -> str:
+    vid = request.match_info["id"]
+    if not VIDEO_RE.match(vid):
+        raise web.HTTPNotFound()
+    return vid
+
+
+HLS = "application/vnd.apple.mpegurl"
+
+
+@routes.get("/api/yt/home")
+async def yt_home(request: web.Request):
+    return web.json_response(await yt(request).home())
+
+
+@routes.get("/api/yt/search")
+async def yt_search(request: web.Request):
+    return web.json_response(await yt(request).search(request.query.get("q", "")))
+
+
+@routes.get("/api/yt/channel/{id}")
+async def yt_channel(request: web.Request):
+    cid = request.match_info["id"]
+    if not CHANNEL_RE.match(cid):
+        raise web.HTTPNotFound()
+    return web.json_response(await yt(request).channel(cid))
+
+
+@routes.get("/api/yt/video/{id}")
+async def yt_video(request: web.Request):
+    return web.json_response(await yt(request).video(_video_id(request)))
+
+
+@routes.get("/api/yt/subs")
+async def yt_subs(request: web.Request):
+    return web.json_response({"subs": yt(request).subs_public()})
+
+
+@routes.post("/api/yt/subs")
+async def yt_subscribe(request: web.Request):
+    b = await body(request)
+    y = yt(request)
+    try:
+        y.data.subscribe(str(b.get("id") or ""), str(b.get("name") or ""), b.get("avatar"))
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    return web.json_response({"subscribed": True, "subs": y.subs_public()})
+
+
+@routes.delete("/api/yt/subs/{id}")
+async def yt_unsubscribe(request: web.Request):
+    y = yt(request)
+    y.data.unsubscribe(request.match_info["id"])
+    return web.json_response({"subscribed": False, "subs": y.subs_public()})
+
+
+@routes.post("/api/yt/progress")
+async def yt_progress(request: web.Request):
+    b = await body(request)
+    try:
+        p = yt(request).data.set_progress(str(b.get("id") or ""), float(b.get("pos") or 0), float(b.get("dur") or 0), b)
+    except (ValueError, TypeError) as e:
+        return web.json_response({"error": str(e)}, status=400)
+    return web.json_response({"progress": p})
+
+
+@routes.post("/api/yt/import")
+async def yt_import(request: web.Request):
+    """Prenumerationer från FreeTube, NewPipe, YouTube Takeout (CSV) eller OPML."""
+    y = yt(request)
+    text = ""
+    if request.content_type.startswith("multipart/"):
+        reader = await request.multipart()
+        async for part in reader:
+            if part.filename or part.name == "file":
+                text = (await part.read(decode=False)).decode("utf-8", "replace")
+                break
+    else:
+        text = await request.text()
+    found = parse_import(text)
+    if not found:
+        return web.json_response({"error": "Hittade inga kanaler i filen"}, status=400)
+    added = sum(1 for ch in found if y.data.subscribe(ch["id"], ch["name"]))
+    asyncio.create_task(y.feed())
+    return web.json_response({"found": len(found), "added": added, "subs": y.subs_public()})
+
+
+@routes.get("/api/yt/status")
+async def yt_status(request: web.Request):
+    return web.json_response(yt(request).status())
+
+
+@routes.post("/api/yt/test")
+async def yt_test(request: web.Request):
+    try:
+        return web.json_response({"ok": await yt(request).test()})
+    except YtError as e:
+        return web.json_response({"error": str(e)}, status=502)
+
+
+@routes.post("/api/yt/update")
+async def yt_update(request: web.Request):
+    y = yt(request)
+    await y.ytdlp.update()
+    return web.json_response(y.status())
+
+
+@routes.get("/yt/{id}/master.m3u8")
+async def yt_master(request: web.Request):
+    text = await yt(request).master(_video_id(request))
+    return web.Response(text=text, content_type=HLS, headers={"Cache-Control": "no-cache"})
+
+
+@routes.get("/yt/{id}/{itag:[0-9A-Za-z-]+}.m3u8")
+async def yt_media(request: web.Request):
+    text = await yt(request).media(_video_id(request), request.match_info["itag"])
+    return web.Response(text=text, content_type=HLS, headers={"Cache-Control": "no-cache"})
+
+
+@routes.get("/yt/{id}/sub/{lang:[a-z]{2}}.m3u8")
+async def yt_sub_playlist(request: web.Request):
+    y = yt(request)
+    vid = _video_id(request)
+    v = await y._video(vid)
+    return web.Response(
+        text=subtitle_playlist(request.match_info["lang"], v["info"].get("duration") or 0),
+        content_type=HLS, headers={"Cache-Control": "no-cache"},
+    )
+
+
+@routes.get("/yt/{id}/sub/{lang:[a-z]{2}}.vtt")
+async def yt_sub_vtt(request: web.Request):
+    text = await yt(request).subtitle_vtt(_video_id(request), request.match_info["lang"])
+    return web.Response(text=text, content_type="text/vtt", headers={"Cache-Control": "private, max-age=3600"})
+
+
+@routes.get("/yt/{id}/s/{itag:[0-9A-Za-z-]+}")
+async def yt_segment(request: web.Request):
+    """Bild- och ljudfilerna från YouTube via servern (byte-intervall). 403: adressen förnyas en gång."""
+    y = yt(request)
+    vid = _video_id(request)
+    itag = request.match_info["itag"]
+    http: aiohttp.ClientSession = ctx(request)["http"]
+    r = None
+    for attempt in (0, 1):
+        url, headers = await y.segment_source(vid, itag, retry=attempt == 1)
+        h = dict(headers)
+        h["Accept-Encoding"] = "identity"
+        if "Range" in request.headers:
+            h["Range"] = request.headers["Range"]
+        try:
+            r = await http.get(url, headers=h, timeout=aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=60))
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            raise web.HTTPBadGateway(text="YouTube svarar inte")
+        if r.status in (403, 410) and attempt == 0:
+            r.release()
+            continue
+        break
+    return await _relay(request, r, "private, max-age=3600")
+
+
+@routes.get("/yt/img")
+async def yt_image(request: web.Request):
+    """YouTubes bilder via servern, så att TV:n och webbläsaren aldrig pratar med Google själva."""
+    url = request.query.get("u", "")
+    if url.startswith("//"):
+        url = "https:" + url
+    host = urlparse(url).hostname or ""
+    if not url.startswith("https://") or host not in IMAGE_HOSTS:
+        raise web.HTTPNotFound()
+    http: aiohttp.ClientSession = ctx(request)["http"]
+    try:
+        r = await http.get(url, timeout=aiohttp.ClientTimeout(total=30))
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        raise web.HTTPBadGateway()
+    return await _relay(request, r, "public, max-age=86400")
+
+
+async def _relay(request: web.Request, r: aiohttp.ClientResponse, cache: str):
+    try:
+        resp = web.StreamResponse(status=r.status)
+        for h in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"):
+            if h in r.headers:
+                resp.headers[h] = r.headers[h]
+        resp.headers["Cache-Control"] = cache if r.status in (200, 206) else "no-cache"
+        await resp.prepare(request)
+        try:
+            async for chunk in r.content.iter_chunked(1 << 16):
+                await resp.write(chunk)
+            await resp.write_eof()
+        except (ConnectionResetError, aiohttp.ClientError, asyncio.CancelledError):
+            pass
+        return resp
+    finally:
+        r.release()
+
+
 # ------------------------------------------------------------------ live-TV
 
 
@@ -817,11 +1032,19 @@ def create_app(config_dir: str | None = None) -> web.Application:
         if await asyncio.to_thread(imdb.RATINGS.load, path):
             state["library"].invalidate()
         state["imdb"] = asyncio.create_task(imdb.RATINGS.keep_fresh(http, state["library"].invalidate))
+        # YouTube: yt-dlp uppdateras varje dygn, flödet hämtas i bakgrunden.
+        state["youtube"] = YouTube(http, store, config_dir)
+        state["yt_tasks"] = [
+            asyncio.create_task(state["youtube"].ytdlp.keep_fresh()),
+            asyncio.create_task(state["youtube"].keep_feeds_fresh()),
+        ]
 
     async def cleanup(app: web.Application):
         state["watchdog"].cancel()
         state["wishes_task"].cancel()
         state["imdb"].cancel()
+        for t in state.get("yt_tasks", []):
+            t.cancel()
         await state["live"].stop()
         await state["http"].close()
 

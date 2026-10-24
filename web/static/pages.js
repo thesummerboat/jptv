@@ -431,7 +431,7 @@
       h('p', { class: 'dim' }, `JPTV Web ${st.version}. Live-TV använder en ström åt gången: startar du en kanal här stängs den som spelades i ett annat fönster. TV:n och mobilen räknas för sig hos leverantören.`),
       h('p', { class: 'dim' }, 'Tangenter i spelaren: mellanslag = paus, ← → = 10 s, ↑ ↓ = volym, F = helskärm, M = ljud av, Esc = tillbaka. I live-TV byter ↑ ↓ kanal.'));
 
-    v.el.append(h('div', { class: 'page narrow' }, h('h1', null, 'Inställningar'), plexBox, tvBox, playBox, st.plex ? arrBox : null, about));
+    v.el.append(h('div', { class: 'page narrow' }, h('h1', null, 'Inställningar'), plexBox, tvBox, playBox, st.plex ? arrBox : null, st.youtube && JP.ytSettingsBox ? JP.ytSettingsBox(s, save) : null, about));
   }, { nocache: true });
 
   /* ---------- inloggning ---------- */

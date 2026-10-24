@@ -309,7 +309,12 @@
     hero.setFeatured(data.featured.length ? data.featured : data.rows[0].items.slice(0, 5));
   };
 
-  JP.route(/^\/$/, (v) => JP.browse(v, () => JP.api('/api/home')));
+  JP.route(/^\/$/, async (v) => {
+    await JP.browse(v, () => JP.api('/api/home'));
+    // Nytt från YouTube-kanalerna som en rad efter Fortsätt titta.
+    const rows = v.el.querySelector('.rows');
+    if (rows && JP.ytHomeRow) JP.ytHomeRow(rows);
+  });
 
   /* ---------- bibliotek ---------- */
 
