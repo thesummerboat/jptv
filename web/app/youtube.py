@@ -61,6 +61,8 @@ def _codecs() -> tuple[tuple[str, ...], tuple[str, ...]]:
         elif c in ("opus",):
             audio.append(c)
     return tuple(video), tuple(audio)
+# Listor från yt-dlp (sök, kanal) får ungefärligt datum ur "för 3 år sedan".
+APPROX_DATE = ("--extractor-args", "youtubetab:approximate_date")
 # Testvideo för "Testa YouTube" (den första videon på YouTube, ligger kvar).
 TEST_VIDEO = "jNQXAC9IVRw"
 CHANNEL_RE = re.compile(r"^UC[0-9A-Za-z_-]{22}$")
@@ -302,6 +304,228 @@ def parse_rss(xml_text: str, channel_id: str) -> tuple[str, list[dict]]:
     return name, out
 
 
+# ------------------------------------------------------------------ förslag (relaterade videor)
+#
+# YouTubes egna förslag bredvid en video ("next" i deras API, utan inloggning). Svaret ber vi om
+# på engelska, så att "1.2M views" och "3 years ago" går att läsa. Två format förekommer: det
+# nyare lockupViewModel och det äldre compactVideoRenderer; båda läses.
+
+WEB_CLIENT_VERSION = "2.20260708.00.00"
+_BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+
+
+def _api_base() -> str:
+    return os.environ.get("JPTV_YT_API", YT)
+
+
+def _dig(obj, *keys):
+    for k in keys:
+        if isinstance(obj, dict):
+            obj = obj.get(k)
+        elif isinstance(obj, list) and isinstance(k, int) and -len(obj) <= k < len(obj):
+            obj = obj[k]
+        else:
+            return None
+    return obj
+
+
+def _text(x) -> str:
+    """YouTubes text: {"simpleText"}, {"runs": [{"text"}]}, {"content"} eller en sträng."""
+    if isinstance(x, str):
+        return x
+    if isinstance(x, dict):
+        if isinstance(x.get("simpleText"), str):
+            return x["simpleText"]
+        if isinstance(x.get("content"), str):
+            return x["content"]
+        if isinstance(x.get("runs"), list):
+            return "".join(str(r.get("text", "")) for r in x["runs"] if isinstance(r, dict))
+    return ""
+
+
+def _walk(obj, want: tuple[str, ...], skip: tuple[str, ...] = ()):
+    """Alla {nyckel: värde} med nyckel i want, var de än ligger i svaret."""
+    stack = [obj]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if k in want and isinstance(v, dict):
+                    yield k, v
+                elif k not in skip and isinstance(v, (dict, list)):
+                    stack.append(v)
+        elif isinstance(cur, list):
+            stack.extend(reversed(cur))
+
+
+def _browse_id(obj) -> str:
+    """Första kanal-id (UC…) i en del av svaret."""
+    for _, ep in _walk(obj, ("browseEndpoint",)):
+        bid = ep.get("browseId") or ""
+        if CHANNEL_RE.match(bid):
+            return bid
+    return ""
+
+
+def parse_count(text: str) -> int | None:
+    """"1.2M views" → 1200000, "12K" → 12000, "1,234 views" → 1234, "No views" → 0."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    if t.lower().startswith("no "):
+        return 0
+    m = re.match(r"^([\d][\d,.\s]*?)\s*([KMB])?(?:\s|$)", t, re.I)
+    if not m:
+        return None
+    num, suffix = m.group(1).strip(), (m.group(2) or "").upper()
+    try:
+        if suffix:
+            return int(float(num.replace(",", "")) * {"K": 1e3, "M": 1e6, "B": 1e9}[suffix])
+        digits = re.sub(r"\D", "", num)
+        return int(digits) if digits else None
+    except ValueError:
+        return None
+
+
+_AGO_RE = re.compile(r"(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago", re.I)
+_UNIT_S = {"second": 1, "minute": 60, "hour": 3600, "day": 86400, "week": 604800, "month": 2592000, "year": 31536000}
+
+
+def parse_ago(text: str, now: float | None = None) -> int | None:
+    """"3 years ago", "Streamed 2 weeks ago" → ungefärlig tidpunkt i ms."""
+    m = _AGO_RE.search(text or "")
+    if not m:
+        return None
+    now = time.time() if now is None else now
+    return int((now - int(m.group(1)) * _UNIT_S[m.group(2).lower()]) * 1000)
+
+
+def parse_clock(text: str) -> int | None:
+    """"12:34" → 754, "1:02:03" → 3723."""
+    t = (text or "").strip()
+    if not re.match(r"^\d{1,3}(:\d{2}){1,2}$", t):
+        return None
+    secs = 0
+    for part in t.split(":"):
+        secs = secs * 60 + int(part)
+    return secs
+
+
+def _sources_url(sources, prefer: int = 480) -> str | None:
+    url = _best_thumb(sources, prefer)
+    if url and url.startswith("//"):
+        url = "https:" + url
+    return url
+
+
+def _lockup_video(vm: dict) -> dict | None:
+    if vm.get("contentType") not in (None, "LOCKUP_CONTENT_TYPE_VIDEO"):
+        return None  # spellistor och mixar
+    vid = vm.get("contentId") or ""
+    if not VIDEO_RE.match(vid):
+        return None
+    md = _dig(vm, "metadata", "lockupMetadataViewModel") or {}
+    title = _text(md.get("title"))
+    channel, cid, views, published, live = "", "", None, None, False
+    for row in _dig(md, "metadata", "contentMetadataViewModel", "metadataRows") or []:
+        for part in (row or {}).get("metadataParts") or []:
+            t = _text((part or {}).get("text")).strip()
+            if not t:
+                continue
+            low = t.lower()
+            bid = _browse_id((part or {}).get("text"))
+            if bid and not cid:
+                cid, channel = bid, t
+            elif re.search(r"\bviews?\b", low):
+                views = parse_count(t)
+            elif "watching" in low or low == "live":
+                live = True
+            elif low.endswith(" ago"):
+                published = parse_ago(t)
+            elif not channel and views is None and published is None:
+                channel = t
+    image = md.get("image") or {}
+    cid = cid or _browse_id(image)
+    avatar = None
+    for _, av in _walk(image, ("avatarViewModel",)):
+        avatar = _sources_url(_dig(av, "image", "sources"), 88)
+        if avatar:
+            break
+    duration = None
+    for _, badge in _walk(vm.get("contentImage") or {}, ("thumbnailBadgeViewModel",)):
+        text = _text(badge.get("text")).strip()
+        style = str(badge.get("badgeStyle") or "")
+        if parse_clock(text) is not None:
+            duration = parse_clock(text)
+        elif "LIVE" in style or text.upper() in ("LIVE", "UPCOMING", "PREMIERE"):
+            live = True
+    thumb = _sources_url(_dig(vm, "contentImage", "thumbnailViewModel", "image", "sources"))
+    return {
+        "id": vid, "title": title, "channel": channel, "channelId": cid, "avatar": avatar,
+        "duration": duration, "views": views, "published": published,
+        "thumb": thumb or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+        "live": live, "short": False,
+    }
+
+
+def _renderer_video(r: dict) -> dict | None:
+    vid = r.get("videoId") or ""
+    if not VIDEO_RE.match(vid):
+        return None
+    by = r.get("longBylineText") or r.get("shortBylineText") or r.get("ownerText") or {}
+    view_text = _text(r.get("viewCountText")) or _text(r.get("shortViewCountText"))
+    length = _text(r.get("lengthText"))
+    live = "watching" in view_text.lower()
+    for _, o in _walk(r.get("thumbnailOverlays") or [], ("thumbnailOverlayTimeStatusRenderer",)):
+        length = length or _text(o.get("text"))
+        live = live or o.get("style") in ("LIVE", "UPCOMING")
+    for _, b in _walk(r.get("badges") or [], ("metadataBadgeRenderer",)):
+        live = live or "LIVE" in str(b.get("style") or "")
+    avatar = _sources_url(_dig(r, "channelThumbnail", "thumbnails"), 88) or _sources_url(
+        _dig(r, "channelThumbnailSupportedRenderers", "channelThumbnailWithLinkRenderer", "thumbnail", "thumbnails"), 88)
+    return {
+        "id": vid,
+        "title": _text(r.get("title")) or _text(r.get("headline")),
+        "channel": _text(by),
+        "channelId": _browse_id(by),
+        "avatar": avatar,
+        "duration": parse_clock(length),
+        "views": parse_count(view_text) if not live else None,
+        "published": parse_ago(_text(r.get("publishedTimeText"))),
+        "thumb": _sources_url(_dig(r, "thumbnail", "thumbnails")) or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+        "live": live,
+        "short": bool(_dig(r, "navigationEndpoint", "reelWatchEndpoint")),
+    }
+
+
+def parse_related(data: dict) -> list[dict]:
+    """Förslagen bredvid en video, i YouTubes ordning."""
+    root = _dig(data, "contents", "twoColumnWatchNextResults", "secondaryResults") or data
+    skip = ("playerOverlays", "engagementPanels", "frameworkUpdates", "topbar")
+    out, seen = [], set()
+    for key, value in _walk(root, ("lockupViewModel", "compactVideoRenderer", "videoRenderer"), skip):
+        v = _lockup_video(value) if key == "lockupViewModel" else _renderer_video(value)
+        if v and v["id"] not in seen and v["title"]:
+            seen.add(v["id"])
+            out.append(v)
+    return out
+
+
+def _diversify(items: list[dict], per_channel: int, limit: int) -> list[dict]:
+    """Bästa först, men högst per_channel från samma kanal tills listan är full."""
+    out, later, count = [], [], {}
+    for it in items:
+        cid = it.get("channelId") or it.get("channel") or ""
+        if count.get(cid, 0) < per_channel:
+            count[cid] = count.get(cid, 0) + 1
+            out.append(it)
+        else:
+            later.append(it)
+        if len(out) >= limit:
+            return out
+    return (out + later)[:limit]
+
+
 def parse_import(text: str) -> list[dict]:
     """
     Prenumerationer från FreeTube, NewPipe, YouTube Takeout (CSV) eller OPML.
@@ -520,18 +744,24 @@ class YtStore:
         self._lock = threading.Lock()
         self.subs: list[dict] = []
         self.progress: dict[str, dict] = {}
+        # "Inte intresserad" (videor) och kanaler som inte ska föreslås.
+        self.dismissed: list[str] = []
+        self.blocked: list[dict] = []
         try:
             with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
             self.subs = [s for s in data.get("subs") or [] if isinstance(s, dict) and CHANNEL_RE.match(s.get("id", ""))]
             self.progress = {k: v for k, v in (data.get("progress") or {}).items() if isinstance(v, dict)}
+            self.dismissed = [d for d in data.get("dismissed") or [] if isinstance(d, str) and VIDEO_RE.match(d)]
+            self.blocked = [b for b in data.get("blocked") or [] if isinstance(b, dict) and CHANNEL_RE.match(b.get("id", ""))]
         except (OSError, ValueError):
             pass
 
     def _save(self) -> None:
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"subs": self.subs, "progress": self.progress}, f, ensure_ascii=False, indent=1)
+            json.dump({"subs": self.subs, "progress": self.progress, "dismissed": self.dismissed, "blocked": self.blocked},
+                      f, ensure_ascii=False, indent=1)
         os.replace(tmp, self.path)
 
     def subscribed(self, cid: str) -> bool:
@@ -587,8 +817,11 @@ class YtStore:
                 "at": int(time.time() * 1000),
             })
             for k in ("title", "channel", "channelId", "thumb"):
-                if meta.get(k):
+                if meta.get(k) and isinstance(meta[k], str):
                     p[k] = meta[k]
+            for k in ("views", "published"):
+                if isinstance(meta.get(k), (int, float)) and not isinstance(meta[k], bool):
+                    p[k] = int(meta[k])
             p["watched"] = bool(p["dur"] and p["pos"] >= p["dur"] * 0.9) or p.get("watched", False) and p["pos"] < 30
             self.progress[vid] = p
             # Högst 500 sparade; de äldsta försvinner.
@@ -610,14 +843,78 @@ class YtStore:
             dur = p.get("dur") or 0
             if p.get("watched") or p.get("pos", 0) < 30 or (dur and p["pos"] > dur * 0.92):
                 continue
-            items.append({
-                "id": vid, "title": p.get("title") or "", "channel": p.get("channel") or "", "channelId": p.get("channelId") or "",
-                "thumb": p.get("thumb") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg", "duration": int(dur) if dur else None,
-                "position": int(p["pos"]), "published": None, "views": None, "live": False, "short": False,
-            })
+            items.append(self._card(vid, p))
             if len(items) >= limit:
                 break
         return items
+
+    @staticmethod
+    def _card(vid: str, p: dict) -> dict:
+        dur = p.get("dur") or 0
+        card = {
+            "id": vid, "title": p.get("title") or "", "channel": p.get("channel") or "", "channelId": p.get("channelId") or "",
+            "thumb": p.get("thumb") or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg", "duration": int(dur) if dur else None,
+            "published": p.get("published"), "views": p.get("views"), "live": False, "short": False,
+            "watched": bool(p.get("watched")), "at": p.get("at"),
+        }
+        if not p.get("watched") and p.get("pos", 0) >= 30:
+            card["position"] = int(p["pos"])
+        return card
+
+    def seen(self, vid: str) -> bool:
+        """Sedd eller påbörjad på riktigt (mer än en minut): föreslås inte igen."""
+        p = self.progress.get(vid)
+        return bool(p and (p.get("watched") or p.get("pos", 0) >= 60))
+
+    def history(self, limit: int = 200) -> list[dict]:
+        items = []
+        for vid, p in sorted(self.progress.items(), key=lambda kv: kv[1].get("at", 0), reverse=True):
+            if p.get("watched") or p.get("pos", 0) >= 30:
+                items.append(self._card(vid, p))
+                if len(items) >= limit:
+                    break
+        return items
+
+    def forget(self, vid: str | None = None) -> int:
+        """Tar bort en video ur historiken, eller allt (vid=None)."""
+        with self._lock:
+            if vid is None:
+                n = len(self.progress)
+                self.progress = {}
+            else:
+                n = 1 if self.progress.pop(vid, None) is not None else 0
+            if n:
+                self._save()
+            return n
+
+    def dismiss(self, vid: str) -> None:
+        if not VIDEO_RE.match(vid or ""):
+            raise ValueError("ogiltigt video-id")
+        with self._lock:
+            if vid not in self.dismissed:
+                self.dismissed.append(vid)
+                self.dismissed = self.dismissed[-2000:]
+                self._save()
+
+    def block(self, cid: str, name: str = "") -> None:
+        if not CHANNEL_RE.match(cid or ""):
+            raise ValueError("ogiltigt kanal-id")
+        with self._lock:
+            if not any(b["id"] == cid for b in self.blocked):
+                self.blocked.append({"id": cid, "name": name or ""})
+                self._save()
+
+    def unblock(self, cid: str) -> bool:
+        with self._lock:
+            before = len(self.blocked)
+            self.blocked = [b for b in self.blocked if b["id"] != cid]
+            if len(self.blocked) != before:
+                self._save()
+                return True
+            return False
+
+    def blocked_ids(self) -> set[str]:
+        return {b["id"] for b in self.blocked}
 
     def decorate(self, items: list[dict]) -> list[dict]:
         """Sedda och påbörjade videor markeras i listor."""
@@ -647,6 +944,14 @@ class YouTube:
         self._channels: dict[str, tuple[float, dict]] = {}
         self._sponsor: dict[str, tuple[float, list]] = {}
         self._search: dict[str, tuple[float, dict]] = {}
+        # Förslag: YouTubes relaterade videor per video, och den färdiga startsidan.
+        self._related: dict[str, tuple[float, list[dict]]] = {}
+        self._warming: set[str] = set()
+        self._related_tasks: dict[str, asyncio.Future] = {}
+        self._bg: set[asyncio.Future] = set()
+        self._recs: tuple[float, tuple, dict] | None = None
+        self._recs_lock = asyncio.Lock()
+        self.recs_stats = {"youtube": 0, "search": 0, "failed": 0, "error": None}
 
     # ---------- inställningar
 
@@ -671,6 +976,9 @@ class YouTube:
             "subs": len(self.data.subs),
             "maxHeight": self.max_height,
             "shorts": self.show_shorts,
+            "history": len(self.data.history(10000)),
+            "blocked": list(self.data.blocked),
+            "recs": dict(self.recs_stats),
         }
 
     # ---------- flöden
@@ -704,6 +1012,8 @@ class YouTube:
         lists = await asyncio.gather(*(one(s) for s in subs))
         items = [i for lst in lists for i in lst if self.show_shorts or not i.get("short")]
         items.sort(key=lambda i: i.get("published") or 0, reverse=True)
+        seen: set[str] = set()
+        items = [i for i in items if not (i["id"] in seen or seen.add(i["id"]))]
         return self.data.decorate([dict(i) for i in items[:limit]])
 
     async def keep_feeds_fresh(self) -> None:
@@ -712,6 +1022,8 @@ class YouTube:
             try:
                 if self.data.subs:
                     await self.feed()
+                if self.data.subs or self.data.progress:
+                    await self.recommendations()
             except Exception:
                 log.exception("YouTube-flödet")
             await asyncio.sleep(1800)
@@ -735,7 +1047,7 @@ class YouTube:
         hit = self._search.get(q.lower())
         if hit and time.monotonic() - hit[0] < 600:
             return hit[1]
-        vids_task = self.ytdlp.run_json(["--flat-playlist", f"ytsearch30:{q}"])
+        vids_task = self.ytdlp.run_json(["--flat-playlist", *APPROX_DATE, f"ytsearch30:{q}"])
         chans_task = self.ytdlp.run_json([
             "--flat-playlist", "--playlist-items", "1:6",
             f"{YT}/results?search_query={quote(q)}&sp=EgIQAg%253D%253D",
@@ -759,11 +1071,18 @@ class YouTube:
         if not CHANNEL_RE.match(cid):
             raise YtError("Ogiltig kanal")
         hit = self._channels.get(cid)
+        # RSS-flödet har exakta datum för de senaste videorna; listan från yt-dlp bara ungefärliga.
+        rss_task = asyncio.ensure_future(self.channel_feed(cid))
         if hit and time.monotonic() - hit[0] < 1800:
             info = hit[1]
         else:
-            info = await self.ytdlp.run_json(["--flat-playlist", "--playlist-items", "1:36", f"{YT}/channel/{cid}/videos"])
+            try:
+                info = await self.ytdlp.run_json(["--flat-playlist", *APPROX_DATE, "--playlist-items", "1:36", f"{YT}/channel/{cid}/videos"])
+            except BaseException:
+                rss_task.cancel()
+                raise
             self._channels[cid] = (time.monotonic(), info)
+        rss = {r["id"]: r for r in await rss_task}
         name = info.get("channel") or re.sub(r"\s*-\s*Videos$", "", info.get("title") or "")
         avatar = _avatar(info.get("thumbnails"))
         self.data.update_channel(cid, name=name, avatar=avatar)
@@ -771,6 +1090,10 @@ class YouTube:
         for v in videos:
             v["channel"] = v["channel"] or name
             v["channelId"] = cid
+            r = rss.get(v["id"])
+            if r:
+                v["published"] = r.get("published") or v["published"]
+                v["views"] = v["views"] if v["views"] is not None else r.get("views")
         return {
             "id": cid,
             "name": name,
@@ -952,4 +1275,221 @@ class YouTube:
         best = max((f.get("height") or 0) for f in v["videos"])
         itag = v["videos"][-1]["format_id"]
         await self.media(TEST_VIDEO, itag)
-        return f"yt-dlp {self.ytdlp.version or '?'} fungerar · upp till {best}p"
+        text = f"yt-dlp {self.ytdlp.version or '?'} fungerar · upp till {best}p"
+        try:
+            n = len(parse_related(await self._next(TEST_VIDEO)))
+            text += f" · YouTubes förslag: {n} st" if n else " · YouTubes förslag gick inte att läsa (sök används i stället)"
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, YtError) as e:
+            text += f" · YouTubes förslag fungerar inte ({e or type(e).__name__}); sök används i stället"
+        return text
+
+    # ---------- förslag
+
+    def save_progress(self, vid: str, pos: float, dur: float, meta: dict) -> dict:
+        """Position från spelaren. Titel, kanal, visningar och datum fylls i från videon om de saknas."""
+        v = self._videos.get(vid)
+        meta = dict(meta)
+        if v:
+            info = v["info"]
+            meta.setdefault("title", info.get("title"))
+            meta.setdefault("channel", info.get("channel") or info.get("uploader"))
+            meta.setdefault("channelId", info.get("channel_id"))
+            meta["thumb"] = _best_thumb(info.get("thumbnails")) or meta.get("thumb")
+            meta["views"] = info.get("view_count")
+            meta["published"] = _published(info)
+        p = self.data.set_progress(vid, pos, dur, meta)
+        if p.get("watched") or p.get("pos", 0) >= 60:
+            self.warm(vid, p.get("title") or "")
+        return p
+
+    def warm(self, vid: str, title: str = "") -> None:
+        """Hämtar förslagen för en video i bakgrunden, så att startsidan är klar när man kommer dit."""
+        hit = self._related.get(vid)
+        if (hit and time.monotonic() - hit[0] < 3600) or vid in self._warming:
+            return
+        self._warming.add(vid)
+
+        async def run():
+            try:
+                await self.related(vid, title)
+            except Exception:
+                log.exception("Förslag för %s", vid)
+            finally:
+                self._warming.discard(vid)
+
+        task = asyncio.ensure_future(run())
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+
+    def close(self) -> None:
+        for t in list(self._bg) + list(self._related_tasks.values()):
+            t.cancel()
+
+    async def _next(self, vid: str) -> dict:
+        body = {
+            "context": {"client": {"clientName": "WEB", "clientVersion": WEB_CLIENT_VERSION, "hl": "en", "gl": "SE"}},
+            "videoId": vid, "racyCheckOk": True, "contentCheckOk": True,
+        }
+        headers = {
+            "Content-Type": "application/json", "User-Agent": _BROWSER_UA, "Origin": YT,
+            "X-YouTube-Client-Name": "1", "X-YouTube-Client-Version": WEB_CLIENT_VERSION,
+            "Cookie": "SOCS=CAI; CONSENT=YES+",
+        }
+        async with self.http.post(_api_base() + "/youtubei/v1/next?prettyPrint=false", json=body, headers=headers,
+                                  timeout=aiohttp.ClientTimeout(total=15)) as r:
+            if r.status != 200:
+                raise YtError(f"YouTube svarade {r.status}")
+            return await r.json(content_type=None)
+
+    async def related(self, vid: str, title: str = "") -> list[dict]:
+        """YouTubes förslag bredvid videon. Går de inte att få: en sökning på titeln i stället."""
+        hit = self._related.get(vid)
+        if hit and time.monotonic() - hit[0] < (6 * 3600 if hit[1] else 600):
+            return hit[1]
+        # Samma video efterfrågad samtidigt (bakgrunden och startsidan): en hämtning räcker.
+        task = self._related_tasks.get(vid)
+        if task is None:
+            task = self._related_tasks[vid] = asyncio.ensure_future(self._fetch_related(vid, title))
+            task.add_done_callback(lambda _: self._related_tasks.pop(vid, None))
+        return await asyncio.shield(task)
+
+    async def _fetch_related(self, vid: str, title: str) -> list[dict]:
+        items: list[dict] = []
+        try:
+            items = parse_related(await self._next(vid))
+            if items:
+                self.recs_stats["youtube"] += 1
+                self.recs_stats["error"] = None
+            else:
+                self.recs_stats["error"] = "YouTube skickade inga förslag som gick att läsa"
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, YtError) as e:
+            self.recs_stats["error"] = str(e) or type(e).__name__
+            log.info("Förslag för %s gick inte att hämta: %s", vid, e)
+        if not items and title.strip():
+            try:
+                res = await self.ytdlp.run_json(["--flat-playlist", *APPROX_DATE, f"ytsearch20:{title.strip()}"])
+                items = [video_card(e) for e in res.get("entries") or [] if VIDEO_RE.match(str(e.get("id") or ""))]
+                self.recs_stats["search"] += 1
+            except YtError as e:
+                log.info("Reservsökning för %s misslyckades: %s", vid, e)
+        if not items:
+            self.recs_stats["failed"] += 1
+        items = [i for i in items if i["id"] != vid]
+        self._related[vid] = (time.monotonic(), items)
+        if len(self._related) > 400:
+            for k in sorted(self._related, key=lambda k: self._related[k][0])[:100]:
+                self._related.pop(k, None)
+        return items
+
+    def _seeds(self, feed: list[dict]) -> list[dict]:
+        """Det man har tittat på senast, plus nya videor från kanalerna om historiken är tunn."""
+        blocked = self.data.blocked_ids()
+        seeds = []
+        for vid, p in sorted(self.data.progress.items(), key=lambda kv: kv[1].get("at", 0), reverse=True):
+            if not self.data.seen(vid) or p.get("channelId") in blocked:
+                continue
+            seeds.append({"id": vid, "title": p.get("title") or "", "channelId": p.get("channelId") or "", "weight": 1.0, "watched": True})
+            if len(seeds) >= 10:
+                break
+        if len(seeds) < 5:
+            used = {s["channelId"] for s in seeds}
+            for v in feed:
+                if len(seeds) >= 5:
+                    break
+                if v["channelId"] in used or v.get("watched") or v["id"] in self.data.dismissed or v.get("short"):
+                    continue
+                used.add(v["channelId"])
+                seeds.append({"id": v["id"], "title": v["title"], "channelId": v["channelId"], "weight": 0.6, "watched": False})
+        return seeds
+
+    async def recommendations(self, fresh: bool = False) -> dict:
+        """
+        Startsidans förslag, räknade här av YouTubes förslag bredvid det man har sett:
+        det som föreslås från flera håll och efter det man såg senast hamnar först.
+        """
+        feed = await self.feed() if self.data.subs else []
+        seeds = self._seeds(feed)
+        key = (tuple(s["id"] for s in seeds), len(self.data.dismissed), tuple(sorted(self.data.blocked_ids())),
+               len(self.data.subs), self.show_shorts)
+        async with self._recs_lock:
+            if not fresh and self._recs and self._recs[1] == key and time.monotonic() - self._recs[0] < 1800:
+                return self._recs[2]
+            result = await self._build_recs(seeds)
+            self._recs = (time.monotonic(), key, result)
+            return result
+
+    def invalidate_recs(self) -> None:
+        self._recs = None
+
+    async def _build_recs(self, seeds: list[dict]) -> dict:
+        sem = asyncio.Semaphore(4)
+
+        async def one(s):
+            async with sem:
+                return await self.related(s["id"], s["title"])
+
+        lists = await asyncio.gather(*(one(s) for s in seeds), return_exceptions=True)
+        lists = [l if isinstance(l, list) else [] for l in lists]
+        blocked = self.data.blocked_ids()
+        dismissed = set(self.data.dismissed)
+        skip = {s["id"] for s in seeds} | dismissed | {c["id"] for c in self.data.continue_watching(50)}
+        subs = {s["id"] for s in self.data.subs}
+
+        def ok(v: dict) -> bool:
+            return (v["id"] not in skip and not self.data.seen(v["id"]) and v.get("channelId") not in blocked
+                    and not v.get("live") and (self.show_shorts or not v.get("short")))
+
+        now_ms = time.time() * 1000
+        cands: dict[str, dict] = {}
+        for i, (seed, lst) in enumerate(zip(seeds, lists)):
+            weight = seed["weight"] * (0.9 ** i)
+            for rank, v in enumerate(lst[:24]):
+                if not ok(v):
+                    continue
+                c = cands.setdefault(v["id"], {"v": v, "score": 0.0})
+                c["score"] += weight / (1 + 0.12 * rank)
+        for c in cands.values():
+            v = c["v"]
+            if v.get("published") and now_ms - v["published"] < 14 * 86400e3:
+                c["score"] *= 1.15
+            if v.get("channelId") in subs:
+                c["score"] *= 1.1
+        ranked = [c["v"] for c in sorted(cands.values(), key=lambda c: c["score"], reverse=True)]
+        recommended = _diversify(ranked, per_channel=2, limit=40)
+
+        top = {v["id"] for v in recommended[:12]}
+        because = []
+        for seed, lst in zip(seeds, lists):
+            if not seed["watched"]:
+                continue
+            # Helst sådant som inte redan syns överst, men hellre dubbletter än en tunn rad.
+            vids = [v for v in lst if ok(v) and v["id"] not in top]
+            if len(vids) < 4:
+                vids = [v for v in lst if ok(v)]
+            vids = vids[:16]
+            if len(vids) >= 4:
+                because.append({"seed": {"id": seed["id"], "title": seed["title"]}, "videos": self.data.decorate([dict(v) for v in vids])})
+            if len(because) >= 3:
+                break
+
+        chans: dict[str, dict] = {}
+        for c in cands.values():
+            v = c["v"]
+            cid = v.get("channelId") or ""
+            if not CHANNEL_RE.match(cid) or cid in subs or cid in blocked:
+                continue
+            ch = chans.setdefault(cid, {"id": cid, "name": v.get("channel") or "", "avatar": None, "score": 0.0, "videos": 0})
+            ch["score"] += c["score"]
+            ch["videos"] += 1
+            ch["avatar"] = ch["avatar"] or v.get("avatar")
+        channels = sorted((c for c in chans.values() if c["videos"] >= 2), key=lambda c: c["score"], reverse=True)[:15]
+        for ch in channels:
+            ch.pop("score")
+            ch["subscribed"] = False
+
+        return {
+            "recommended": self.data.decorate([dict(v) for v in recommended]),
+            "because": because,
+            "channels": channels,
+            "seeds": sum(1 for s in seeds if s["watched"]),
+        }

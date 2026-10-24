@@ -145,6 +145,19 @@ class JptvWeb(http: OkHttpClient) {
     suspend fun ytVideo(id: String): YtVideoInfo =
         YtJson.videoInfo(getJson("/api/yt/video/$id", 90)) ?: throw IOException("Videon hittades inte")
 
+    /** Förslagen tar några sekunder första gången (YouTube frågas om varje sedd video). */
+    suspend fun ytRecommended(): YtRecs = YtJson.recs(getJson("/api/yt/recommended", 60))
+
+    /** "Inte intresserad": videon föreslås inte igen. */
+    suspend fun ytDismiss(videoId: String) {
+        send("POST", "/api/yt/dismiss", JSONObject().put("id", videoId))
+    }
+
+    /** Inga fler förslag från kanalen (ångras i webben under YouTube → Historik). */
+    suspend fun ytBlock(channelId: String, name: String) {
+        send("POST", "/api/yt/block", JSONObject().put("id", channelId).put("name", name))
+    }
+
     suspend fun ytSubscribe(channel: YtChannel, on: Boolean) {
         if (on) {
             send("POST", "/api/yt/subs", JSONObject().put("id", channel.id).put("name", channel.name).put("avatar", channel.avatar ?: JSONObject.NULL))

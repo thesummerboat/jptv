@@ -169,6 +169,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     suspend fun loadYtHome(): se.jptv.web.YtHome = yt().ytHome().also { ytHome = it }
 
+    /** Senaste förslagen, så att raderna syns direkt när man kommer tillbaka. */
+    var ytRecs by mutableStateOf<se.jptv.web.YtRecs?>(null)
+        private set
+
+    suspend fun loadYtRecs(): se.jptv.web.YtRecs = yt().ytRecommended().also { ytRecs = it }
+
     fun playYouTube(videoId: String, fromStart: Boolean = false) {
         open(Screen.Player(PlayRequest.YouTube(videoId, fromStart)))
     }

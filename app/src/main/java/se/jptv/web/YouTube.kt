@@ -39,6 +39,18 @@ data class YtSearch(val videos: List<YtVideo>, val channels: List<YtChannel>)
 
 data class YtChannelPage(val channel: YtChannel, val description: String, val videos: List<YtVideo>)
 
+/** En rad "Eftersom du tittade på …": videon man såg och förslagen bredvid den. */
+data class YtBecause(val seedId: String, val seedTitle: String, val videos: List<YtVideo>)
+
+/** Startsidans förslag, räknade av JPTV Web utifrån det man har sett och kanalerna man följer. */
+data class YtRecs(
+    val recommended: List<YtVideo>,
+    val because: List<YtBecause>,
+    val channels: List<YtChannel>,
+    /** Antal sedda videor förslagen bygger på (0: bara prenumerationerna). */
+    val seeds: Int,
+)
+
 data class YtChapter(val title: String, val startMs: Long, val endMs: Long)
 
 /** Del som SponsorBlock säger ska hoppas över (sponsor, egenreklam, prenumerera-tjat). */
@@ -118,6 +130,16 @@ object YtJson {
         channels = o.optJSONArray("channels").mapObjects(::channel),
     )
 
+    fun recs(o: JSONObject): YtRecs = YtRecs(
+        recommended = o.optJSONArray("recommended").mapObjects(::video),
+        because = o.optJSONArray("because").mapObjects { b ->
+            val seed = b.optJSONObject("seed") ?: return@mapObjects null
+            YtBecause(seed.str("id"), seed.str("title"), b.optJSONArray("videos").mapObjects(::video)).takeIf { it.videos.isNotEmpty() }
+        },
+        channels = o.optJSONArray("channels").mapObjects(::channel),
+        seeds = o.optInt("seeds", 0),
+    )
+
     fun channelPage(o: JSONObject): YtChannelPage? {
         val ch = channel(o) ?: return null
         return YtChannelPage(ch, o.str("description"), o.optJSONArray("videos").mapObjects(::video))
@@ -154,6 +176,7 @@ object YtJson {
         n == null -> null
         n >= 1_000_000 -> String.format(java.util.Locale("sv", "SE"), "%.1f mn visningar", n / 1_000_000.0)
         n >= 1_000 -> "${n / 1_000} tn visningar"
+        n == 1L -> "1 visning"
         else -> "$n visningar"
     }
 
