@@ -88,15 +88,17 @@
     const time = h('div', { class: 'p-time' });
     const nextBtn = h('button', { class: 'p-btn', title: 'Nästa avsnitt (N)', hidden: true }, JP.icon('next'));
     const menuBtn = h('button', { class: 'p-btn', title: 'Ljud, undertexter och kvalitet' }, JP.icon('gear'));
+    const sideBtn = h('button', { class: 'p-btn', title: 'Om videon och kommentarer (C)', hidden: true }, JP.icon('chat'));
+    const side = h('aside', { class: 'p-side', hidden: true });
     const pipBtn = h('button', { class: 'p-btn', title: 'Bild i bild' }, JP.icon('pip'));
     const fullBtn = h('button', { class: 'p-btn', title: 'Helskärm (F)' }, JP.icon('full'));
     if (!document.pictureInPictureEnabled) pipBtn.hidden = true;
     const menu = h('div', { class: 'p-menu', hidden: true });
-    const controls = h('div', { class: 'p-controls' }, playBtn, rewBtn, fwdBtn, volBtn, vol, time, h('div', { class: 'p-spacer' }), nextBtn, menuBtn, pipBtn, fullBtn);
+    const controls = h('div', { class: 'p-controls' }, playBtn, rewBtn, fwdBtn, volBtn, vol, time, h('div', { class: 'p-spacer' }), nextBtn, sideBtn, menuBtn, pipBtn, fullBtn);
     const bottom = h('div', { class: 'p-bottom' }, seek, controls);
-    const el = h('div', { class: 'player', hidden: true }, video, spinner, message, top, skip, nextCard, moved, bottom, menu);
+    const el = h('div', { class: 'player', hidden: true }, video, spinner, message, top, skip, nextCard, moved, bottom, menu, side);
     document.body.append(el);
-    return { el, video, spinner, message, backBtn, title, top, skip, nextCard, moved, seek, played, buffered, knob, hoverTime, hoverThumb, hoverLabel, playBtn, rewBtn, fwdBtn, volBtn, vol, time, nextBtn, menuBtn, pipBtn, fullBtn, menu, bottom };
+    return { el, video, spinner, message, backBtn, title, top, skip, nextCard, moved, seek, played, buffered, knob, hoverTime, hoverThumb, hoverLabel, playBtn, rewBtn, fwdBtn, volBtn, vol, time, nextBtn, menuBtn, sideBtn, side, pipBtn, fullBtn, menu, bottom };
   }
 
   let ui = null;
@@ -147,6 +149,9 @@
     ui.fullBtn.addEventListener('click', toggleFull);
     ui.pipBtn.addEventListener('click', () => { (document.pictureInPictureElement ? document.exitPictureInPicture() : v.requestPictureInPicture()).catch(() => {}); });
     ui.menuBtn.addEventListener('click', (e) => { e.stopPropagation(); ui.menu.hidden ? openMenu() : (ui.menu.hidden = true); });
+    ui.sideBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleSide(); });
+    // Rullning och markering i panelen ska inte styra spelaren.
+    ui.side.addEventListener('keydown', (e) => { if (e.key !== 'Escape') e.stopPropagation(); });
     ui.nextBtn.addEventListener('click', () => playNext());
     ui.skip.addEventListener('click', skipIntro);
     v.addEventListener('click', () => { if (!ui.menu.hidden) { ui.menu.hidden = true; return; } togglePlay(); });
@@ -234,8 +239,10 @@
       case 'm': case 'M': v.muted = !v.muted; break;
       case 'n': case 'N': if (P.next) playNext(); break;
       case 's': case 'S': if (!ui.skip.hidden) skipIntro(); break;
+      case 'c': case 'C': if (P.mode === 'yt') toggleSide(); break;
       case 'Escape':
         if (!ui.menu.hidden) ui.menu.hidden = true;
+        else if (!ui.side.hidden) toggleSide(false);
         else if (!document.fullscreenElement) closeFromUi();
         break;
       default: handled = false;
@@ -439,6 +446,119 @@
     if (P.mode === 'yt' && P.yt) JP.beacon('/api/yt/progress', ytBody());
   });
 
+  /* ---------- Om videon och kommentarer (YouTube) ---------- */
+
+  /** Tidsangivelser ("1:23", "1:02:03") i text blir knappar som spolar dit. */
+  function richText(text) {
+    const out = [];
+    const re = /(^|[\s(])((?:\d{1,2}:)?\d{1,2}:\d{2})(?=$|[\s),.!?])/g;
+    let last = 0, m;
+    while ((m = re.exec(text))) {
+      const at = m.index + m[1].length;
+      out.push(text.slice(last, at));
+      const secs = m[2].split(':').reduce((a, b) => a * 60 + +b, 0);
+      out.push(h('button', { class: 'p-ts', onclick: () => { ui.video.currentTime = secs; showControls(); } }, m[2]));
+      last = at + m[2].length;
+    }
+    out.push(text.slice(last));
+    return out;
+  }
+
+  function commentEl(c) {
+    const meta = [c.author, JP.ago(c.published)].filter(Boolean).join(' · ');
+    const el = h('div', { class: 'p-comment' + (c.creator ? ' creator' : '') },
+      h('img', { class: 'p-comment-avatar', src: JP.ytImg(c.avatar), alt: '', loading: 'lazy', onerror: (e) => { e.target.style.visibility = 'hidden'; } }),
+      h('div', { class: 'p-comment-body' },
+        c.pinned ? h('div', { class: 'p-comment-pin' }, 'Fäst av kanalen') : null,
+        h('div', { class: 'p-comment-meta' }, meta),
+        h('div', { class: 'p-comment-text' }, richText(c.text)),
+        h('div', { class: 'p-comment-foot' },
+          c.likes ? h('span', null, '👍 ' + (c.likes >= 1000 ? (c.likes / 1000).toLocaleString('sv-SE', { maximumFractionDigits: 1 }) + ' tn' : c.likes)) : null,
+          c.hearted ? h('span', { title: 'Kanalen gillar' }, '❤') : null)));
+    if (c.replies && c.repliesToken) {
+      const box = h('div', { class: 'p-replies' });
+      el.querySelector('.p-comment-body').append(box, moreButton(box, c.repliesToken, `${c.replies} svar`, 'Fler svar'));
+    }
+    return el;
+  }
+
+  /** "Fler kommentarer" / "12 svar": hämtar nästa sida till listan, så länge det finns fler. */
+  function moreButton(list, token, label, again) {
+    let next = token;
+    const btn = h('button', { class: 'p-more-btn' }, label);
+    btn.addEventListener('click', async () => {
+      const vid = P.yt && P.yt.id;
+      btn.disabled = true;
+      btn.textContent = 'Hämtar …';
+      try {
+        const page = await JP.api(`/api/yt/comments/${vid}?token=${encodeURIComponent(next)}`);
+        if (!P.yt || P.yt.id !== vid) return;
+        list.append(...page.comments.map(commentEl));
+        next = page.next;
+        if (!next) { btn.remove(); return; }
+        btn.textContent = again;
+      } catch (e) {
+        btn.textContent = e.message;
+      }
+      btn.disabled = false;
+    });
+    return btn;
+  }
+
+  async function renderSide() {
+    const v = P.yt;
+    if (!v) return;
+    const side = ui.side;
+    const facts = [JP.viewCount(v.views), v.published ? new Date(v.published).toLocaleDateString('sv-SE', { year: 'numeric', month: 'long', day: 'numeric' }) : null,
+      v.likes ? '👍 ' + v.likes.toLocaleString('sv-SE') : null].filter(Boolean).join(' · ');
+    const desc = h('div', { class: 'p-desc collapsed' }, richText(v.description || ''));
+    const more = h('button', { class: 'p-more-btn' }, 'Visa mer');
+    more.addEventListener('click', () => { desc.classList.toggle('collapsed'); more.textContent = desc.classList.contains('collapsed') ? 'Visa mer' : 'Visa mindre'; });
+    const list = h('div', { class: 'p-comments' }, JP.spinner('Hämtar kommentarer …'));
+    const head = h('h3', null, 'Kommentarer');
+    side.replaceChildren(...[
+      h('div', { class: 'p-side-head' }, h('h2', null, 'Om videon'), h('button', { class: 'p-btn', title: 'Stäng (Esc)', onclick: () => toggleSide(false) }, JP.icon('close'))),
+      h('div', { class: 'p-side-title' }, v.title),
+      h('a', { class: 'p-side-channel', href: '#/youtube/channel/' + v.channelId, onclick: (e) => { e.preventDefault(); JP.playerReturn = null; location.hash = '#/youtube/channel/' + v.channelId; } }, v.channel),
+      facts ? h('div', { class: 'dim small' }, facts) : null,
+      v.description ? desc : null,
+      v.description && v.description.length > 260 ? more : null,
+      head, list].filter(Boolean));
+    side.scrollTop = 0;
+    let c = P.ytComments && P.ytComments.id === v.id ? P.ytComments.data : null;
+    if (!c) {
+      try {
+        c = await JP.api('/api/yt/comments/' + v.id);
+        P.ytComments = { id: v.id, data: c };
+      } catch (e) {
+        if (P.yt === v) list.replaceChildren(h('div', { class: 'dim small' }, e.message));
+        return;
+      }
+    }
+    if (P.yt !== v) return;
+    if (c.count != null) head.textContent = `Kommentarer · ${c.count.toLocaleString('sv-SE')}`;
+    if (!c.comments.length) {
+      list.replaceChildren(h('div', { class: 'dim small' }, c.disabled ? 'Kommentarerna är avstängda för den här videon.' : 'Inga kommentarer än.'));
+      return;
+    }
+    list.replaceChildren(...c.comments.map(commentEl));
+    if (c.next) list.after(moreButton(list, c.next, 'Fler kommentarer', 'Fler kommentarer'));
+  }
+
+  function toggleSide(open) {
+    if (!ui) return;
+    const show = open ?? ui.side.hidden;
+    if (show && P.mode !== 'yt') return;
+    ui.side.hidden = !show;
+    ui.el.classList.toggle('side-open', show);
+    ui.sideBtn.classList.toggle('on', show);
+    if (show && ui.side.dataset.vid !== (P.yt && P.yt.id)) {
+      ui.side.dataset.vid = P.yt ? P.yt.id : '';
+      renderSide();
+    }
+    try { localStorage.setItem('jptv.side', show ? '1' : '0'); } catch (e) { /* */ }
+  }
+
   /**
    * Förhandsbild i bubblan över tidslinjen. YouTube: rutor ur storyboard-arken (CSS-utsnitt).
    * Plex: en bild per fem sekunder från Plex egna förhandsbilder, om biblioteket har dem.
@@ -489,7 +609,7 @@
     if (item.type === 'episode') {
       ui.title.replaceChildren(h('div', { class: 'p-title-main' }, item.show || ''), h('div', { class: 'p-title-sub' }, `${JP.epCode(item)} · ${item.title}`));
     } else {
-      ui.title.replaceChildren(h('div', { class: 'p-title-main' }, item.title), item.year ? h('div', { class: 'p-title-sub' }, String(item.year)) : null);
+      ui.title.replaceChildren(...[h('div', { class: 'p-title-main' }, item.title), item.year ? h('div', { class: 'p-title-sub' }, String(item.year)) : null].filter(Boolean));
     }
   }
 
@@ -689,6 +809,10 @@
     P.duration = v.duration || 0;
     P.skipped = new Set();
     P.sbLoaded = new Set([0]);
+    ui.side.dataset.vid = '';
+    let sideWanted = !ui.side.hidden;
+    try { sideWanted = sideWanted || (localStorage.getItem('jptv.side') === '1' && window.innerWidth >= 1100); } catch (e) { /* */ }
+    if (sideWanted) toggleSide(true);
     if (v.storyboard) new Image().src = v.storyboard.url.replace('{n}', 0);
     const meta = [JP.viewCount(v.views), JP.ago(v.published)].filter(Boolean).join(' · ');
     ui.title.replaceChildren(h('div', { class: 'p-title-main' }, v.title),
@@ -735,6 +859,8 @@
     document.body.classList.add('playing');
     ui.seek.hidden = false;
     ui.menuBtn.hidden = mode !== 'plex' && mode !== 'yt';
+    ui.sideBtn.hidden = mode !== 'yt';
+    if (mode !== 'yt') toggleSide(false);
     ui.rewBtn.hidden = ui.fwdBtn.hidden = false;
     showControls();
   }

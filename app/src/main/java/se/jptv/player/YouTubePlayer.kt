@@ -48,7 +48,7 @@ import se.jptv.ui.MessageBox
 import se.jptv.ui.requestWhenReady
 import se.jptv.web.YtVideoInfo
 
-private enum class YtPanel { NONE, TRACKS, STYLE, OPTIONS }
+private enum class YtPanel { NONE, TRACKS, STYLE, OPTIONS, ABOUT }
 
 private val SPEEDS = listOf(0.75f, 1f, 1.25f, 1.5f, 2f)
 
@@ -446,8 +446,15 @@ internal fun YouTubePlayer(vm: AppViewModel, request: PlayRequest.YouTube) {
                 onChange = { vm.changeSubtitleLook(it) },
                 modifier = Modifier.align(Alignment.CenterEnd),
             )
+            YtPanel.ABOUT -> if (v != null) {
+                YtAboutPanel(vm, v, modifier = Modifier.align(Alignment.CenterEnd), onSeek = { ms ->
+                    exo.seekTo(ms)
+                    close()
+                })
+            }
             YtPanel.OPTIONS -> {
                 val sections = buildList {
+                    add(PanelSection("Video", listOf(PanelOption("Om videon och kommentarer", detail = "Beskrivning och vad folk skriver") { panel = YtPanel.ABOUT })))
                     add(
                         PanelSection(
                             "Hastighet",

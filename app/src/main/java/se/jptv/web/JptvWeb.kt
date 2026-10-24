@@ -148,6 +148,12 @@ class JptvWeb(http: OkHttpClient) {
     /** Förslagen tar några sekunder första gången (YouTube frågas om varje sedd video). */
     suspend fun ytRecommended(): YtRecs = YtJson.recs(getJson("/api/yt/recommended", 60))
 
+    /** Kommentarer: första sidan, eller nästa sida / svaren på en kommentar (token). */
+    suspend fun ytComments(videoId: String, token: String? = null): YtComments {
+        val q = token?.let { "?token=" + java.net.URLEncoder.encode(it, "UTF-8") } ?: ""
+        return YtJson.comments(getJson("/api/yt/comments/$videoId$q", 30))
+    }
+
     /** Be servern förbereda en video (man står på kortet), så att den startar direkt. */
     suspend fun ytPrefetch(videoId: String) {
         send("POST", "/api/yt/prefetch/$videoId", null)

@@ -692,6 +692,15 @@ async def yt_recommended(request: web.Request):
     return web.json_response(await yt(request).recommendations(fresh=request.query.get("fresh") == "1"))
 
 
+@routes.get("/api/yt/comments/{id}")
+async def yt_comments(request: web.Request):
+    """Kommentarer: första sidan, eller ?token= för nästa sida eller svar."""
+    try:
+        return web.json_response(await yt(request).comments(_video_id(request), request.query.get("token") or None))
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, YtError) as e:
+        return web.json_response({"error": f"Kommentarerna gick inte att hämta ({e or type(e).__name__})"}, status=502)
+
+
 @routes.post("/api/yt/prefetch/{id}")
 async def yt_prefetch(request: web.Request):
     """Förbered en video (man står på kortet): den startar direkt när man trycker."""

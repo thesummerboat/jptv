@@ -16,6 +16,7 @@ YouTube utan Google-konto, som FreeTube.
 from __future__ import annotations
 
 import asyncio
+import base64
 import csv
 import hashlib
 import io
@@ -107,8 +108,32 @@ def _friendly(stderr: str) -> str:
     return text[:300]
 
 
+WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ytdlp_worker.py")
+
+
+class _WorkerGone(Exception):
+    """yt-dlp-processen dog eller startade inte. counts=False: vi stoppade den själva."""
+
+    def __init__(self, reason: str, counts: bool = True):
+        super().__init__(reason)
+        self.counts = counts
+
+
+class _Worker:
+    def __init__(self, proc: asyncio.subprocess.Process):
+        self.proc = proc
+        self.pending: dict[int, asyncio.Future] = {}
+        self.next_id = 0
+        self.reader: asyncio.Future | None = None
+        self.stopped = False
+
+
 class YtDlp:
-    """Kör yt-dlp som eget program. Nyare versioner installeras i lib_dir och går före den inbyggda."""
+    """
+    yt-dlp, helst i en process som hålls igång (ytdlp_worker.py) så att varje video slipper starta
+    Python och läsa in yt-dlp. Går det inte körs yt-dlp som vanligt program. Nyare versioner
+    installeras i lib_dir och går före den inbyggda.
+    """
 
     def __init__(self, lib_dir: str):
         self.lib_dir = lib_dir
@@ -116,6 +141,10 @@ class YtDlp:
         self.updated_at = 0.0
         self.update_error: str | None = None
         self.updating = False
+        self._w: _Worker | None = None
+        self._w_lock = asyncio.Lock()
+        self.worker_failures = 0
+        self.worker_error: str | None = None
         self._stamp = os.path.join(lib_dir, ".updated")
         try:
             self.updated_at = os.path.getmtime(self._stamp)
@@ -132,7 +161,108 @@ class YtDlp:
             env["PYTHONPATH"] = self.lib_dir + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         return env
 
+    @property
+    def worker_running(self) -> bool:
+        return self._w is not None and self._w.proc.returncode is None
+
+    async def _start_worker(self) -> _Worker:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-u", WORKER,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            env=self._env(), limit=1 << 27,
+        )
+        try:
+            line = await asyncio.wait_for(proc.stdout.readline(), 60)
+            hello = json.loads(line) if line else {}
+        except (asyncio.TimeoutError, ValueError):
+            hello = {}
+        if "ready" not in hello:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
+            raise _WorkerGone("startade inte")
+        w = _Worker(proc)
+        w.reader = asyncio.ensure_future(self._read(w))
+        return w
+
+    async def _read(self, w: _Worker) -> None:
+        try:
+            while True:
+                line = await w.proc.stdout.readline()
+                if not line:
+                    break
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                fut = w.pending.pop(msg.get("id"), None)
+                if fut is not None and not fut.done():
+                    fut.set_result(msg)
+        finally:
+            # Processen är borta: de som väntar tar det vanliga programmet i stället.
+            for fut in w.pending.values():
+                if not fut.done():
+                    fut.set_exception(_WorkerGone("avslutades", counts=not w.stopped))
+            w.pending.clear()
+            if self._w is w:
+                self._w = None
+
+    def stop(self) -> None:
+        """Stänger processen (efter en uppdatering startas en ny med nya yt-dlp)."""
+        w, self._w = self._w, None
+        if w is not None:
+            w.stopped = True
+        if w is not None and w.proc.returncode is None:
+            try:
+                w.proc.kill()
+                w.proc.stdin.close()
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                asyncio.get_running_loop().create_task(w.proc.wait())
+            except RuntimeError:
+                pass
+
+    async def _run_worker(self, args: list[str], timeout: float) -> dict:
+        async with self._w_lock:
+            w = self._w
+            if w is None or w.proc.returncode is not None:
+                w = self._w = await self._start_worker()
+        w.next_id += 1
+        rid = w.next_id
+        fut = asyncio.get_running_loop().create_future()
+        w.pending[rid] = fut
+        try:
+            w.proc.stdin.write((json.dumps({"id": rid, "args": args}) + "\n").encode())
+            await w.proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError, AttributeError) as e:
+            w.pending.pop(rid, None)
+            raise _WorkerGone(str(e))
+        try:
+            msg = await asyncio.wait_for(fut, timeout)
+        except asyncio.TimeoutError:
+            w.pending.pop(rid, None)
+            # Något hänger sig: nästa gång en ny process.
+            if self._w is w:
+                self.stop()
+            raise YtError("YouTube svarade inte i tid")
+        if "error" in msg:
+            raise YtError(_friendly(str(msg["error"])))
+        return msg.get("ok") or {}
+
     async def run_json(self, args: list[str], timeout: float = 60) -> dict:
+        if not os.environ.get("JPTV_YTDLP") and self.worker_failures < 3:
+            try:
+                result = await self._run_worker(args, timeout)
+                self.worker_failures = 0
+                return result
+            except (_WorkerGone, OSError) as e:
+                if getattr(e, "counts", True):
+                    self.worker_failures += 1
+                self.worker_error = str(e) or type(e).__name__
+                log.warning("yt-dlp-processen: %s; kör yt-dlp som vanligt program", self.worker_error)
         proc = await asyncio.create_subprocess_exec(
             *self._cmd(), "-J", "--no-warnings", "--no-progress", *args,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=self._env(),
@@ -181,6 +311,8 @@ class YtDlp:
                 with open(self._stamp, "w") as f:
                     f.write(str(time.time()))
                 self.updated_at = time.time()
+                self.stop()
+                self.worker_failures = 0
         except (OSError, asyncio.TimeoutError) as e:
             self.update_error = str(e)[:200]
         finally:
@@ -550,6 +682,103 @@ def parse_related(data: dict) -> list[dict]:
             seen.add(v["id"])
             out.append(v)
     return out
+
+
+# ------------------------------------------------------------------ kommentarer
+
+
+def comment_token(vid: str) -> str:
+    """Första "sidan" av kommentarerna till en video (samma som yt-dlp bygger)."""
+    raw = f'\x12\r\x12\x0b{vid}\x18\x062\'"\x11"\x0b{vid}0\x00x\x020\x00B\x10comments-section'
+    return base64.b64encode(raw.encode()).decode()
+
+
+def _cont_token(obj) -> str | None:
+    for _, cmd in _walk(obj, ("continuationCommand",)):
+        if cmd.get("token"):
+            return cmd["token"]
+    for _, data in _walk(obj, ("nextContinuationData",)):
+        if data.get("continuation"):
+            return data["continuation"]
+    return None
+
+
+def _comment_entity(vm: dict, entities: dict) -> dict | None:
+    """Nyare formatet: commentViewModel pekar på data i frameworkUpdates (commentEntityPayload)."""
+    payload = (entities.get(vm.get("commentKey")) or {}).get("commentEntityPayload")
+    if not isinstance(payload, dict):
+        return None
+    props = payload.get("properties") or {}
+    author = payload.get("author") or {}
+    toolbar = payload.get("toolbar") or {}
+    state = (entities.get(vm.get("toolbarStateKey")) or {}).get("engagementToolbarStateEntityPayload") or {}
+    likes = toolbar.get("likeCountNotliked") or toolbar.get("likeCountA11y") or ""
+    return {
+        "id": props.get("commentId") or "",
+        "text": _text(props.get("content")),
+        "author": author.get("displayName") or "",
+        "authorId": author.get("channelId") or "",
+        "avatar": author.get("avatarThumbnailUrl"),
+        "creator": bool(author.get("isCreator")),
+        "verified": bool(author.get("isVerified")),
+        "likes": parse_count(str(likes)) or 0,
+        "replies": parse_count(str(toolbar.get("replyCount") or "")) or 0,
+        "published": parse_ago(props.get("publishedTime") or ""),
+        "pinned": vm.get("pinnedText") is not None,
+        "hearted": state.get("heartState") == "TOOLBAR_HEART_STATE_HEARTED",
+    }
+
+
+def _comment_renderer(r: dict) -> dict | None:
+    """Äldre formatet (commentRenderer)."""
+    if not r.get("commentId"):
+        return None
+    return {
+        "id": r["commentId"],
+        "text": _text(r.get("contentText")),
+        "author": _text(r.get("authorText")),
+        "authorId": _browse_id(r.get("authorEndpoint") or {}),
+        "avatar": _sources_url(_dig(r, "authorThumbnail", "thumbnails"), 88),
+        "creator": bool(r.get("authorIsChannelOwner")),
+        "verified": False,
+        "likes": parse_count(_text(r.get("voteCount"))) or 0,
+        "replies": int(r.get("replyCount") or 0),
+        "published": parse_ago(_text(r.get("publishedTimeText"))),
+        "pinned": bool(r.get("pinnedCommentBadge")),
+        "hearted": bool(_dig(r, "actionButtons", "commentActionButtonsRenderer", "creatorHeart")),
+    }
+
+
+def parse_comments(resp: dict) -> tuple[dict | None, list[dict], str | None]:
+    """(rubriken med antal och sortering, kommentarerna, nästa sida)."""
+    entities = {}
+    for m in _dig(resp, "frameworkUpdates", "entityBatchUpdate", "mutations") or []:
+        if isinstance(m, dict) and m.get("entityKey"):
+            entities[m["entityKey"]] = m.get("payload") or {}
+    items = []
+    for ep in resp.get("onResponseReceivedEndpoints") or []:
+        for key in ("reloadContinuationItemsCommand", "appendContinuationItemsAction"):
+            items += _dig(ep, key, "continuationItems") or []
+    header, comments, nxt = None, [], None
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if "commentsHeaderRenderer" in it:
+            header = it["commentsHeaderRenderer"]
+        elif "commentThreadRenderer" in it or "commentViewModel" in it or "commentRenderer" in it:
+            thread = it.get("commentThreadRenderer") or {}
+            vm = _dig(thread, "commentViewModel", "commentViewModel") or it.get("commentViewModel") or {}
+            c = _comment_entity(vm, entities) if vm else None
+            if c is None:
+                r = _dig(thread, "comment", "commentRenderer") or thread.get("commentRenderer") or it.get("commentRenderer")
+                c = _comment_renderer(r) if isinstance(r, dict) else None
+            if c and c["id"]:
+                replies = _dig(thread, "replies", "commentRepliesRenderer")
+                c["repliesToken"] = _cont_token(replies) if replies else None
+                comments.append(c)
+        elif "continuationItemRenderer" in it:
+            nxt = _cont_token(it["continuationItemRenderer"])
+    return header, comments, nxt
 
 
 def _diversify(items: list[dict], per_channel: int, limit: int) -> list[dict]:
@@ -983,6 +1212,87 @@ class YtStore:
         return items
 
 
+# ------------------------------------------------------------------ snabbstart
+
+
+def fast_formats_ok(info: dict, max_height: int) -> bool:
+    """
+    Duger snabbstartens svar? Spelbara bild- och ljudfiler, och ingen högre upplösning i listan
+    som vi inte kan spela (då ger den vanliga hämtningen troligen bättre kvalitet).
+    """
+    videos, audio = pick_formats(info, max_height)
+    if not videos or not audio or not info.get("duration"):
+        return False
+    vcodecs = _codecs()[0]
+    best = max((f.get("height") or 0) for f in videos)
+    listed = max((f.get("height") or 0 for f in info.get("formats") or []
+                  if str(f.get("vcodec") or "").startswith(vcodecs) and (f.get("height") or 0) <= max_height), default=0)
+    return best >= listed
+
+
+class FastStart:
+    """
+    Snabbstart: yt-dlp frågar bara YouTubes visionOS-klient. Den behöver ingen JavaScript (Deno)
+    och bara en förfrågan, så videon hämtas på en bråkdel av tiden. De första gångerna (och då och
+    då) görs även den vanliga hämtningen i bakgrunden: ger den bättre kvalitet stängs snabbstarten
+    av i en vecka. Misslyckas den tre gånger i rad stängs den av ett dygn.
+    """
+
+    CHECKS = 3
+
+    def __init__(self, settings):
+        self.settings = settings
+        d = settings.get("youtube_fast") or {}
+        self.state = d.get("state") if d.get("state") in ("trial", "on", "off") else "trial"
+        self.checks = int(d.get("checks") or 0)
+        self.until = float(d.get("until") or 0)
+        self.reason = d.get("reason")
+        self.failures = 0
+        self.count = 0
+
+    def _save(self) -> None:
+        self.settings.set(youtube_fast={"state": self.state, "checks": self.checks, "until": self.until, "reason": self.reason})
+
+    def enabled(self) -> bool:
+        if self.state == "off" and time.time() > self.until:
+            self.state, self.checks, self.reason = "trial", 0, None
+            self._save()
+        return self.state != "off"
+
+    def should_check(self) -> bool:
+        self.count += 1
+        return self.state == "trial" or self.count % 25 == 0
+
+    def compared(self, fast_best: int, full_best: int) -> None:
+        if full_best > fast_best:
+            self.disable(f"gav {fast_best}p när {full_best}p fanns", 7 * 86400)
+        elif self.state == "trial":
+            self.checks += 1
+            if self.checks >= self.CHECKS:
+                self.state = "on"
+            self._save()
+
+    def failed(self, why: str) -> None:
+        self.failures += 1
+        if self.failures >= 3:
+            self.disable(why, 86400)
+
+    def worked(self) -> None:
+        self.failures = 0
+
+    def disable(self, why: str, seconds: float) -> None:
+        self.state, self.until, self.reason, self.checks, self.failures = "off", time.time() + seconds, why, 0, 0
+        self._save()
+        log.info("Snabbstart av: %s", why)
+
+    def describe(self) -> str:
+        if self.state == "on":
+            return "på"
+        if self.state == "trial":
+            return f"provas ({self.checks} av {self.CHECKS} kontroller klara)"
+        return f"av till {datetime.fromtimestamp(self.until).strftime('%d/%m %H:%M')} ({self.reason or 'fel'})"
+
+
 # ------------------------------------------------------------------ tjänsten
 
 
@@ -992,6 +1302,8 @@ class YouTube:
         self.settings = store
         self.data = YtStore(config_dir)
         self.ytdlp = YtDlp(os.path.join(config_dir, "ytdlp"))
+        self.fast = FastStart(store)
+        self.last_mode: str | None = None
         self._videos: dict[str, dict] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._feeds: dict[str, tuple[float, list[dict]]] = {}
@@ -1003,6 +1315,7 @@ class YouTube:
         self._warming: set[str] = set()
         self._related_tasks: dict[str, asyncio.Future] = {}
         self._sheets: dict[str, bytes] = {}
+        self._comments: dict[str, tuple[float, dict]] = {}
         self._prefetching: set[str] = set()
         self._prefetch_times: list[float] = []
         self.last_extract: float | None = None
@@ -1027,6 +1340,8 @@ class YouTube:
     def status(self) -> dict:
         return {
             "ytdlp": self.ytdlp.version,
+            "worker": self.ytdlp.worker_running,
+            "workerError": self.ytdlp.worker_error,
             "deno": bool(shutil.which("deno")),
             "updatedAt": int(self.ytdlp.updated_at * 1000) if self.ytdlp.updated_at else None,
             "updating": self.ytdlp.updating,
@@ -1038,6 +1353,8 @@ class YouTube:
             "blocked": list(self.data.blocked),
             "recs": dict(self.recs_stats),
             "lastExtract": self.last_extract,
+            "lastMode": self.last_mode,
+            "fast": self.fast.describe(),
         }
 
     # ---------- flöden
@@ -1171,46 +1488,96 @@ class YouTube:
             lock = self._locks[vid] = asyncio.Lock()
         return lock
 
-    async def _video(self, vid: str, fresh: bool = False) -> dict:
-        """yt-dlp:s uppgifter om videon, med valda format. Sparas tills adresserna går ut."""
+    def _extract_args(self, vid: str, fast: bool) -> list[str]:
+        return [
+            "--no-playlist", "--cache-dir", os.path.join(self.ytdlp.lib_dir, "cache"),
+            # Varken m3u8/dash-manifesten eller automatiskt översatta undertexter används: färre
+            # förfrågningar och mindre JSON, så att videon startar fortare.
+            "--extractor-args", "youtube:" + ("player_client=visionos;" if fast else "") + "skip=hls,dash,translated_subs",
+            f"{YT}/watch?v={vid}",
+        ]
+
+    async def _video(self, vid: str, fresh: bool = False, full: bool = False) -> dict:
+        """
+        yt-dlp:s uppgifter om videon, med valda format. Sparas tills adresserna går ut.
+        fresh: hämta på nytt (adressen gick ut). full: inte snabbstart (den gav fel).
+        """
         if not VIDEO_RE.match(vid):
             raise YtError("Ogiltig video")
         async with self._lock(vid):
             v = self._videos.get(vid)
-            if v and not fresh and time.time() < v["expires"] - 600:
+            usable = v and (not full or not v["fast"])
+            if usable and not fresh and time.time() < v["expires"] - 600:
                 return v
+            # Flera delar fick 403 samtidigt: en ny hämtning räcker.
+            if usable and fresh and time.monotonic() - v["fetched"] < 30:
+                return v
+            if full and v and v["fast"]:
+                self.fast.failed("YouTube nekade snabbstartens adresser")
+            info, fast = None, False
             started = time.monotonic()
-            info = await self.ytdlp.run_json([
-                "--no-playlist", "--cache-dir", os.path.join(self.ytdlp.lib_dir, "cache"),
-                # Varken m3u8/dash-manifesten eller automatiskt översatta undertexter används: färre
-                # förfrågningar och mindre JSON, så att videon startar fortare.
-                "--extractor-args", "youtube:skip=hls,dash,translated_subs",
-                f"{YT}/watch?v={vid}",
-            ], timeout=90)
+            if not full and self.fast.enabled():
+                try:
+                    candidate = await self.ytdlp.run_json(self._extract_args(vid, True), timeout=45)
+                    if fast_formats_ok(candidate, self.max_height):
+                        info, fast = candidate, True
+                        self.fast.worked()
+                    else:
+                        self.fast.failed("inga spelbara format")
+                except YtError as e:
+                    text = str(e)
+                    if any(w in text for w in ("privat", "finns inte", "åldersgräns")):
+                        raise
+                    self.fast.failed(text)
+            if info is None:
+                info = await self.ytdlp.run_json(self._extract_args(vid, False), timeout=90)
             self.last_extract = round(time.monotonic() - started, 1)
-            log.info("yt-dlp hämtade %s på %.1f s", vid, self.last_extract)
-            if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming"):
-                raise YtError("Livesändningar stöds inte än")
-            videos, audio = pick_formats(info, self.max_height)
-            if not videos or not audio:
-                raise YtError(
-                    "YouTube skickade inga format som går att spela utan inloggning. "
-                    "Det brukar lösa sig när yt-dlp har uppdaterats (sker varje natt)."
-                )
-            urls = [f["url"] for f in videos + [audio]]
-            expires = min((_expires(u) for u in urls if _expires(u)), default=time.time() + 4 * 3600)
-            formats = {f["format_id"]: f for f in videos + [audio]}
-            v = {
-                "info": info, "videos": videos, "audio": audio, "formats": formats, "subs": pick_subtitles(info),
-                "storyboard": pick_storyboard(info), "expires": min(expires, time.time() + 5 * 3600), "index": {},
-                "index_tasks": {},
-            }
+            self.last_mode = "snabb" if fast else "vanlig"
+            log.info("yt-dlp hämtade %s på %.1f s (%s)", vid, self.last_extract, self.last_mode)
+            v = self._prepare(info, fast)
             self._videos[vid] = v
             # Gamla videor ur minnet.
             if len(self._videos) > 40:
                 for k in sorted(self._videos, key=lambda k: self._videos[k]["expires"])[:10]:
                     self._videos.pop(k, None)
+            if fast and self.fast.should_check():
+                self._check_fast(vid, v)
             return v
+
+    def _prepare(self, info: dict, fast: bool) -> dict:
+        if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming"):
+            raise YtError("Livesändningar stöds inte än")
+        videos, audio = pick_formats(info, self.max_height)
+        if not videos or not audio:
+            raise YtError(
+                "YouTube skickade inga format som går att spela utan inloggning. "
+                "Det brukar lösa sig när yt-dlp har uppdaterats (sker varje natt)."
+            )
+        urls = [f["url"] for f in videos + [audio]]
+        expires = min((_expires(u) for u in urls if _expires(u)), default=time.time() + 4 * 3600)
+        formats = {f["format_id"]: f for f in videos + [audio]}
+        return {
+            "info": info, "videos": videos, "audio": audio, "formats": formats, "subs": pick_subtitles(info),
+            "storyboard": pick_storyboard(info), "expires": min(expires, time.time() + 5 * 3600), "index": {},
+            "index_tasks": {}, "fast": fast, "fetched": time.monotonic(),
+        }
+
+    def _check_fast(self, vid: str, v: dict) -> None:
+        """Den vanliga hämtningen i bakgrunden: ger snabbstarten lika bra kvalitet?"""
+        fast_best = max((f.get("height") or 0) for f in v["videos"])
+
+        async def run():
+            try:
+                info = await self.ytdlp.run_json(self._extract_args(vid, False), timeout=120)
+            except YtError:
+                return
+            videos, audio = pick_formats(info, self.max_height)
+            if videos and audio:
+                self.fast.compared(fast_best, max((f.get("height") or 0) for f in videos))
+
+        task = asyncio.ensure_future(run())
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
 
     async def video(self, vid: str) -> dict:
         sponsor_task = asyncio.ensure_future(self.sponsor_segments(vid))
@@ -1301,7 +1668,7 @@ class YouTube:
     async def media(self, vid: str, itag: str) -> str:
         """Spellista för ett format: byte-intervall ur filens index (sidx)."""
         for attempt in (0, 1):
-            v = await self._video(vid, fresh=attempt == 1)
+            v = await self._video(vid, fresh=attempt == 1, full=attempt == 1)
             if itag not in v["formats"]:
                 raise YtError("Okänt format")
             cached = v["index"].get(itag)
@@ -1368,7 +1735,7 @@ class YouTube:
         return text
 
     async def segment_source(self, vid: str, itag: str, retry: bool = False) -> tuple[str, dict]:
-        v = await self._video(vid, fresh=retry)
+        v = await self._video(vid, fresh=retry, full=retry)
         f = v["formats"].get(itag)
         if f is None:
             raise YtError("Okänt format")
@@ -1381,7 +1748,7 @@ class YouTube:
         if hit is not None:
             return hit
         for attempt in (0, 1):
-            v = await self._video(vid, fresh=attempt == 1)
+            v = await self._video(vid, fresh=attempt == 1, full=attempt == 1)
             sb = v.get("storyboard")
             if not sb or not 0 <= n < len(sb["fragments"]):
                 return None
@@ -1432,10 +1799,16 @@ class YouTube:
         if not shutil.which("deno") and not os.environ.get("JPTV_YTDLP"):
             raise YtError("Deno saknas i containern – uppdatera JPTV Web")
         v = await self._video(TEST_VIDEO, fresh=True)
+        v["fetched"] = 0  # nästa hämtning ska inte återanvända den här
         best = max((f.get("height") or 0) for f in v["videos"])
         itag = v["videos"][-1]["format_id"]
         await self.media(TEST_VIDEO, itag)
-        text = f"yt-dlp {self.ytdlp.version or '?'} fungerar · upp till {best}p · hämtningen tog {self.last_extract} s"
+        first = f"{self.last_extract} s ({self.last_mode})"
+        # En gång till: nu är yt-dlp redan igång och har sin cache, som när man tittar på riktigt.
+        await self._video(TEST_VIDEO, fresh=True)
+        process = "hålls igång" if self.ytdlp.worker_running else "startas varje gång"
+        text = (f"yt-dlp {self.ytdlp.version or '?'} fungerar · upp till {best}p · hämtning {first}, "
+                f"igen {self.last_extract} s ({self.last_mode}) · yt-dlp {process} · snabbstart {self.fast.describe()}")
         try:
             items = parse_related(await self._next(TEST_VIDEO))
             n = len(items)
@@ -1488,12 +1861,15 @@ class YouTube:
     def close(self) -> None:
         for t in list(self._bg) + list(self._related_tasks.values()):
             t.cancel()
+        self.ytdlp.stop()
 
-    async def _next(self, vid: str) -> dict:
-        body = {
-            "context": {"client": {"clientName": "WEB", "clientVersion": WEB_CLIENT_VERSION, "hl": "en", "gl": "SE"}},
-            "videoId": vid, "racyCheckOk": True, "contentCheckOk": True,
-        }
+    async def _next(self, vid: str | None = None, continuation: str | None = None) -> dict:
+        """YouTubes "next": förslagen bredvid en video, eller nästa del av något (kommentarer)."""
+        body: dict = {"context": {"client": {"clientName": "WEB", "clientVersion": WEB_CLIENT_VERSION, "hl": "en", "gl": "SE"}}}
+        if continuation:
+            body["continuation"] = continuation
+        else:
+            body.update(videoId=vid, racyCheckOk=True, contentCheckOk=True)
         headers = {
             "Content-Type": "application/json", "User-Agent": _BROWSER_UA, "Origin": YT,
             "Accept-Language": "en-US,en;q=0.9",
@@ -1505,6 +1881,33 @@ class YouTube:
             if r.status != 200:
                 raise YtError(f"YouTube svarade {r.status}")
             return await r.json(content_type=None)
+
+    async def comments(self, vid: str, token: str | None = None) -> dict:
+        """
+        Kommentarer, de populäraste först. Utan token: första sidan (med antal). Med token: nästa
+        sida eller svaren på en kommentar.
+        """
+        key = f"{vid}:{token or ''}"
+        hit = self._comments.get(key)
+        if hit and time.monotonic() - hit[0] < 900:
+            return hit[1]
+        if token:
+            _, items, nxt = parse_comments(await self._next(continuation=token))
+            out = {"comments": items, "next": nxt}
+        else:
+            header, items, nxt = parse_comments(await self._next(continuation=comment_token(vid)))
+            count = parse_count(_text((header or {}).get("countText"))) if header else None
+            # Första svaret är oftast bara rubriken; sorteringen "populärast" ger själva kommentarerna.
+            top = _cont_token(_dig(header, "sortMenu", "sortFilterSubMenuRenderer", "subMenuItems", 0) or {}) if header else None
+            if not items and (top or nxt):
+                _, items, nxt = parse_comments(await self._next(continuation=top or nxt))
+            out = {"count": count, "comments": items, "next": nxt, "disabled": header is None and not items}
+        for c in out["comments"]:
+            c["text"] = c["text"][:3000]
+        self._comments[key] = (time.monotonic(), out)
+        while len(self._comments) > 200:
+            self._comments.pop(next(iter(self._comments)))
+        return out
 
     async def related_debug(self, vid: str) -> dict:
         """YouTubes råa svar för de första förslagen, och hur de lästes (för felsökning)."""

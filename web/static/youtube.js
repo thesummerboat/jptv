@@ -3,6 +3,7 @@
 (function () {
   const { h } = JP;
 
+  JP.icons.chat = '<path d="M4.5 5.5h15v10h-9l-4.5 3.5v-3.5h-1.5z"/><path d="M8 9.5h8M8 12.5h5"/>';
   JP.icons.more = '<circle cx="12" cy="5.5" r="1.7" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="12" cy="18.5" r="1.7" fill="currentColor" stroke="none"/>';
 
   /** YouTubes bilder går via servern (webbläsaren pratar aldrig själv med Google). */

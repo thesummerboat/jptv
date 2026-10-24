@@ -49,6 +49,24 @@ class YtJsonTest {
     }
 
     @Test
+    fun kommentarer() {
+        val json = """{"count": 1234, "comments": [{"id": "c1", "text": "Tack f\u00f6r att ni tittar!", "author": "@kanalen", "authorId": "UCcccccccccccccccccccccc", "avatar": "https://yt3.ggpht.com/c1=s88", "creator": true, "verified": false, "likes": 3400, "replies": 0, "published": 1791653803454, "pinned": true, "hearted": true, "repliesToken": null}, {"id": "c2", "text": "B\u00e4sta videon hittills\nrad tv\u00e5", "author": "@anna", "authorId": "UCcccccccccccccccccccccc", "avatar": "https://yt3.ggpht.com/c2=s88", "creator": false, "verified": false, "likes": 58, "replies": 12, "published": 1792604203454, "pinned": false, "hearted": false, "repliesToken": "REPLIES1"}, {"id": "", "text": "trasig"}], "next": "PAGE2", "disabled": false}"""
+        val c = YtJson.comments(JSONObject(json))
+        assertEquals(1234L, c.count)
+        assertEquals(listOf("c1", "c2"), c.comments.map { it.id })
+        assertTrue(c.comments[0].pinned && c.comments[0].hearted && c.comments[0].creator)
+        assertNull(c.comments[0].repliesToken)
+        assertEquals("REPLIES1", c.comments[1].repliesToken)
+        assertEquals(12, c.comments[1].replies)
+        assertEquals("Bästa videon hittills\nrad två", c.comments[1].text)
+        assertEquals("PAGE2", c.next)
+        val off = YtJson.comments(JSONObject("""{"count": null, "comments": [], "next": null, "disabled": true}"""))
+        assertTrue(off.disabled && off.comments.isEmpty())
+        assertNull(off.count)
+        assertNull(off.next)
+    }
+
+    @Test
     fun forhandsbilder() {
         val json = JSONObject(video).put(
             "storyboard",

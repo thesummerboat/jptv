@@ -8,10 +8,14 @@ import tempfile
 import time
 import unittest
 
+from unittest import mock
+
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from app import main as jptv
+from app.youtube import YtDlp, YtError
+from app.youtube import comment_token, parse_comments
 from app.youtube import (parse_ago, parse_clock, parse_count, parse_import, parse_index, parse_related, parse_rss,
                          pick_formats, pick_subtitles)
 
@@ -117,6 +121,60 @@ RELATED = {
 }
 
 
+def comment(cid, author, text, likes="1.2K", replies="", when="2 weeks ago", pinned=False, hearted=False, creator=False):
+    """En kommentar i YouTubes nyare format: commentViewModel + data i frameworkUpdates."""
+    vm = {"commentKey": f"key-{cid}", "toolbarStateKey": f"state-{cid}", "commentId": cid}
+    if pinned:
+        vm["pinnedText"] = "Pinned by Testkanalen"
+    entities = [
+        {"entityKey": f"key-{cid}", "payload": {"commentEntityPayload": {
+            "properties": {"commentId": cid, "content": {"content": text}, "publishedTime": when},
+            "author": {"channelId": "UCcccccccccccccccccccccc", "displayName": author, "isCreator": creator,
+                       "avatarThumbnailUrl": f"https://yt3.ggpht.com/{cid}=s88"},
+            "toolbar": {"likeCountNotliked": likes, "likeCountA11y": f"{likes} likes", "replyCount": replies}}}},
+        {"entityKey": f"state-{cid}", "payload": {"engagementToolbarStateEntityPayload": {
+            "heartState": "TOOLBAR_HEART_STATE_HEARTED" if hearted else "TOOLBAR_HEART_STATE_UNHEARTED"}}},
+    ]
+    return vm, entities
+
+
+def comments_page(threads, next_token=None, action="reloadContinuationItemsCommand", in_thread=True):
+    items, mutations = [], []
+    for vm, ents, replies_token in threads:
+        mutations += ents
+        if in_thread:
+            thread = {"commentViewModel": {"commentViewModel": vm}}
+            if replies_token:
+                thread["replies"] = {"commentRepliesRenderer": {"contents": [{"continuationItemRenderer": {
+                    "continuationEndpoint": {"continuationCommand": {"token": replies_token}}}}]}}
+            items.append({"commentThreadRenderer": thread})
+        else:
+            items.append({"commentViewModel": vm})
+    if next_token:
+        items.append({"continuationItemRenderer": {"continuationEndpoint": {"continuationCommand": {"token": next_token}}}})
+    return {"onResponseReceivedEndpoints": [{action: {"continuationItems": items}}],
+            "frameworkUpdates": {"entityBatchUpdate": {"mutations": mutations}}}
+
+
+COMMENTS = {
+    # Första svaret: bara rubriken med antal och sortering.
+    comment_token(VID): {"onResponseReceivedEndpoints": [{"reloadContinuationItemsCommand": {"continuationItems": [
+        {"commentsHeaderRenderer": {"countText": {"runs": [{"text": "1,234"}, {"text": " Comments"}]},
+                                    "sortMenu": {"sortFilterSubMenuRenderer": {"subMenuItems": [
+                                        {"title": "Top", "serviceEndpoint": {"continuationCommand": {"token": "SORTTOP"}}},
+                                        {"title": "Newest", "serviceEndpoint": {"continuationCommand": {"token": "SORTNEW"}}}]}}}}]}}]},
+    "SORTTOP": comments_page([
+        (*comment("c1", "@kanalen", "Tack för att ni tittar!", likes="3.4K", pinned=True, hearted=True, creator=True), None),
+        (*comment("c2", "@anna", "Bästa videon hittills\nrad två", likes="58", replies="12", when="för 3 dagar sedan"), "REPLIES1"),
+    ], next_token="PAGE2"),
+    "PAGE2": comments_page([(*comment("c3", "@bertil", "Sista", likes=""), None)], action="appendContinuationItemsAction"),
+    # Kommentarerna avstängda: inget att visa.
+    comment_token("olderolder1"): {"onResponseReceivedEndpoints": [], "contents": {"messageRenderer": {"text": {"runs": [{"text": "Comments are turned off."}]}}}},
+    "REPLIES1": comments_page([(*comment("r1", "@cecilia", "Håller med", likes="2"), None)],
+                              action="appendContinuationItemsAction", in_thread=False),
+}
+
+
 def next_response(vid):
     items = RELATED.get(vid, [])
     return {
@@ -156,6 +214,8 @@ def fake_youtube(media: str, log: list) -> web.Application:
 
     async def media_file(req):
         log.append(("media", req.match_info["name"], req.headers.get("Range")))
+        if req.query.get("fast") == "1":
+            raise web.HTTPForbidden()
         path = os.path.join(media, req.match_info["name"])
         if not os.path.exists(path):
             raise web.HTTPNotFound()
@@ -177,6 +237,10 @@ def fake_youtube(media: str, log: list) -> web.Application:
 
     async def watch_next(req):
         body = await req.json()
+        if body.get("continuation"):
+            log.append(("comments", body["continuation"]))
+            page = COMMENTS.get(body["continuation"])
+            return web.json_response(page) if page else web.Response(status=400, text="okänd")
         log.append(("next", body.get("videoId"), body["context"]["client"].get("hl")))
         if body.get("videoId") == "failfailfai":
             return web.Response(status=500, text="nej")
@@ -264,6 +328,21 @@ class ParseTest(unittest.TestCase):
         self.assertEqual((c["channel"], c["views"]), ("Kanal A", 1234))
         self.assertAlmostEqual((now - c["published"]) / 86400e3, 5, delta=0.1)
         self.assertTrue(items["sv000000004"]["live"])
+
+    def test_comments_parse(self):
+        header, items, nxt = parse_comments(COMMENTS["SORTTOP"])
+        self.assertIsNone(header)
+        self.assertEqual(nxt, "PAGE2")
+        a, b = items
+        self.assertEqual((a["author"], a["likes"], a["pinned"], a["hearted"], a["creator"]), ("@kanalen", 3400, True, True, True))
+        self.assertEqual((b["text"], b["likes"], b["replies"], b["repliesToken"]), ("Bästa videon hittills\nrad två", 58, 12, "REPLIES1"))
+        self.assertAlmostEqual((time.time() * 1000 - b["published"]) / 86400e3, 3, delta=0.1)
+        header, items, nxt = parse_comments(COMMENTS[comment_token(VID)])
+        self.assertEqual((items, nxt), ([], None))
+        self.assertEqual(header["countText"]["runs"][0]["text"], "1,234")
+        _, replies, _ = parse_comments(COMMENTS["REPLIES1"])
+        self.assertEqual([r["text"] for r in replies], ["Håller med"])
+        self.assertEqual(parse_comments({}), (None, [], None))
 
     def test_counts_and_times(self):
         self.assertEqual(parse_count("1.2M views"), 1_200_000)
@@ -517,6 +596,26 @@ class YouTubeApiTest(unittest.IsolatedAsyncioTestCase):
         # Både bild och ljud avkodades ända till slutet (12 s).
         self.assertAlmostEqual(max(times) / 1e6, 12.0, delta=0.5)
 
+    async def test_comments(self):
+        c = await self.get_json(f"/api/yt/comments/{VID}")
+        self.assertEqual(c["count"], 1234)
+        self.assertEqual([x["id"] for x in c["comments"]], ["c1", "c2"])
+        self.assertEqual(c["next"], "PAGE2")
+        self.assertFalse(c["disabled"])
+        more = await self.get_json(f"/api/yt/comments/{VID}?token=PAGE2")
+        self.assertEqual(([x["id"] for x in more["comments"]], more["next"]), (["c3"], None))
+        replies = await self.get_json(f"/api/yt/comments/{VID}?token=REPLIES1")
+        self.assertEqual([x["author"] for x in replies["comments"]], ["@cecilia"])
+        # Sparas en stund: ingen ny fråga till YouTube.
+        asked = sum(1 for l in self.log if l[0] == "comments")
+        await self.get_json(f"/api/yt/comments/{VID}")
+        self.assertEqual(sum(1 for l in self.log if l[0] == "comments"), asked)
+        # Avstängda kommentarer.
+        off = await self.get_json("/api/yt/comments/olderolder1")
+        self.assertEqual((off["disabled"], off["comments"]), (True, []))
+        err = await self.get_json(f"/api/yt/comments/{VID}?token=TRASIG", status=502)
+        self.assertIn("Kommentarerna", err["error"])
+
     async def test_prefetch(self):
         """Står man på ett kort förbereds videon: yt-dlp och index är klara när man trycker."""
         y = self.app[jptv.JPTV]["youtube"]
@@ -537,6 +636,58 @@ class YouTubeApiTest(unittest.IsolatedAsyncioTestCase):
         r = await self.client.post("/api/yt/prefetch/ogiltig")
         self.assertEqual(r.status, 404)
 
+    async def _wait_bg(self, y):
+        for _ in range(200):
+            if not y._bg:
+                return
+            await asyncio.sleep(0.05)
+
+    async def test_fast_start(self):
+        """Snabbstart: används när den ger samma kvalitet, kontrolleras de första gångerna."""
+        y = self.app[jptv.JPTV]["youtube"]
+        for vid in (VID, "fastfast001", "fastfast002"):
+            await self.get_json(f"/api/yt/video/{vid}")
+            self.assertEqual(y.last_mode, "snabb")
+            self.assertTrue(y._videos[vid]["fast"])
+            await self._wait_bg(y)
+        # Tre kontroller med samma kvalitet: på för gott.
+        self.assertEqual((y.fast.state, y.fast.checks), ("on", 3))
+        self.assertEqual(self.app[jptv.JPTV]["store"].get("youtube_fast")["state"], "on")
+        st = await self.get_json("/api/yt/status")
+        self.assertEqual((st["fast"], st["lastMode"]), ("på", "snabb"))
+
+    async def test_fast_start_lower_quality(self):
+        y = self.app[jptv.JPTV]["youtube"]
+        with mock.patch.dict(os.environ, {"FAKE_YT_FAST": "low"}):
+            v = await self.get_json(f"/api/yt/video/{VID}")
+            self.assertEqual(v["maxHeight"], 144)
+            await self._wait_bg(y)
+            # Den vanliga hämtningen gav 180p: snabbstarten stängs av.
+            self.assertEqual(y.fast.state, "off")
+            self.assertIn("144p", y.fast.reason)
+            await self.get_json("/api/yt/video/fastfast001")
+            self.assertEqual(y.last_mode, "vanlig")
+
+    async def test_fast_start_fails(self):
+        y = self.app[jptv.JPTV]["youtube"]
+        with mock.patch.dict(os.environ, {"FAKE_YT_FAST": "fail"}):
+            v = await self.get_json(f"/api/yt/video/{VID}")
+            self.assertEqual((v["maxHeight"], y.last_mode, y.fast.failures), (180, "vanlig", 1))
+
+    async def test_fast_start_forbidden(self):
+        """YouTube nekar snabbstartens adresser (403): den vanliga hämtningen tar över."""
+        y = self.app[jptv.JPTV]["youtube"]
+        with mock.patch.dict(os.environ, {"FAKE_YT_FAST": "403"}):
+            v = await self.get_json(f"/api/yt/video/{VID}")
+            self.assertTrue(y._videos[VID]["fast"])
+            await self._wait_bg(y)
+            playlist = await (await self.get(f"/yt/{VID}/134.m3u8")).text()
+            self.assertIn("#EXT-X-BYTERANGE", playlist)
+            self.assertFalse(y._videos[VID]["fast"])
+            self.assertEqual(y.fast.failures, 1)
+            r = await self.client.get(f"/yt/{VID}/s/140.mp4", headers={"Range": "bytes=0-99"})
+            self.assertEqual(r.status, 206)
+
     async def test_errors_and_images(self):
         err = await self.get_json("/api/yt/video/privatevid0", status=502)
         self.assertEqual(err["error"], "Videon är privat")
@@ -553,6 +704,53 @@ class YouTubeApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((res["found"], res["added"]), (1, 1))
         r = await self.client.post("/api/yt/import", data="ingenting")
         self.assertEqual(r.status, 400)
+
+
+class WorkerTest(unittest.IsolatedAsyncioTestCase):
+    """yt-dlp i en process som hålls igång (här med ett låtsasbibliotek)."""
+
+    async def asyncSetUp(self):
+        self.env = mock.patch.dict(os.environ, {"FAKE_YT_BASE": "http://127.0.0.1:1"})
+        self.env.start()
+        os.environ.pop("JPTV_YTDLP", None)
+        self.y = YtDlp(os.path.join(HERE, "fakelib"))
+
+    async def asyncTearDown(self):
+        self.y.stop()
+        self.env.stop()
+
+    async def test_worker(self):
+        a = await self.y.run_json(["--flat-playlist", "ytsearch5:katter"])
+        self.assertEqual(len(a["entries"]), 6)
+        v = await self.y.run_json(["--no-playlist", f"https://www.youtube.com/watch?v={VID}"])
+        b = await self.y.run_json(["--no-playlist", "https://www.youtube.com/watch?v=fastfast001"])
+        # Samma process båda gångerna, inte testprocessen.
+        self.assertEqual(v["_worker_pid"], b["_worker_pid"])
+        self.assertNotEqual(v["_worker_pid"], os.getpid())
+        self.assertTrue(self.y.worker_running)
+        # Fel kommer tillbaka som vanligt.
+        with self.assertRaises(YtError) as e:
+            await self.y.run_json(["--no-playlist", "https://www.youtube.com/watch?v=privatevid0"])
+        self.assertEqual(str(e.exception), "Videon är privat")
+        # Flera samtidigt.
+        many = await asyncio.gather(*(self.y.run_json(["--no-playlist", f"https://www.youtube.com/watch?v=many0000{i:03d}"]) for i in range(5)))
+        self.assertEqual([m["id"] for m in many], [f"many0000{i:03d}" for i in range(5)])
+        # Något som hänger sig: fel efter tidsgränsen, sedan en ny process.
+        with self.assertRaises(YtError):
+            await self.y.run_json(["--no-playlist", "https://www.youtube.com/watch?v=hangforeve"], timeout=1)
+        c = await self.y.run_json(["--no-playlist", f"https://www.youtube.com/watch?v={VID}"])
+        self.assertNotEqual(c["_worker_pid"], v["_worker_pid"])
+        self.assertEqual(self.y.worker_failures, 0)
+
+    async def test_worker_broken(self):
+        """Startar inte processen används yt-dlp som vanligt program."""
+        self.y.lib_dir = os.path.join(HERE, "finns-inte")
+        with mock.patch.dict(os.environ, {"JPTV_YTDLP_PYTHON_BROKEN": "1"}), \
+                mock.patch("app.youtube.WORKER", os.path.join(HERE, "finns-inte.py")), \
+                mock.patch.object(YtDlp, "_cmd", lambda self: [os.path.join(HERE, "fake_ytdlp.py")]):
+            r = await self.y.run_json(["--flat-playlist", "ytsearch5:katter"])
+        self.assertEqual(len(r["entries"]), 6)
+        self.assertEqual(self.y.worker_failures, 1)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ OTHER = "UCzyxwvutsrqponmlkjihgfe"
 
 
 APPROX = False  # sätts av --extractor-args youtubetab:approximate_date, som riktiga yt-dlp
+# FAKE_YT_FAST: "" (snabbstarten ger samma), "low" (sämre kvalitet) eller "fail" (inga format).
 
 
 def video_entry(i: int, short: bool = False, vid: str | None = None) -> dict:
@@ -70,26 +71,24 @@ def info(vid: str) -> dict:
     }
 
 
-def main() -> int:
+def respond(args: list) -> tuple:
+    """Svaret på ett anrop: (felkod, JSON, feltext). Används av programmet och av låtsasbiblioteket."""
     global APPROX
-    args = sys.argv[1:]
     APPROX = any(a == "youtubetab:approximate_date" for a in args)
-    if "--version" in args:
-        print("2099.01.01")
-        return 0
+    fast = any("player_client=visionos" in a for a in args)
     url = args[-1]
     if url.startswith("ytsearch"):
-        out = {"_type": "playlist", "entries": [video_entry(i) for i in range(1, 6)] + [video_entry(99, short=True)]}
-    elif "results?search_query" in url:
-        out = {"_type": "playlist", "entries": [
+        return 0, {"_type": "playlist", "entries": [video_entry(i) for i in range(1, 6)] + [video_entry(99, short=True)]}, ""
+    if "results?search_query" in url:
+        return 0, {"_type": "playlist", "entries": [
             {"_type": "url", "ie_key": "YoutubeTab", "id": CID, "channel_id": CID, "title": "Testkanalen",
              "channel": "Testkanalen", "channel_follower_count": 12345,
              "thumbnails": [{"url": "//yt3.ggpht.com/avatar=s88", "width": 88, "height": 88}]},
             {"_type": "url", "ie_key": "YoutubeTab", "id": OTHER, "channel_id": OTHER, "title": "Annan kanal",
              "thumbnails": [{"url": "https://yt3.ggpht.com/other=s88", "width": 88, "height": 88}]},
-        ]}
-    elif "/channel/" in url:
-        out = {
+        ]}, ""
+    if "/channel/" in url:
+        return 0, {
             "_type": "playlist", "id": CID, "channel_id": CID, "channel": "Testkanalen", "title": "Testkanalen - Videos",
             "description": "Om kanalen.", "channel_follower_count": 12345,
             "thumbnails": [
@@ -98,16 +97,40 @@ def main() -> int:
             ],
             # Den första finns också i RSS-flödet (där med exakt datum).
             "entries": [video_entry(0, vid="abcdefghijk")] + [video_entry(i) for i in range(1, 4)],
-        }
-    elif "watch?v=" in url:
+        }, ""
+    if "watch?v=" in url:
         vid = url.split("v=", 1)[1]
         if vid == "privatevid0":
-            sys.stderr.write("ERROR: [youtube] privatevid0: Private video. Sign in if you've been granted access\n")
-            return 1
+            return 1, None, "ERROR: [youtube] privatevid0: Private video. Sign in if you've been granted access\n"
         out = info(vid)
-    else:
-        sys.stderr.write("ERROR: Unsupported URL: " + url + "\n")
-        return 1
+        mode = os.environ.get("FAKE_YT_FAST", "")
+        if fast and mode == "fail":
+            return 1, None, f"ERROR: [youtube] {vid}: No video formats found!\n"
+        if fast:
+            # visionOS-klienten: bara det som går att spela (som riktiga svaret utan JavaScript).
+            out["formats"] = [f for f in out["formats"] if f["format_id"] in ("134", "140") or f.get("format_note") == "storyboard"]
+            if mode == "low":
+                # Snabbstarten ger sämre kvalitet än den vanliga hämtningen (bara 144p).
+                v134 = next(f for f in out["formats"] if f["format_id"] == "134")
+                out["formats"] = [dict(v134, format_id="160", height=144, width=256)] + [
+                    f for f in out["formats"] if f["format_id"] != "134"]
+            if mode == "403":
+                # YouTube nekar snabbstartens adresser.
+                out["formats"] = [dict(f, url=f["url"] + "&fast=1") if f.get("protocol") == "https" else f for f in out["formats"]]
+        out["_mode"] = "fast" if fast else "full"
+        return 0, out, ""
+    return 1, None, "ERROR: Unsupported URL: " + url + "\n"
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if "--version" in args:
+        print("2099.01.01")
+        return 0
+    code, out, err = respond(args)
+    if code:
+        sys.stderr.write(err)
+        return code
     print(json.dumps(out))
     return 0
 

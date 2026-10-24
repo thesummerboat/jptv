@@ -51,6 +51,24 @@ data class YtRecs(
     val seeds: Int,
 )
 
+/** En kommentar (från JPTV Web, som hämtar dem från YouTube). */
+data class YtComment(
+    val id: String,
+    val author: String,
+    val text: String,
+    val avatar: String?,
+    val likes: Long,
+    val replies: Int,
+    /** ms sedan 1970 (ungefärligt, YouTube säger "för 3 dagar sedan"). */
+    val published: Long?,
+    val pinned: Boolean,
+    val hearted: Boolean,
+    val creator: Boolean,
+    val repliesToken: String?,
+)
+
+data class YtComments(val count: Long?, val comments: List<YtComment>, val next: String?, val disabled: Boolean)
+
 data class YtChapter(val title: String, val startMs: Long, val endMs: Long)
 
 /** Del som SponsorBlock säger ska hoppas över (sponsor, egenreklam, prenumerera-tjat). */
@@ -157,6 +175,28 @@ object YtJson {
     fun search(o: JSONObject): YtSearch = YtSearch(
         videos = o.optJSONArray("videos").mapObjects(::video),
         channels = o.optJSONArray("channels").mapObjects(::channel),
+    )
+
+    fun comments(o: JSONObject): YtComments = YtComments(
+        count = o.longOrNull("count"),
+        comments = o.optJSONArray("comments").mapObjects { c ->
+            val id = c.str("id").takeIf { it.isNotBlank() } ?: return@mapObjects null
+            YtComment(
+                id = id,
+                author = c.str("author"),
+                text = c.str("text"),
+                avatar = c.strOrNull("avatar"),
+                likes = c.longOrNull("likes") ?: 0L,
+                replies = c.optInt("replies", 0),
+                published = c.longOrNull("published"),
+                pinned = c.optBoolean("pinned", false),
+                hearted = c.optBoolean("hearted", false),
+                creator = c.optBoolean("creator", false),
+                repliesToken = c.strOrNull("repliesToken"),
+            )
+        },
+        next = o.strOrNull("next"),
+        disabled = o.optBoolean("disabled", false),
     )
 
     fun recs(o: JSONObject): YtRecs = YtRecs(

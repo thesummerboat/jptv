@@ -361,6 +361,37 @@ body.playing #topbar { display: none; }
 .p-next-actions { display: flex; gap: 8px; margin-top: auto; }
 .p-moved { width: min(520px, 90vw); }
 .p-moved .p-next-title { white-space: normal; }
+/* Om videon och kommentarer: panel till höger, videon krymper på breda skärmar. */
+.p-side { position: absolute; top: 0; right: 0; bottom: 0; width: 420px; overflow-y: auto; overscroll-behavior: contain; padding: 18px 20px 40px; background: #0f1319; border-left: 1px solid rgba(255, 255, 255, 0.06); cursor: default; user-select: text; z-index: 3; }
+.p-side[hidden] { display: none; }
+@media (min-width: 1100px) {
+  .player.side-open .p-video { width: calc(100% - 420px); }
+  .player.side-open .p-top, .player.side-open .p-bottom { right: 420px; }
+  .player.side-open .p-menu { right: 446px; }
+}
+@media (max-width: 1099px) { .p-side { width: 100%; max-width: 520px; } }
+.p-btn.on { color: var(--accent); }
+.p-side-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.p-side-head h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); margin: 0; }
+.p-side-title { font-size: 17px; font-weight: 700; line-height: 1.3; margin-bottom: 4px; }
+.p-side-channel { display: inline-block; font-weight: 600; color: var(--accent); margin-bottom: 4px; }
+.p-desc { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; line-height: 1.5; color: #d7dce3; margin-top: 10px; }
+.p-desc.collapsed { display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
+.p-side h3 { font-size: 15px; margin: 22px 0 10px; }
+.p-more-btn { background: none; border: 0; color: var(--accent); font: inherit; font-size: 13.5px; font-weight: 600; padding: 6px 0; cursor: pointer; }
+.p-more-btn:disabled { color: var(--dim); cursor: default; }
+.p-ts { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; }
+.p-ts:hover { text-decoration: underline; }
+.p-comment { display: flex; gap: 10px; padding: 10px 0; }
+.p-comment-avatar { flex: none; width: 32px; height: 32px; border-radius: 50%; background: var(--high); object-fit: cover; }
+.p-comment-body { min-width: 0; flex: 1; }
+.p-comment-meta { font-size: 12.5px; color: var(--dim); font-weight: 600; }
+.p-comment.creator .p-comment-meta { color: var(--accent); }
+.p-comment-pin { font-size: 11.5px; color: var(--dim); margin-bottom: 2px; }
+.p-comment-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.45; margin-top: 2px; }
+.p-comment-foot { display: flex; gap: 12px; font-size: 12.5px; color: var(--dim); margin-top: 4px; }
+.p-replies { margin-left: 0; border-left: 2px solid rgba(255, 255, 255, 0.08); padding-left: 10px; }
+.p-replies .p-comment-avatar { width: 24px; height: 24px; }
 .p-menu { position: absolute; right: 26px; bottom: 100px; width: 330px; max-height: 62vh; overflow-y: auto; padding: 8px; border-radius: 12px; background: rgba(20, 24, 30, 0.97); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6); cursor: default; }
 .p-menu h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); margin: 10px 10px 4px; }
 .p-menu button { position: relative; display: block; width: 100%; text-align: left; padding: 8px 10px 8px 32px; border: 0; border-radius: 6px; background: none; color: var(--text); cursor: pointer; font-size: 14px; }
