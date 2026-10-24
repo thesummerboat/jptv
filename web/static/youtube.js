@@ -132,7 +132,7 @@
     const text = h('div', { class: 'card-text yt-text' },
       h('div', { class: 'card-title yt-title' }, v.title),
       opts.noChannel || !v.channel ? null : h('div', { class: 'card-sub' }, v.channel),
-      meta ? h('div', { class: 'card-sub' }, meta) : null);
+      meta ? h('div', { class: 'card-sub yt-meta' }, meta) : null);
     const items = [
       opts.suggested ? ['Inte intresserad', () => dismiss(v, a)] : null,
       opts.suggested && v.channelId ? [`Föreslå inte ${v.channel || 'kanalen'}`, () => blockChannel(v)] : null,

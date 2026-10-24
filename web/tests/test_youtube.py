@@ -334,6 +334,24 @@ class ParseTest(unittest.TestCase):
         self.assertAlmostEqual((now - c["published"]) / 86400e3, 5, delta=0.1)
         self.assertTrue(items["sv000000004"]["live"])
 
+    def test_real_response_2026(self):
+        """Ett riktigt svar från oktober 2026: kortformer som "1.5m" och "1 yr ago"."""
+        with open(os.path.join(HERE, "data", "next_2026.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        items = parse_related(data)
+        self.assertEqual(len(items), 2)
+        a = items[0]
+        self.assertEqual((a["channel"], a["channelId"], a["views"], a["duration"]), ("Neevs", "UC2BqYB26rjoGlVlKh8YMM3w", 1_500_000, 1071))
+        self.assertAlmostEqual((time.time() * 1000 - a["published"]) / 86400e3, 365, delta=1)
+        self.assertTrue(all(i["published"] and i["views"] and i["avatar"] and i["thumb"] for i in items))
+        page = parse_watch_page(data)
+        self.assertEqual(page["views"], 41_682_241)
+        self.assertEqual(datetime.fromtimestamp(page["published"] / 1000, timezone.utc).date().isoformat(), "2019-08-24")
+        for t, days in (("1 yr ago", 365), ("13 yr ago", 13 * 365), ("3 mo ago", 90), ("2 wk ago", 14), ("5 hr ago", 5 / 24)):
+            self.assertAlmostEqual((1_800_000_000 - parse_ago(t, 1_800_000_000) / 1000) / 86400, days, delta=0.01, msg=t)
+        self.assertEqual(parse_count("1.5m"), 1_500_000)
+        self.assertEqual(parse_count("1.5 million views"), 1_500_000)
+
     def test_watch_page_date(self):
         oct3 = int(datetime(2024, 10, 3, 12, tzinfo=timezone.utc).timestamp() * 1000)
         self.assertEqual(parse_watch_page(next_response(VID)), {"published": oct3, "views": 4242})

@@ -500,8 +500,9 @@ def _browse_id(obj) -> str:
 
 
 # Ord för tusen/miljon/miljard i visningstexter ("12K", "257 tn", "1,2 mn", "3 md").
-_MULT = {"k": 1e3, "tn": 1e3, "t": 1e3, "m": 1e6, "mn": 1e6, "mio": 1e6, "milj": 1e6,
-         "b": 1e9, "md": 1e9, "mdr": 1e9, "mrd": 1e9}
+_MULT = {"k": 1e3, "tn": 1e3, "t": 1e3, "thousand": 1e3, "tusen": 1e3,
+         "m": 1e6, "mn": 1e6, "mio": 1e6, "milj": 1e6, "million": 1e6, "miljon": 1e6, "miljoner": 1e6,
+         "b": 1e9, "md": 1e9, "mdr": 1e9, "mrd": 1e9, "billion": 1e9, "miljard": 1e9, "miljarder": 1e9}
 
 
 def parse_count(text: str) -> int | None:
@@ -530,7 +531,11 @@ def parse_count(text: str) -> int | None:
 
 
 _UNIT_S = {"second": 1, "minute": 60, "hour": 3600, "day": 86400, "week": 604800, "month": 2592000, "year": 31536000}
-_AGO_EN = re.compile(r"(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago", re.I)
+# Även YouTubes kortformer (2026): "1 yr ago", "3 mo ago", "2 wk ago", "5 hr ago".
+_AGO_EN = re.compile(r"(\d+)\s*(seconds?|secs?|s|minutes?|mins?|hours?|hrs?|h|days?|d|weeks?|wks?|w|months?|mos?|years?|yrs?|y)\s+ago\b", re.I)
+_EN_UNIT = {"s": "second", "sec": "second", "min": "minute", "h": "hour", "hr": "hour", "hour": "hour", "d": "day", "day": "day",
+            "w": "week", "wk": "week", "week": "week", "mo": "month", "month": "month", "y": "year", "yr": "year", "year": "year",
+            "second": "second", "minute": "minute"}
 _AGO_SV = re.compile(r"för\s+(\d+)\s+(sekund|minut|timm|tim|dag|veck|månad|år)[a-zåäö]*\s+sedan", re.I)
 _SV_UNIT = {"sekund": "second", "minut": "minute", "timm": "hour", "tim": "hour", "dag": "day", "veck": "week",
             "månad": "month", "år": "year"}
@@ -554,7 +559,9 @@ def parse_ago(text: str, now: float | None = None) -> int | None:
     now = time.time() if now is None else now
     m = _AGO_EN.search(text or "")
     if m:
-        n, unit = int(m.group(1)), m.group(2).lower()
+        word = m.group(2).lower()
+        word = word[:-1] if len(word) > 1 and word.endswith("s") and word[:-1] in _EN_UNIT else word
+        n, unit = int(m.group(1)), _EN_UNIT.get(word, "day")
     else:
         m = _AGO_SV.search(text or "")
         if m:
@@ -655,11 +662,11 @@ def _lockup_video(vm: dict) -> dict | None:
             raw = (part or {}).get("text")
             t = _text(raw).strip()
             if t:
-                parts.append((t, raw))
+                parts.append((t, raw, str((part or {}).get("accessibilityLabel") or "")))
         if parts:
             rows.append(parts)
     for parts in rows:
-        for t, raw in parts:
+        for t, raw, _label in parts:
             bid = _browse_id(raw)
             if bid:
                 cid, channel = bid, t
@@ -669,9 +676,11 @@ def _lockup_video(vm: dict) -> dict | None:
     if not channel and rows and not re.match(r"^\d", rows[0][0][0]):
         channel = rows[0][0][0]
     for parts in rows:
-        for t, _raw in parts:
+        for t, _raw, label in parts:
             if t == channel:
                 continue
+            if published is None and label and (ago := parse_ago(label)) is not None:
+                published = ago
             for piece in re.split(r"\s*[•·]\s*", t):
                 low = piece.lower()
                 if not piece:
