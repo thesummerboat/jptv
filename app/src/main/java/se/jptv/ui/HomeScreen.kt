@@ -105,6 +105,7 @@ private fun HomeTopBar(vm: AppViewModel, topFocus: FocusRequester) {
                 Text(if (section.key in vm.favoriteSections) "★ ${section.title}" else section.title)
             }
         }
+        OutlinedButton(onClick = { vm.open(Screen.YouTube) }) { Text("YouTube") }
         OutlinedButton(onClick = { vm.open(Screen.Search) }) { Text("Sök") }
         OutlinedButton(onClick = { vm.open(Screen.Settings) }) { Text("Inställningar") }
         Spacer(Modifier.weight(1f))

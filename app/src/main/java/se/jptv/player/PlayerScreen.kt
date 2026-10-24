@@ -127,6 +127,7 @@ fun PlayerScreen(vm: AppViewModel, request: PlayRequest) {
     when (request) {
         is PlayRequest.Vod -> VodPlayer(vm, request)
         is PlayRequest.Live -> LivePlayer(vm, request)
+        is PlayRequest.YouTube -> YouTubePlayer(vm, request)
     }
 }
 
@@ -262,7 +263,7 @@ internal fun liveSource(channel: Channel): MediaSource {
     return DefaultMediaSourceFactory(http).createMediaSource(item)
 }
 
-private fun isOk(code: Int) = code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER ||
+internal fun isOk(code: Int) = code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER ||
     code == KeyEvent.KEYCODE_NUMPAD_ENTER
 
 /** Språkkod som tre bokstäver ("sv" och "swe" blir båda "swe"), så att Plex och spelaren kan jämföras. */
@@ -1366,7 +1367,7 @@ private val plexSubRegex = Regex("""plexsub-(\d+)""")
 
 /** Plex-id för en extern undertext som vi själva lade till (id:t följer med i spårets format). */
 @OptIn(UnstableApi::class)
-private fun plexSubId(format: Format): Long? =
+internal fun plexSubId(format: Format): Long? =
     format.id?.let { plexSubRegex.find(it)?.groupValues?.get(1)?.toLongOrNull() }
 
 /** Pausskärm: bilden tonas ner och titel, handling och sluttid visas. Valfri knapp tar bort den. */
@@ -1418,7 +1419,7 @@ private fun PauseScreen(vm: AppViewModel, item: PlexItem, position: Long, durati
 }
 
 @Composable
-private fun Chip(text: String, modifier: Modifier = Modifier) {
+internal fun Chip(text: String, modifier: Modifier = Modifier) {
     Text(
         text,
         modifier = modifier
@@ -1431,7 +1432,7 @@ private fun Chip(text: String, modifier: Modifier = Modifier) {
 /** Undertextstil: OK på en rad byter värde. Förhandsvisningen visar hur texten blir. */
 @OptIn(UnstableApi::class)
 @Composable
-private fun SubtitleStylePanel(
+internal fun SubtitleStylePanel(
     look: SubtitleLook,
     transcoding: Boolean,
     onChange: (SubtitleLook) -> Unit,
@@ -1511,7 +1512,7 @@ private fun SubtitlePreview(look: SubtitleLook, modifier: Modifier = Modifier) {
  * Ett spår i spelaren. ordinal = plats bland filens egna spår av samma typ (för att hitta motsvarande
  * spår i Plex), plexId = satt för externa undertexter som vi själva lagt till.
  */
-private data class TrackChoice(
+internal data class TrackChoice(
     val label: String,
     val group: Tracks.Group,
     val index: Int,
@@ -1523,7 +1524,7 @@ private data class TrackChoice(
 )
 
 @OptIn(UnstableApi::class)
-private fun formatLabel(format: Format, fallback: String): String {
+internal fun formatLabel(format: Format, fallback: String): String {
     val language = format.language
         ?.takeIf { it != C.LANGUAGE_UNDETERMINED && it != "und" }
         ?.let { code -> Locale(code).getDisplayLanguage(Locale("sv", "SE")).replaceFirstChar { it.uppercase() } }
@@ -1544,7 +1545,7 @@ private fun formatLabel(format: Format, fallback: String): String {
 }
 
 @OptIn(UnstableApi::class)
-private fun codecName(mime: String?): String? = when (mime) {
+internal fun codecName(mime: String?): String? = when (mime) {
     MimeTypes.AUDIO_AC3 -> "Dolby Digital"
     MimeTypes.AUDIO_E_AC3 -> "Dolby Digital Plus"
     MimeTypes.AUDIO_E_AC3_JOC -> "Dolby Atmos (DD+)"
@@ -1571,7 +1572,7 @@ private fun codecName(mime: String?): String? = when (mime) {
 }
 
 @OptIn(UnstableApi::class)
-private fun trackChoices(tracks: Tracks, type: Int): List<TrackChoice> {
+internal fun trackChoices(tracks: Tracks, type: Int): List<TrackChoice> {
     var embeddedCount = 0
     for (group in tracks.groups) {
         if (group.type != type) continue
@@ -1613,7 +1614,7 @@ private fun plexStreamFor(item: PlexItem, choice: TrackChoice, type: Int): PlexS
     return embedded.firstOrNull { iso3(it.languageCode) == lang }
 }
 
-private fun selectTrack(exo: ExoPlayer, type: Int, choice: TrackChoice?) {
+internal fun selectTrack(exo: ExoPlayer, type: Int, choice: TrackChoice?) {
     val builder = exo.trackSelectionParameters.buildUpon()
     if (choice == null) {
         builder.setTrackTypeDisabled(type, true)
@@ -1626,14 +1627,14 @@ private fun selectTrack(exo: ExoPlayer, type: Int, choice: TrackChoice?) {
 
 // ---------- Paneler ----------
 
-private class PanelOption(
+internal class PanelOption(
     val label: String,
     val selected: Boolean = false,
     val detail: String? = null,
     val onClick: () -> Unit,
 )
 
-private class PanelSection(
+internal class PanelSection(
     val title: String,
     val options: List<PanelOption>,
     val subtitle: String? = null,
@@ -1692,7 +1693,7 @@ private fun PanelColumn(section: PanelSection, focus: FocusRequester?, modifier:
 
 /** Lista med rubriker och val, t.ex. sovtimer och bildformat. */
 @Composable
-private fun OptionsPanel(title: String, sections: List<PanelSection>, modifier: Modifier = Modifier) {
+internal fun OptionsPanel(title: String, sections: List<PanelSection>, modifier: Modifier = Modifier) {
     val firstFocus = remember { FocusRequester() }
     // Fokus på första valet, även om första rubriken saknar val (t.ex. "inga undertexter").
     val focusSection = sections.indexOfFirst { it.options.isNotEmpty() }
@@ -1728,7 +1729,7 @@ private fun OptionsPanel(title: String, sections: List<PanelSection>, modifier: 
     LaunchedEffect(Unit) { firstFocus.requestWhenReady() }
 }
 
-private fun sleepLabel(vm: AppViewModel, now: Long): String? {
+internal fun sleepLabel(vm: AppViewModel, now: Long): String? {
     val at = vm.sleepAt
     return when {
         at != null -> "Sovtimer ${((at - now).coerceAtLeast(0) / 60_000) + 1} min"
@@ -1737,7 +1738,7 @@ private fun sleepLabel(vm: AppViewModel, now: Long): String? {
     }
 }
 
-private fun sleepSection(vm: AppViewModel, now: Long, includeEnd: Boolean, done: () -> Unit): PanelSection {
+internal fun sleepSection(vm: AppViewModel, now: Long, includeEnd: Boolean, done: () -> Unit): PanelSection {
     val active = vm.sleepAt != null || vm.sleepAtEnd
     val options = buildList {
         add(PanelOption("Av", selected = !active) { vm.setSleepTimer(null); done() })
@@ -1751,14 +1752,14 @@ private fun sleepSection(vm: AppViewModel, now: Long, includeEnd: Boolean, done:
     return PanelSection("Sovtimer", options, subtitle = sleepLabel(vm, now))
 }
 
-private fun scaleSection(vm: AppViewModel, done: () -> Unit): PanelSection = PanelSection(
+internal fun scaleSection(vm: AppViewModel, done: () -> Unit): PanelSection = PanelSection(
     "Bildformat",
     listOf("Anpassa" to 0, "Fyll skärmen" to 1, "Zooma" to 2).map { (label, value) ->
         PanelOption(label, selected = vm.videoScale == value) { vm.videoScale = value; done() }
     },
 )
 
-private fun infoSection(vm: AppViewModel, done: () -> Unit): PanelSection = PanelSection(
+internal fun infoSection(vm: AppViewModel, done: () -> Unit): PanelSection = PanelSection(
     "Information",
     listOf(
         PanelOption(
@@ -1773,7 +1774,7 @@ private fun infoSection(vm: AppViewModel, done: () -> Unit): PanelSection = Pane
 
 /** Stänger av när tiden är ute; varnar den sista minuten. Har en egen klocka, så resten av skärmen slipper rita om. */
 @Composable
-private fun SleepTimer(vm: AppViewModel, onSleep: () -> Unit, modifier: Modifier = Modifier) {
+internal fun SleepTimer(vm: AppViewModel, onSleep: () -> Unit, modifier: Modifier = Modifier) {
     val at = vm.sleepAt ?: return
     var left by remember(at) { mutableLongStateOf(at - System.currentTimeMillis()) }
     val currentOnSleep by rememberUpdatedState(onSleep)
@@ -1964,7 +1965,7 @@ private fun SyncPanel(label: String, offsetMs: Long, onChange: (Long) -> Unit, m
 /** Teknisk information om strömmen, uppdateras varje sekund. */
 @OptIn(UnstableApi::class)
 @Composable
-private fun StreamInfo(exo: ExoPlayer, mode: String, contentFps: Float?, modifier: Modifier = Modifier) {
+internal fun StreamInfo(exo: ExoPlayer, mode: String, contentFps: Float?, modifier: Modifier = Modifier) {
     val currentMode by rememberUpdatedState(mode)
     val currentFps by rememberUpdatedState(contentFps)
     var lines by remember { mutableStateOf(emptyList<String>()) }

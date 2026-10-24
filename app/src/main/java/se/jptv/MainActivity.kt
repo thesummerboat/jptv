@@ -168,6 +168,9 @@ fun JptvApp(vm: AppViewModel = viewModel()) {
                 Screen.Search -> SearchScreen(vm)
                 Screen.Settings -> SettingsScreen(vm)
                 is Screen.Player -> PlayerScreen(vm, screen.request)
+                Screen.YouTube -> se.jptv.ui.YouTubeScreen(vm)
+                is Screen.YouTubeChannel -> se.jptv.ui.YouTubeChannelScreen(vm, screen.id, screen.name)
+                Screen.YouTubeSearch -> se.jptv.ui.YouTubeSearchScreen(vm)
             }
             }
         }
