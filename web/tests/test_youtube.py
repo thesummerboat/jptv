@@ -52,13 +52,18 @@ CH_B = "UCbbbbbbbbbbbbbbbbbbbbbb"
 
 
 def lockup(vid, title, chan, cid, views="1.2M views", ago="3 days ago", dur="12:34", live=False,
-           kind="LOCKUP_CONTENT_TYPE_VIDEO", link_channel=True):
+           kind="LOCKUP_CONTENT_TYPE_VIDEO", link_channel=True, combined=False, avatar=True):
     """En video i YouTubes nyare format (lockupViewModel), som bredvid en video på youtube.com."""
     channel_text = {"content": chan}
     if link_channel:
         channel_text["commandRuns"] = [{"startIndex": 0, "length": len(chan),
                                         "onTap": {"innertubeCommand": {"browseEndpoint": {"browseId": cid}}}}]
-    second = [{"text": {"content": "12K watching"}}] if live else [{"text": {"content": views}}, {"text": {"content": ago}}]
+    if live:
+        second = [{"text": {"content": "12K watching"}}]
+    elif combined:
+        second = [{"text": {"content": f"{views} • {ago}"}}]
+    else:
+        second = [{"text": {"content": views}, "accessibilityLabel": views}, {"text": {"content": ago}, "accessibilityLabel": ago}]
     return {"lockupViewModel": {
         "contentImage": {"thumbnailViewModel": {
             "image": {"sources": [
@@ -71,7 +76,7 @@ def lockup(vid, title, chan, cid, views="1.2M views", ago="3 days ago", dur="12:
             "title": {"content": title},
             "image": {"decoratedAvatarViewModel": {
                 "avatar": {"avatarViewModel": {"image": {"sources": [{"url": f"https://yt3.ggpht.com/{cid}=s68", "width": 68, "height": 68}]}}},
-                "rendererContext": {"commandContext": {"onTap": {"innertubeCommand": {"browseEndpoint": {"browseId": cid}}}}}}},
+                "rendererContext": {"commandContext": {"onTap": {"innertubeCommand": {"browseEndpoint": {"browseId": cid}}}}}}} if avatar else {},
             "metadata": {"contentMetadataViewModel": {"metadataRows": [
                 {"metadataParts": [{"text": channel_text}]},
                 {"metadataParts": second}], "delimiter": " • "}}}},
@@ -136,6 +141,9 @@ def make_media(directory: str) -> None:
         ["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25", "-t", "12", "-c:v", "libvpx-vp9", "-b:v", "300k",
          "-deadline", "realtime", "-cpu-used", "8", "-g", "50", "-keyint_min", "50", "-an", *common, "v9.mp4"],
         ["-f", "lavfi", "-i", "sine=frequency=440:duration=12", "-c:a", "libopus", "-b:a", "96k", *common, "o.mp4"],
+        # Förhandsbilder som YouTubes: 3×3 bilder à 160×90 i en jpg.
+        ["-f", "lavfi", "-i", "testsrc2=size=160x90:rate=0.75", "-t", "12", "-vf", "tile=3x3", "-frames:v", "1", "sb0.jpg"],
+        ["-f", "lavfi", "-i", "testsrc2=size=80x45:rate=2", "-t", "12", "-vf", "tile=5x5", "-frames:v", "1", "sb1.jpg"],
     ]
     for args in runs:
         out = os.path.join(directory, args[-1])
@@ -236,6 +244,27 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(old["avatar"], f"https://yt3.ggpht.com/{CH_A}=s68")
         self.assertEqual(parse_related({}), [])
 
+    def test_related_other_layouts(self):
+        """Svenska texter (YouTube väljer ibland språk efter IP-adressen), allt på en rad, ingen kanallänk."""
+        data = {"contents": {"twoColumnWatchNextResults": {"secondaryResults": {"secondaryResults": {"results": [
+            lockup("sv000000001", "Svensk", "WULFF DEN", CH_A, views="58 tn visningar", ago="för 2 veckor sedan"),
+            lockup("sv000000002", "Miljon", "Kanal B", CH_B, views="1,2 mn visningar", ago="för 3 år sedan", link_channel=False, avatar=False),
+            lockup("en000000003", "En rad", "Kanal A", CH_A, views="1,234 views", ago="5 days ago", combined=True, link_channel=False, avatar=False),
+            lockup("sv000000004", "Live", "Kanal A", CH_A, live=True),
+        ]}}}}}
+        items = {i["id"]: i for i in parse_related(data)}
+        now = time.time() * 1000
+        a = items["sv000000001"]
+        self.assertEqual((a["channel"], a["channelId"], a["views"]), ("WULFF DEN", CH_A, 58_000))
+        self.assertAlmostEqual((now - a["published"]) / 86400e3, 14, delta=0.1)
+        b = items["sv000000002"]
+        self.assertEqual((b["channel"], b["channelId"], b["views"]), ("Kanal B", "", 1_200_000))
+        self.assertAlmostEqual((now - b["published"]) / 86400e3, 3 * 365, delta=1)
+        c = items["en000000003"]
+        self.assertEqual((c["channel"], c["views"]), ("Kanal A", 1234))
+        self.assertAlmostEqual((now - c["published"]) / 86400e3, 5, delta=0.1)
+        self.assertTrue(items["sv000000004"]["live"])
+
     def test_counts_and_times(self):
         self.assertEqual(parse_count("1.2M views"), 1_200_000)
         self.assertEqual(parse_count("12K views"), 12_000)
@@ -244,11 +273,18 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(parse_count("No views"), 0)
         self.assertEqual(parse_count("2.5B views"), 2_500_000_000)
         self.assertIsNone(parse_count(""))
+        self.assertEqual(parse_count("257 tn visningar"), 257_000)
+        self.assertEqual(parse_count("1,2 mn visningar"), 1_200_000)
+        self.assertEqual(parse_count("1\u00a0234 visningar"), 1234)
+        self.assertEqual(parse_count("Inga visningar"), 0)
         now = 1_800_000_000
         self.assertEqual(parse_ago("3 years ago", now), (now - 3 * 31536000) * 1000)
         self.assertEqual(parse_ago("Streamed 2 weeks ago", now), (now - 2 * 604800) * 1000)
         self.assertEqual(parse_ago("1 day ago", now), (now - 86400) * 1000)
         self.assertIsNone(parse_ago("igår", now))
+        self.assertEqual(parse_ago("för 3 år sedan", now), (now - 3 * 31536000) * 1000)
+        self.assertEqual(parse_ago("för 5 timmar sedan", now), (now - 5 * 3600) * 1000)
+        self.assertEqual(parse_ago("Streamades för 1 vecka sedan", now), (now - 604800) * 1000)
         self.assertEqual((parse_clock("12:34"), parse_clock("1:02:03"), parse_clock("LIVE")), (754, 3723, None))
 
     def test_parse_index_needs_more(self):
@@ -425,6 +461,16 @@ class YouTubeApiTest(unittest.IsolatedAsyncioTestCase):
         # Bara sponsor (inte musik) och bara för den här videon.
         self.assertEqual(v["sponsor"], [{"start": 2.0, "end": 4.5, "category": "sponsor"}])
         self.assertEqual([s["lang"] for s in v["subtitles"]], ["sv", "en"])
+        # Förhandsbilder: det största arket (160 px), 9 bilder, och arket går att hämta via servern.
+        self.assertEqual(v["storyboard"], {"width": 160, "height": 90, "columns": 3, "rows": 3, "fps": 0.75,
+                                           "frames": 9, "sheets": 1, "url": f"/yt/{VID}/sb/{{n}}.jpg"})
+        r = await self.client.get(f"/yt/{VID}/sb/0.jpg")
+        self.assertEqual((r.status, r.content_type), (200, "image/jpeg"))
+        sheet = await r.read()
+        self.assertEqual(sheet[:2], b"\xff\xd8")
+        with open(os.path.join(self.media, "sb0.jpg"), "rb") as f:
+            self.assertEqual(sheet, f.read())
+        await self.get(f"/yt/{VID}/sb/1.jpg", status=404)
 
         master = await (await self.get(f"/yt/{VID}/master.m3u8")).text()
         self.assertIn('URI="140.m3u8"', master)
@@ -470,6 +516,26 @@ class YouTubeApiTest(unittest.IsolatedAsyncioTestCase):
         times = [int(l.split("=")[1]) for l in out.decode().splitlines() if l.startswith("out_time_us=") and l.split("=")[1].isdigit()]
         # Både bild och ljud avkodades ända till slutet (12 s).
         self.assertAlmostEqual(max(times) / 1e6, 12.0, delta=0.5)
+
+    async def test_prefetch(self):
+        """Står man på ett kort förbereds videon: yt-dlp och index är klara när man trycker."""
+        y = self.app[jptv.JPTV]["youtube"]
+        r = await self.post(f"/api/yt/prefetch/{VID}")
+        self.assertTrue(r["started"])
+        for _ in range(200):
+            v = y._videos.get(VID)
+            if v and len(v["index"]) == len(v["formats"]):
+                break
+            await asyncio.sleep(0.05)
+        self.assertEqual(set(v["index"]), {"134", "140"})
+        fetched = sum(1 for l in self.log if l[0] == "media")
+        playlist = await (await self.get(f"/yt/{VID}/134.m3u8")).text()
+        self.assertIn("#EXT-X-BYTERANGE", playlist)
+        # Spellistan kom ur det som redan var hämtat.
+        self.assertEqual(sum(1 for l in self.log if l[0] == "media"), fetched)
+        self.assertTrue((await self.post(f"/api/yt/prefetch/{VID}"))["started"])
+        r = await self.client.post("/api/yt/prefetch/ogiltig")
+        self.assertEqual(r.status, 404)
 
     async def test_errors_and_images(self):
         err = await self.get_json("/api/yt/video/privatevid0", status=502)

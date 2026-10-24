@@ -174,6 +174,8 @@ def slim(o: dict, full: bool = False) -> dict:
     if full:
         item["partId"] = (part or {}).get("id")
         item["partKey"] = (part or {}).get("key")
+        # Plex har förhandsbilder för spolning ("video preview thumbnails").
+        item["previews"] = (part or {}).get("indexes") == "sd"
         item["container"] = (part or {}).get("container")
         item["videoCodec"] = (media or {}).get("videoCodec")
         item["audioCodec"] = (media or {}).get("audioCodec")

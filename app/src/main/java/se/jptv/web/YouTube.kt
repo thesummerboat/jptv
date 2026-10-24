@@ -56,6 +56,34 @@ data class YtChapter(val title: String, val startMs: Long, val endMs: Long)
 /** Del som SponsorBlock säger ska hoppas över (sponsor, egenreklam, prenumerera-tjat). */
 data class YtSegment(val startMs: Long, val endMs: Long, val category: String)
 
+/**
+ * Förhandsbilder för spolning: jpg-ark (via JPTV Web) med rader × kolumner små bilder. Bild nr
+ * floor(sekund × fps) ligger i ark nr / (rader × kolumner).
+ */
+data class YtStoryboard(
+    val width: Int,
+    val height: Int,
+    val columns: Int,
+    val rows: Int,
+    val fps: Double,
+    val frames: Int,
+    val sheets: Int,
+    /** Adress med {n} för arkets nummer, t.ex. "/yt/abc/sb/{n}.jpg". */
+    val url: String,
+) {
+    data class Spot(val sheet: Int, val column: Int, val row: Int)
+
+    fun spot(ms: Long): Spot {
+        val perSheet = rows * columns
+        val last = (if (frames > 0) frames else sheets * perSheet) - 1
+        val i = kotlin.math.floor(ms / 1000.0 * fps).toInt().coerceIn(0, last.coerceAtLeast(0))
+        val k = i % perSheet
+        return Spot(i / perSheet, k % columns, k / columns)
+    }
+
+    fun sheetPath(n: Int): String = url.replace("{n}", n.toString())
+}
+
 data class YtVideoInfo(
     val id: String,
     val title: String,
@@ -72,6 +100,7 @@ data class YtVideoInfo(
     val hls: String,
     val positionMs: Long,
     val subscribed: Boolean,
+    val storyboard: YtStoryboard? = null,
 )
 
 object YtJson {
@@ -168,6 +197,17 @@ object YtJson {
             hls = o.str("hls").ifBlank { "/yt/$id/master.m3u8" },
             positionMs = o.secondsMs("position") ?: 0L,
             subscribed = o.optBoolean("subscribed", false),
+            storyboard = o.optJSONObject("storyboard")?.let { sb ->
+                val fps = sb.optDouble("fps")
+                YtStoryboard(
+                    width = sb.optInt("width"), height = sb.optInt("height"), columns = sb.optInt("columns"),
+                    rows = sb.optInt("rows"), fps = fps, frames = sb.optInt("frames"), sheets = sb.optInt("sheets"),
+                    url = sb.str("url"),
+                ).takeIf {
+                    it.width > 0 && it.height > 0 && it.columns > 0 && it.rows > 0 && !fps.isNaN() && fps > 0 &&
+                        it.sheets > 0 && "{n}" in it.url
+                }
+            },
         )
     }
 

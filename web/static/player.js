@@ -76,7 +76,9 @@
     const played = h('div', { class: 'p-played' });
     const buffered = h('div', { class: 'p-buffered' });
     const knob = h('div', { class: 'p-knob' });
-    const hoverTime = h('div', { class: 'p-hover-time', hidden: true });
+    const hoverThumb = h('div', { class: 'p-hover-thumb', hidden: true });
+    const hoverLabel = h('div', { class: 'p-hover-label' });
+    const hoverTime = h('div', { class: 'p-hover-time', hidden: true }, hoverThumb, hoverLabel);
     const seek = h('div', { class: 'p-seek', role: 'slider', 'aria-label': 'Position', tabindex: '-1' }, h('div', { class: 'p-track' }, buffered, played, knob), hoverTime);
     const playBtn = h('button', { class: 'p-btn', title: 'Spela/paus (mellanslag)' }, JP.icon('play'));
     const rewBtn = h('button', { class: 'p-btn', title: '10 s bakåt (←)' }, JP.icon('rew'));
@@ -94,7 +96,7 @@
     const bottom = h('div', { class: 'p-bottom' }, seek, controls);
     const el = h('div', { class: 'player', hidden: true }, video, spinner, message, top, skip, nextCard, moved, bottom, menu);
     document.body.append(el);
-    return { el, video, spinner, message, backBtn, title, top, skip, nextCard, moved, seek, played, buffered, knob, hoverTime, playBtn, rewBtn, fwdBtn, volBtn, vol, time, nextBtn, menuBtn, pipBtn, fullBtn, menu, bottom };
+    return { el, video, spinner, message, backBtn, title, top, skip, nextCard, moved, seek, played, buffered, knob, hoverTime, hoverThumb, hoverLabel, playBtn, rewBtn, fwdBtn, volBtn, vol, time, nextBtn, menuBtn, pipBtn, fullBtn, menu, bottom };
   }
 
   let ui = null;
@@ -201,8 +203,10 @@
       const r = ui.seek.getBoundingClientRect();
       ui.hoverTime.hidden = false;
       const chapter = P.mode === 'yt' && P.yt ? [...(P.yt.chapters || [])].reverse().find((c) => c.start <= t) : null;
-      ui.hoverTime.textContent = JP.clock(t) + (chapter && chapter.title ? ' · ' + chapter.title : '');
-      ui.hoverTime.style.left = Math.min(r.width - 30, Math.max(30, e.clientX - r.left)) + 'px';
+      ui.hoverLabel.textContent = JP.clock(t) + (chapter && chapter.title ? ' · ' + chapter.title : '');
+      const thumb = previewAt(t);
+      const half = thumb ? 100 : 30;
+      ui.hoverTime.style.left = Math.min(r.width - half, Math.max(half, e.clientX - r.left)) + 'px';
       if (dragging) { v.currentTime = t; onTime(); }
     });
     ui.seek.addEventListener('pointerup', () => { dragging = false; });
@@ -435,6 +439,52 @@
     if (P.mode === 'yt' && P.yt) JP.beacon('/api/yt/progress', ytBody());
   });
 
+  /**
+   * Förhandsbild i bubblan över tidslinjen. YouTube: rutor ur storyboard-arken (CSS-utsnitt).
+   * Plex: en bild per fem sekunder från Plex egna förhandsbilder, om biblioteket har dem.
+   */
+  const THUMB_W = 200;
+  function previewAt(t) {
+    const box = ui.hoverThumb;
+    const sb = P.mode === 'yt' && P.yt && P.yt.storyboard;
+    if (sb) {
+      const per = sb.rows * sb.columns;
+      const i = Math.max(0, Math.min((sb.frames || sb.sheets * per) - 1, Math.floor(t * sb.fps)));
+      const sheet = Math.floor(i / per), k = i % per;
+      const s = THUMB_W / sb.width;
+      const url = sb.url.replace('{n}', sheet);
+      Object.assign(box.style, {
+        width: THUMB_W + 'px', height: Math.round(sb.height * s) + 'px',
+        backgroundImage: `url("${url}")`, backgroundSize: `${sb.columns * sb.width * s}px auto`,
+        backgroundPosition: `-${(k % sb.columns) * sb.width * s}px -${Math.floor(k / sb.columns) * sb.height * s}px`,
+      });
+      box.hidden = false;
+      // Nästa ark i förväg, så att bilden finns när man drar vidare.
+      if (sheet + 1 < sb.sheets && !P.sbLoaded.has(sheet + 1)) {
+        P.sbLoaded.add(sheet + 1);
+        new Image().src = sb.url.replace('{n}', sheet + 1);
+      }
+      return true;
+    }
+    const item = P.mode === 'plex' && P.item;
+    if (item && item.previews && item.partId && !P.noPreview) {
+      const ms = Math.floor((t * 1000) / 5000) * 5000;
+      const url = JP.img(`/library/parts/${item.partId}/indexes/sd/${ms}`);
+      if (box.dataset.src !== url) {
+        box.dataset.src = url;
+        const img = new Image();
+        img.onload = () => { if (box.dataset.src === url) { box.style.backgroundImage = `url("${url}")`; } };
+        img.onerror = () => { P.noPreview = true; box.hidden = true; };
+        img.src = url;
+      }
+      Object.assign(box.style, { width: THUMB_W + 'px', height: Math.round(THUMB_W * 9 / 16) + 'px', backgroundSize: 'cover', backgroundPosition: 'center' });
+      box.hidden = false;
+      return true;
+    }
+    box.hidden = true;
+    return false;
+  }
+
   function setTitle(item) {
     if (item.type === 'episode') {
       ui.title.replaceChildren(h('div', { class: 'p-title-main' }, item.show || ''), h('div', { class: 'p-title-sub' }, `${JP.epCode(item)} · ${item.title}`));
@@ -476,6 +526,9 @@
     const item = data.item;
     P.mode = 'plex';
     P.item = item;
+    P.noPreview = false;
+    ui.hoverThumb.dataset.src = '';
+    ui.hoverThumb.style.backgroundImage = '';
     P.session = data.session;
     P.next = data.next;
     P.quality = data.quality;
@@ -635,6 +688,8 @@
     P.yt = v;
     P.duration = v.duration || 0;
     P.skipped = new Set();
+    P.sbLoaded = new Set([0]);
+    if (v.storyboard) new Image().src = v.storyboard.url.replace('{n}', 0);
     const meta = [JP.viewCount(v.views), JP.ago(v.published)].filter(Boolean).join(' · ');
     ui.title.replaceChildren(h('div', { class: 'p-title-main' }, v.title),
       h('div', { class: 'p-title-sub' }, h('a', { href: '#/youtube/channel/' + v.channelId, onclick: (e) => { e.preventDefault(); JP.playerReturn = null; location.hash = '#/youtube/channel/' + v.channelId; } }, v.channel),

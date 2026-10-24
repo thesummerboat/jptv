@@ -335,6 +335,11 @@ body.playing #topbar { display: none; }
 .p-knob { position: absolute; top: 50%; width: 15px; height: 15px; border-radius: 50%; background: var(--accent); transform: translate(-50%, -50%) scale(0); transition: transform 0.12s; }
 .p-seek:hover .p-knob { transform: translate(-50%, -50%) scale(1); }
 .p-hover-time { position: absolute; bottom: 22px; transform: translateX(-50%); background: rgba(0, 0, 0, 0.88); padding: 3px 8px; border-radius: 4px; font-size: 12.5px; font-variant-numeric: tabular-nums; pointer-events: none; }
+.p-hover-time:has(.p-hover-thumb:not([hidden])) { padding: 4px; border-radius: 8px; text-align: center; }
+.p-hover-thumb { display: block; border-radius: 5px; background-color: #000; background-repeat: no-repeat; margin-bottom: 4px; }
+.p-hover-thumb[hidden] { display: none; }
+.p-hover-time:has(.p-hover-thumb:not([hidden])) .p-hover-label { max-width: 200px; }
+.p-hover-label { white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; }
 .p-controls { display: flex; align-items: center; gap: 4px; margin-top: 8px; }
 .p-btn { width: 42px; height: 42px; border-radius: 50%; border: 0; background: none; color: #fff; display: grid; place-items: center; cursor: pointer; flex: none; }
 .p-btn:hover { background: rgba(255, 255, 255, 0.14); }

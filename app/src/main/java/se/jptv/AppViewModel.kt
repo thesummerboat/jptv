@@ -179,6 +179,25 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         open(Screen.Player(PlayRequest.YouTube(videoId, fromStart)))
     }
 
+    private val ytPrefetched = HashMap<String, Long>()
+
+    /** Står man på ett YouTube-kort en stund förbereder JPTV Web videon (högst en gång per fem minuter). */
+    fun ytPrefetch(videoId: String) {
+        val now = System.currentTimeMillis()
+        if ((ytPrefetched[videoId] ?: 0L) > now - 5 * 60_000) return
+        ytPrefetched[videoId] = now
+        if (ytPrefetched.size > 200) ytPrefetched.entries.removeAll { it.value < now - 5 * 60_000 }
+        viewModelScope.launch {
+            try {
+                web.ytPrefetch(videoId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Bara en förberedelse.
+            }
+        }
+    }
+
     /** Var man är i en YouTube-video (sparas i JPTV Web, så att andra TV-apparater ser det). */
     fun ytProgress(video: se.jptv.web.YtVideoInfo, positionMs: Long, durationMs: Long) {
         viewModelScope.launch {

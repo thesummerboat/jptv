@@ -367,37 +367,59 @@ def _browse_id(obj) -> str:
     return ""
 
 
+# Ord för tusen/miljon/miljard i visningstexter ("12K", "257 tn", "1,2 mn", "3 md").
+_MULT = {"k": 1e3, "tn": 1e3, "t": 1e3, "m": 1e6, "mn": 1e6, "mio": 1e6, "milj": 1e6,
+         "b": 1e9, "md": 1e9, "mdr": 1e9, "mrd": 1e9}
+
+
 def parse_count(text: str) -> int | None:
-    """"1.2M views" → 1200000, "12K" → 12000, "1,234 views" → 1234, "No views" → 0."""
-    t = (text or "").strip()
+    """
+    Antal visningar, på engelska eller svenska: "1.2M views" → 1200000, "257 tn visningar" →
+    257000, "1,2 mn" → 1200000, "1 234 visningar" → 1234, "No views"/"Inga visningar" → 0.
+    """
+    t = (text or "").strip().lower().replace("\u00a0", " ").replace("\u202f", " ")
     if not t:
         return None
-    if t.lower().startswith("no "):
+    if t.startswith(("no ", "inga ")):
         return 0
-    m = re.match(r"^([\d][\d,.\s]*?)\s*([KMB])?(?:\s|$)", t, re.I)
+    m = re.match(r"^(\d[\d.,\s]*)", t)
     if not m:
         return None
-    num, suffix = m.group(1).strip(), (m.group(2) or "").upper()
+    num = m.group(1).strip()
+    word = re.match(r"^([a-zåäö]+)", t[m.end():].strip())
+    mult = _MULT.get(word.group(1)) if word else None
     try:
-        if suffix:
-            return int(float(num.replace(",", "")) * {"K": 1e3, "M": 1e6, "B": 1e9}[suffix])
+        if mult:
+            return int(float(num.replace(" ", "").replace(",", ".")) * mult)
         digits = re.sub(r"\D", "", num)
         return int(digits) if digits else None
     except ValueError:
         return None
 
 
-_AGO_RE = re.compile(r"(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago", re.I)
 _UNIT_S = {"second": 1, "minute": 60, "hour": 3600, "day": 86400, "week": 604800, "month": 2592000, "year": 31536000}
+_AGO_EN = re.compile(r"(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago", re.I)
+_AGO_SV = re.compile(r"för\s+(\d+)\s+(sekund|minut|timm|tim|dag|veck|månad|år)[a-zåäö]*\s+sedan", re.I)
+_SV_UNIT = {"sekund": "second", "minut": "minute", "timm": "hour", "tim": "hour", "dag": "day", "veck": "week",
+            "månad": "month", "år": "year"}
 
 
 def parse_ago(text: str, now: float | None = None) -> int | None:
-    """"3 years ago", "Streamed 2 weeks ago" → ungefärlig tidpunkt i ms."""
-    m = _AGO_RE.search(text or "")
-    if not m:
-        return None
+    """"3 years ago", "Streamed 2 weeks ago", "för 3 år sedan" → ungefärlig tidpunkt i ms."""
     now = time.time() if now is None else now
-    return int((now - int(m.group(1)) * _UNIT_S[m.group(2).lower()]) * 1000)
+    m = _AGO_EN.search(text or "")
+    if m:
+        unit = m.group(2).lower()
+    else:
+        m = _AGO_SV.search(text or "")
+        if not m:
+            return None
+        unit = _SV_UNIT[m.group(2).lower()]
+    return int((now - int(m.group(1)) * _UNIT_S[unit]) * 1000)
+
+
+def _is_live_text(low: str) -> bool:
+    return "watching" in low or "tittar" in low or low in ("live", "live nu", "livesänds nu")
 
 
 def parse_clock(text: str) -> int | None:
@@ -427,23 +449,42 @@ def _lockup_video(vm: dict) -> dict | None:
     md = _dig(vm, "metadata", "lockupMetadataViewModel") or {}
     title = _text(md.get("title"))
     channel, cid, views, published, live = "", "", None, None, False
+    # Raderna under titeln: kanalen, och "1,2 mn visningar · för 3 år sedan" (en eller två delar,
+    # på det språk YouTube väljer). Kanalen är delen som länkar till kanalen, annars den första.
+    rows = []
     for row in _dig(md, "metadata", "contentMetadataViewModel", "metadataRows") or []:
+        parts = []
         for part in (row or {}).get("metadataParts") or []:
-            t = _text((part or {}).get("text")).strip()
-            if not t:
-                continue
-            low = t.lower()
-            bid = _browse_id((part or {}).get("text"))
-            if bid and not cid:
+            raw = (part or {}).get("text")
+            t = _text(raw).strip()
+            if t:
+                parts.append((t, raw))
+        if parts:
+            rows.append(parts)
+    for parts in rows:
+        for t, raw in parts:
+            bid = _browse_id(raw)
+            if bid:
                 cid, channel = bid, t
-            elif re.search(r"\bviews?\b", low):
-                views = parse_count(t)
-            elif "watching" in low or low == "live":
-                live = True
-            elif low.endswith(" ago"):
-                published = parse_ago(t)
-            elif not channel and views is None and published is None:
-                channel = t
+                break
+        if cid:
+            break
+    if not channel and rows and not re.match(r"^\d", rows[0][0][0]):
+        channel = rows[0][0][0]
+    for parts in rows:
+        for t, _raw in parts:
+            if t == channel:
+                continue
+            for piece in re.split(r"\s*[•·]\s*", t):
+                low = piece.lower()
+                if not piece:
+                    continue
+                if _is_live_text(low):
+                    live = True
+                elif (ago := parse_ago(piece)) is not None:
+                    published = published or ago
+                elif views is None and (re.match(r"^\d", piece) or low.startswith(("no ", "inga "))):
+                    views = parse_count(piece)
     image = md.get("image") or {}
     cid = cid or _browse_id(image)
     avatar = None
@@ -475,7 +516,7 @@ def _renderer_video(r: dict) -> dict | None:
     by = r.get("longBylineText") or r.get("shortBylineText") or r.get("ownerText") or {}
     view_text = _text(r.get("viewCountText")) or _text(r.get("shortViewCountText"))
     length = _text(r.get("lengthText"))
-    live = "watching" in view_text.lower()
+    live = _is_live_text(view_text.lower())
     for _, o in _walk(r.get("thumbnailOverlays") or [], ("thumbnailOverlayTimeStatusRenderer",)):
         length = length or _text(o.get("text"))
         live = live or o.get("style") in ("LIVE", "UPCOMING")
@@ -700,6 +741,19 @@ def pick_subtitles(info: dict) -> list[dict]:
                     out.append({"lang": want, "name": name + kind, "url": vtt["url"]})
                     break
     return out
+
+
+def pick_storyboard(info: dict) -> dict | None:
+    """
+    YouTubes förhandsbilder för spolning ("storyboard"): jpg-ark med ett rutnät av små bilder.
+    Den största upp till 320 px bred väljs (större finns sällan, mindre blir suddiga på TV:n).
+    """
+    boards = [f for f in info.get("formats") or [] if f.get("format_note") == "storyboard" and f.get("fragments")
+              and f.get("rows") and f.get("columns") and f.get("width") and f.get("height") and f.get("fps")]
+    if not boards:
+        return None
+    fit = [f for f in boards if f["width"] <= 320]
+    return max(fit, key=lambda f: f["width"]) if fit else min(boards, key=lambda f: f["width"])
 
 
 def master_playlist(videos: list[dict], audio: dict, subs: list[dict]) -> str:
@@ -948,6 +1002,10 @@ class YouTube:
         self._related: dict[str, tuple[float, list[dict]]] = {}
         self._warming: set[str] = set()
         self._related_tasks: dict[str, asyncio.Future] = {}
+        self._sheets: dict[str, bytes] = {}
+        self._prefetching: set[str] = set()
+        self._prefetch_times: list[float] = []
+        self.last_extract: float | None = None
         self._bg: set[asyncio.Future] = set()
         self._recs: tuple[float, tuple, dict] | None = None
         self._recs_lock = asyncio.Lock()
@@ -979,6 +1037,7 @@ class YouTube:
             "history": len(self.data.history(10000)),
             "blocked": list(self.data.blocked),
             "recs": dict(self.recs_stats),
+            "lastExtract": self.last_extract,
         }
 
     # ---------- flöden
@@ -1120,7 +1179,16 @@ class YouTube:
             v = self._videos.get(vid)
             if v and not fresh and time.time() < v["expires"] - 600:
                 return v
-            info = await self.ytdlp.run_json(["--no-playlist", f"{YT}/watch?v={vid}"], timeout=90)
+            started = time.monotonic()
+            info = await self.ytdlp.run_json([
+                "--no-playlist", "--cache-dir", os.path.join(self.ytdlp.lib_dir, "cache"),
+                # Varken m3u8/dash-manifesten eller automatiskt översatta undertexter används: färre
+                # förfrågningar och mindre JSON, så att videon startar fortare.
+                "--extractor-args", "youtube:skip=hls,dash,translated_subs",
+                f"{YT}/watch?v={vid}",
+            ], timeout=90)
+            self.last_extract = round(time.monotonic() - started, 1)
+            log.info("yt-dlp hämtade %s på %.1f s", vid, self.last_extract)
             if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming"):
                 raise YtError("Livesändningar stöds inte än")
             videos, audio = pick_formats(info, self.max_height)
@@ -1134,7 +1202,8 @@ class YouTube:
             formats = {f["format_id"]: f for f in videos + [audio]}
             v = {
                 "info": info, "videos": videos, "audio": audio, "formats": formats, "subs": pick_subtitles(info),
-                "expires": min(expires, time.time() + 5 * 3600), "index": {},
+                "storyboard": pick_storyboard(info), "expires": min(expires, time.time() + 5 * 3600), "index": {},
+                "index_tasks": {},
             }
             self._videos[vid] = v
             # Gamla videor ur minnet.
@@ -1144,13 +1213,22 @@ class YouTube:
             return v
 
     async def video(self, vid: str) -> dict:
-        v = await self._video(vid)
+        sponsor_task = asyncio.ensure_future(self.sponsor_segments(vid))
+        try:
+            v = await self._video(vid)
+        except BaseException:
+            sponsor_task.cancel()
+            raise
+        # Spelaren ber om spellistorna strax: läs filernas index redan nu.
+        self._warm_indexes(v)
         info = v["info"]
         chapters = [
             {"title": c.get("title") or "", "start": float(c.get("start_time") or 0), "end": float(c.get("end_time") or 0)}
             for c in info.get("chapters") or []
         ]
-        sponsor = await self.sponsor_segments(vid)
+        sponsor = await sponsor_task
+        sb = v.get("storyboard")
+        duration = float(info.get("duration") or 0)
         out = {
             "id": vid,
             "title": info.get("title") or "",
@@ -1169,6 +1247,13 @@ class YouTube:
             "position": self.data.position(vid),
             "subscribed": self.data.subscribed(info.get("channel_id") or ""),
             "maxHeight": max((f.get("height") or 0) for f in v["videos"]),
+            # Förhandsbilder när man spolar: bild nr floor(sekund × fps), ark = nr / (rader × kolumner).
+            "storyboard": {
+                "width": sb["width"], "height": sb["height"], "columns": sb["columns"], "rows": sb["rows"],
+                "fps": sb["fps"], "frames": max(1, int(round(sb["fps"] * duration))) if duration else
+                len(sb["fragments"]) * sb["rows"] * sb["columns"],
+                "sheets": len(sb["fragments"]), "url": f"/yt/{vid}/sb/{{n}}.jpg",
+            } if sb else None,
         }
         return out
 
@@ -1186,32 +1271,84 @@ class YouTube:
                 raise YtError(f"YouTube svarade {r.status}")
             return await r.read()
 
+    async def _load_index(self, v: dict, itag: str) -> tuple:
+        f = v["formats"][itag]
+        headers = f.get("http_headers") or {}
+        data = await self._fetch_range(f["url"], headers, 0, 65535)
+        parsed = parse_index(data)
+        if isinstance(parsed, tuple) and parsed and parsed[0] == "more":
+            data = await self._fetch_range(f["url"], headers, 0, int(parsed[1]) + 1023)
+            parsed = parse_index(data)
+        if not parsed or parsed[0] == "more":
+            raise YtError("Kunde inte läsa videons index")
+        v["index"][itag] = parsed
+        return parsed
+
+    def _index_task(self, v: dict, itag: str) -> asyncio.Future:
+        """Indexet för ett format hämtas en gång, även om flera frågar samtidigt."""
+        task = v["index_tasks"].get(itag)
+        if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
+            task = v["index_tasks"][itag] = asyncio.ensure_future(self._load_index(v, itag))
+            # Fel hämtas av den som väntar; i bakgrunden ska de inte loggas som obehandlade.
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        return task
+
+    def _warm_indexes(self, v: dict) -> None:
+        for itag in v["formats"]:
+            if itag not in v["index"]:
+                self._index_task(v, itag)
+
     async def media(self, vid: str, itag: str) -> str:
         """Spellista för ett format: byte-intervall ur filens index (sidx)."""
         for attempt in (0, 1):
             v = await self._video(vid, fresh=attempt == 1)
-            f = v["formats"].get(itag)
-            if f is None:
+            if itag not in v["formats"]:
                 raise YtError("Okänt format")
             cached = v["index"].get(itag)
             if cached:
                 return media_playlist(itag, *cached)
-            headers = f.get("http_headers") or {}
             try:
-                data = await self._fetch_range(f["url"], headers, 0, 65535)
-                parsed = parse_index(data)
-                if isinstance(parsed, tuple) and parsed and parsed[0] == "more":
-                    data = await self._fetch_range(f["url"], headers, 0, int(parsed[1]) + 1023)
-                    parsed = parse_index(data)
+                parsed = await asyncio.shield(self._index_task(v, itag))
             except PermissionError:
                 if attempt == 0:
                     continue
                 raise YtError("YouTube nekade videon (403). Prova igen om en stund.")
-            if not parsed or parsed[0] == "more":
-                raise YtError("Kunde inte läsa videons index")
-            v["index"][itag] = parsed
             return media_playlist(itag, *parsed)
         raise YtError("Kunde inte läsa videons index")
+
+    def prefetch(self, vid: str) -> bool:
+        """
+        Förbereder en video man står på (TV) eller håller musen över (webben): yt-dlp, index och
+        SponsorBlock i bakgrunden, så att den startar direkt när man trycker. Högst två åt gången
+        och tolv i minuten, så att YouTube inte tröttnar på oss.
+        """
+        if not VIDEO_RE.match(vid or ""):
+            return False
+        v = self._videos.get(vid)
+        if v and time.time() < v["expires"] - 600:
+            self._warm_indexes(v)
+            return True
+        now = time.monotonic()
+        self._prefetch_times = [t for t in self._prefetch_times if now - t < 60]
+        if vid in self._prefetching or len(self._prefetching) >= 2 or len(self._prefetch_times) >= 12:
+            return False
+        self._prefetching.add(vid)
+        self._prefetch_times.append(now)
+
+        async def run():
+            try:
+                v = await self._video(vid)
+                self._warm_indexes(v)
+                await self.sponsor_segments(vid)
+            except Exception as e:
+                log.info("Förberedelse av %s misslyckades: %s", vid, e)
+            finally:
+                self._prefetching.discard(vid)
+
+        task = asyncio.ensure_future(run())
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+        return True
 
     def subtitle_url(self, v: dict, lang: str) -> str | None:
         return next((s["url"] for s in v["subs"] if s["lang"] == lang), None)
@@ -1236,6 +1373,29 @@ class YouTube:
         if f is None:
             raise YtError("Okänt format")
         return f["url"], (f.get("http_headers") or {})
+
+    async def storyboard_sheet(self, vid: str, n: int) -> bytes | None:
+        """Ett ark med förhandsbilder (jpg). None om det inte finns."""
+        key = f"{vid}/{n}"
+        hit = self._sheets.get(key)
+        if hit is not None:
+            return hit
+        for attempt in (0, 1):
+            v = await self._video(vid, fresh=attempt == 1)
+            sb = v.get("storyboard")
+            if not sb or not 0 <= n < len(sb["fragments"]):
+                return None
+            async with self.http.get(sb["fragments"][n]["url"], timeout=aiohttp.ClientTimeout(total=20)) as r:
+                if r.status in (403, 404, 410) and attempt == 0:
+                    continue  # adressen har gått ut: hämta videon på nytt
+                if r.status != 200:
+                    raise YtError(f"YouTube svarade {r.status}")
+                data = await r.read()
+            self._sheets[key] = data
+            while len(self._sheets) > 200:
+                self._sheets.pop(next(iter(self._sheets)))
+            return data
+        return None
 
     # ---------- SponsorBlock
 
@@ -1275,10 +1435,14 @@ class YouTube:
         best = max((f.get("height") or 0) for f in v["videos"])
         itag = v["videos"][-1]["format_id"]
         await self.media(TEST_VIDEO, itag)
-        text = f"yt-dlp {self.ytdlp.version or '?'} fungerar · upp till {best}p"
+        text = f"yt-dlp {self.ytdlp.version or '?'} fungerar · upp till {best}p · hämtningen tog {self.last_extract} s"
         try:
-            n = len(parse_related(await self._next(TEST_VIDEO)))
-            text += f" · YouTubes förslag: {n} st" if n else " · YouTubes förslag gick inte att läsa (sök används i stället)"
+            items = parse_related(await self._next(TEST_VIDEO))
+            n = len(items)
+            nv = sum(1 for i in items if i.get("views") is not None)
+            nd = sum(1 for i in items if i.get("published"))
+            text += (f" · YouTubes förslag: {n} st (visningar på {nv}, datum på {nd})" if n
+                     else " · YouTubes förslag gick inte att läsa (sök används i stället)")
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, YtError) as e:
             text += f" · YouTubes förslag fungerar inte ({e or type(e).__name__}); sök används i stället"
         return text
@@ -1332,6 +1496,7 @@ class YouTube:
         }
         headers = {
             "Content-Type": "application/json", "User-Agent": _BROWSER_UA, "Origin": YT,
+            "Accept-Language": "en-US,en;q=0.9",
             "X-YouTube-Client-Name": "1", "X-YouTube-Client-Version": WEB_CLIENT_VERSION,
             "Cookie": "SOCS=CAI; CONSENT=YES+",
         }
@@ -1340,6 +1505,14 @@ class YouTube:
             if r.status != 200:
                 raise YtError(f"YouTube svarade {r.status}")
             return await r.json(content_type=None)
+
+    async def related_debug(self, vid: str) -> dict:
+        """YouTubes råa svar för de första förslagen, och hur de lästes (för felsökning)."""
+        data = await self._next(vid)
+        root = _dig(data, "contents", "twoColumnWatchNextResults", "secondaryResults") or data
+        raw = [{k: v} for k, v in _walk(root, ("lockupViewModel", "compactVideoRenderer", "videoRenderer"),
+                                        ("playerOverlays", "engagementPanels", "frameworkUpdates", "topbar"))][:3]
+        return {"parsed": parse_related(data)[:5], "raw": raw}
 
     async def related(self, vid: str, title: str = "") -> list[dict]:
         """YouTubes förslag bredvid videon. Går de inte att få: en sökning på titeln i stället."""

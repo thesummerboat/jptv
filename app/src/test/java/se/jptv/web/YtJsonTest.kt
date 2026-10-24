@@ -49,6 +49,27 @@ class YtJsonTest {
     }
 
     @Test
+    fun forhandsbilder() {
+        val json = JSONObject(video).put(
+            "storyboard",
+            JSONObject("""{"width": 160, "height": 90, "columns": 3, "rows": 3, "fps": 0.75, "frames": 9, "sheets": 1, "url": "/yt/abcdefghijk/sb/{n}.jpg"}"""),
+        )
+        val sb = YtJson.videoInfo(json)!!.storyboard!!
+        assertEquals("/yt/abcdefghijk/sb/0.jpg", sb.sheetPath(0))
+        // 9 s × 0,75 = bild 6: rad 2, kolumn 0. Efter slutet: sista bilden.
+        assertEquals(YtStoryboard.Spot(0, 0, 2), sb.spot(9_000))
+        assertEquals(YtStoryboard.Spot(0, 1, 0), sb.spot(2_400))
+        assertEquals(YtStoryboard.Spot(0, 2, 2), sb.spot(60_000))
+        assertEquals(YtStoryboard.Spot(0, 0, 0), sb.spot(-5))
+        // Flera ark: bild 10 med 3×3 per ark ligger i ark 1.
+        val many = sb.copy(frames = 30, sheets = 4)
+        assertEquals(YtStoryboard.Spot(1, 1, 0), many.spot((10 / 0.75 * 1000).toLong() + 1))
+        // Utan förhandsbilder (äldre JPTV Web eller video utan) blir det null.
+        assertNull(YtJson.videoInfo(JSONObject(video))!!.storyboard)
+        assertNull(YtJson.videoInfo(JSONObject(video).put("storyboard", JSONObject.NULL))!!.storyboard)
+    }
+
+    @Test
     fun hemmet() {
         val h = YtJson.home(JSONObject(home))
         assertEquals(1, h.continueWatching.size)

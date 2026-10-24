@@ -148,6 +148,11 @@ class JptvWeb(http: OkHttpClient) {
     /** Förslagen tar några sekunder första gången (YouTube frågas om varje sedd video). */
     suspend fun ytRecommended(): YtRecs = YtJson.recs(getJson("/api/yt/recommended", 60))
 
+    /** Be servern förbereda en video (man står på kortet), så att den startar direkt. */
+    suspend fun ytPrefetch(videoId: String) {
+        send("POST", "/api/yt/prefetch/$videoId", null)
+    }
+
     /** "Inte intresserad": videon föreslås inte igen. */
     suspend fun ytDismiss(videoId: String) {
         send("POST", "/api/yt/dismiss", JSONObject().put("id", videoId))
@@ -173,6 +178,16 @@ class JptvWeb(http: OkHttpClient) {
                 .put("title", video.title).put("channel", video.channel).put("channelId", video.channelId)
                 .put("thumb", video.thumb ?: JSONObject.NULL),
         )
+    }
+
+    /** Rådata från JPTV Web (förhandsbilder), eller null om det inte gick. */
+    suspend fun bytes(path: String): ByteArray? = withContext(Dispatchers.IO) {
+        val base = baseUrl ?: return@withContext null
+        runCatching {
+            client.newCall(Request.Builder().url(base + path).get().build()).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.bytes() else null
+            }
+        }.getOrNull()
     }
 
     /** Full adress till en sökväg på JPTV Web (spellistor, bilder). */

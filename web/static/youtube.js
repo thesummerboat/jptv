@@ -26,6 +26,15 @@
     return n + (n === 1 ? ' visning' : ' visningar');
   };
 
+  const prefetched = new Map();
+  /** Be servern förbereda en video (högst en gång per fem minuter och video). */
+  JP.ytPrefetch = function (id) {
+    const at = prefetched.get(id);
+    if (at && Date.now() - at < 5 * 60e3) return;
+    prefetched.set(id, Date.now());
+    JP.post('/api/yt/prefetch/' + id).catch(() => {});
+  };
+
   /** Andra YouTube-sidor visar gammalt efter en ändring (dold video, ny prenumeration): bygg om dem. */
   function staleYt() {
     for (const v of JP.views.values()) if (v.key.startsWith('/youtube') && v !== JP.current) v.dirty = true;
@@ -102,6 +111,14 @@
     const a = h('a', { class: 'card wide yt-card' + (opts.grid ? ' in-grid' : ''), href: '#/yt/' + v.id, 'aria-label': v.title, 'data-ch': v.channelId || '' });
     if (opts.suggested) a.dataset.suggested = '1';
     a.addEventListener('click', (e) => { e.preventDefault(); JP.playYt(v.id); });
+    // Vilar man på kortet förbereder servern videon, så att den startar direkt.
+    let timer = 0;
+    const rest = () => { clearTimeout(timer); timer = setTimeout(() => JP.ytPrefetch(v.id), 350); };
+    const leave = () => clearTimeout(timer);
+    a.addEventListener('pointerenter', rest);
+    a.addEventListener('focus', rest);
+    a.addEventListener('pointerleave', leave);
+    a.addEventListener('blur', leave);
     const art = h('div', { class: 'card-art' });
     const img = h('img', { src: JP.ytImg(v.thumb), alt: '', loading: 'lazy', decoding: 'async', draggable: 'false' });
     img.addEventListener('error', () => { img.remove(); art.append(h('div', { class: 'card-fallback' }, v.title)); });

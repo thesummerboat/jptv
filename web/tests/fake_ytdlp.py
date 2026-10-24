@@ -59,6 +59,13 @@ def info(vid: str) -> dict:
              "acodec": "mp4a.40.2", "height": 360},
             {"format_id": "137", "url": f"{BASE}/media/{vext}", "protocol": "https", "ext": "mp4", "vcodec": vcodec,
              "acodec": "none", "height": 1080, "has_drm": True},
+            # Förhandsbilder: 9 bilder på 12 s i ett ark med 3×3 (och ett mindre som inte ska väljas).
+            {"format_id": "sb0", "format_note": "storyboard", "ext": "mhtml", "protocol": "mhtml", "acodec": "none",
+             "vcodec": "none", "url": f"{BASE}/media/sb0.jpg", "width": 160, "height": 90, "fps": 0.75, "rows": 3,
+             "columns": 3, "fragments": [{"url": f"{BASE}/media/sb0.jpg", "duration": 12.0}]},
+            {"format_id": "sb1", "format_note": "storyboard", "ext": "mhtml", "protocol": "mhtml", "acodec": "none",
+             "vcodec": "none", "url": f"{BASE}/media/sb1.jpg", "width": 80, "height": 45, "fps": 2, "rows": 5,
+             "columns": 5, "fragments": [{"url": f"{BASE}/media/sb1.jpg", "duration": 12.0}]},
         ],
     }
 

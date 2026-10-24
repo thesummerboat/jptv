@@ -605,6 +605,14 @@ private fun VideoCard(
         }
     }
     val hidden = actions?.hidden(v, suggested) == true
+    // Står man kvar på kortet förbereder JPTV Web videon, så att den startar direkt.
+    var focused by remember { mutableStateOf(false) }
+    LaunchedEffect(focused) {
+        if (focused) {
+            delay(900)
+            vm.ytPrefetch(v.id)
+        }
+    }
     Column(modifier.width(VideoCardWidth)) {
         Card(
             onClick = { vm.playYouTube(v.id) },
@@ -620,6 +628,7 @@ private fun VideoCard(
                 .width(VideoCardWidth)
                 .aspectRatio(16f / 9f)
                 .focusRequester(self)
+                .onFocusChanged { focused = it.isFocused }
                 .then(
                     if (focus != null && focusKey != null) Modifier.onFocusChanged { if (it.isFocused) focus.focused(focusKey) } else Modifier,
                 ),

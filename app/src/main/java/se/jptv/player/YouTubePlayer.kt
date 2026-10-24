@@ -15,6 +15,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -22,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -89,6 +91,20 @@ internal fun YouTubePlayer(vm: AppViewModel, request: PlayRequest.YouTube) {
     var reload by remember { mutableIntStateOf(0) }
 
     val panelOpen = panel != YtPanel.NONE
+
+    // Förhandsbilder när man spolar (YouTubes storyboard via JPTV Web).
+    val previews = remember(info?.storyboard) { info?.storyboard?.let { YtPreview(vm.web, it) } }
+    LaunchedEffect(previews) {
+        val p = previews ?: return@LaunchedEffect
+        delay(5_000)
+        runCatching { p.frame(exo.currentPosition) }
+    }
+    val previewKey = scrubTarget?.let { it / 1_000 }
+    val preview by produceState<ImageBitmap?>(null, previewKey, previews) {
+        val target = scrubTarget
+        val p = previews
+        value = if (target == null || p == null) null else runCatching { p.frame(target) }.getOrNull() ?: value
+    }
 
     // Hämta videon och starta.
     LaunchedEffect(request.videoId, reload) {
@@ -363,7 +379,7 @@ internal fun YouTubePlayer(vm: AppViewModel, request: PlayRequest.YouTube) {
                 subtitle = listOfNotNull(v.channel.takeIf { it.isNotBlank() }, se.jptv.web.YtJson.views(v.views), se.jptv.web.YtJson.ago(v.published))
                     .joinToString(" · "),
                 scrubTarget = scrubTarget,
-                preview = null,
+                preview = preview,
                 position = position,
                 duration = duration,
                 buffered = buffered,

@@ -692,6 +692,21 @@ async def yt_recommended(request: web.Request):
     return web.json_response(await yt(request).recommendations(fresh=request.query.get("fresh") == "1"))
 
 
+@routes.post("/api/yt/prefetch/{id}")
+async def yt_prefetch(request: web.Request):
+    """Förbered en video (man står på kortet): den startar direkt när man trycker."""
+    return web.json_response({"started": yt(request).prefetch(_video_id(request))})
+
+
+@routes.get("/api/yt/debug/related/{id}")
+async def yt_related_debug(request: web.Request):
+    """Felsökning: YouTubes råa förslag bredvid en video och hur JPTV läste dem."""
+    try:
+        return web.json_response(await yt(request).related_debug(_video_id(request)))
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, YtError) as e:
+        return web.json_response({"error": str(e) or type(e).__name__}, status=502)
+
+
 @routes.get("/api/yt/history")
 async def yt_history(request: web.Request):
     return web.json_response({"videos": yt(request).data.history()})
@@ -835,6 +850,15 @@ async def yt_segment(request: web.Request):
             continue
         break
     return await _relay(request, r, "private, max-age=3600")
+
+
+@routes.get("/yt/{id}/sb/{n:[0-9]+}.jpg")
+async def yt_storyboard(request: web.Request):
+    """Förhandsbilder för spolning (ett ark i taget, via servern)."""
+    data = await yt(request).storyboard_sheet(_video_id(request), int(request.match_info["n"]))
+    if data is None:
+        raise web.HTTPNotFound()
+    return web.Response(body=data, content_type="image/jpeg", headers={"Cache-Control": "max-age=21600"})
 
 
 @routes.get("/yt/img")
