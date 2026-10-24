@@ -44,6 +44,10 @@ sealed interface Screen {
     data object Search : Screen
     data object Settings : Screen
     data class Player(val request: PlayRequest) : Screen
+    /** YouTube via JPTV Web: dina kanaler, nytt från dem och sök. */
+    data object YouTube : Screen
+    data class YouTubeChannel(val id: String, val name: String = "") : Screen
+    data object YouTubeSearch : Screen
 }
 
 sealed interface PlayRequest {
@@ -58,6 +62,8 @@ sealed interface PlayRequest {
         val shuffle: Boolean = false,
     ) : PlayRequest
     data class Live(val channels: List<Channel>, val index: Int) : PlayRequest
+    /** En YouTube-video, spelad via JPTV Web. */
+    data class YouTube(val videoId: String, val fromStart: Boolean = false) : PlayRequest
 }
 
 /** Påminnelse från guiden: ett program som ska börja på en kanal. */
@@ -149,6 +155,37 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---------- YouTube (via JPTV Web) ----------
+
+    /** Senast hämtade YouTube-sidan, så att den syns direkt när man går tillbaka dit. */
+    var ytHome by mutableStateOf<se.jptv.web.YtHome?>(null)
+        private set
+
+    /** JPTV Web-klienten, eller fel om servern inte hittas. */
+    suspend fun yt(): se.jptv.web.JptvWeb {
+        if (webBase() == null) throw java.io.IOException("JPTV Web på Unraid hittades inte. YouTube går via den (Inställningar → Önskemål visar adressen).")
+        return web
+    }
+
+    suspend fun loadYtHome(): se.jptv.web.YtHome = yt().ytHome().also { ytHome = it }
+
+    fun playYouTube(videoId: String, fromStart: Boolean = false) {
+        open(Screen.Player(PlayRequest.YouTube(videoId, fromStart)))
+    }
+
+    /** Var man är i en YouTube-video (sparas i JPTV Web, så att andra TV-apparater ser det). */
+    fun ytProgress(video: se.jptv.web.YtVideoInfo, positionMs: Long, durationMs: Long) {
+        viewModelScope.launch {
+            try {
+                web.ytProgress(video, positionMs, durationMs)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Nästa rapport försöker igen.
+            }
+        }
+    }
+
     /** Skickar ett önskemål. Returnerar titeln med ny status, eller felet. */
     suspend fun wish(item: se.jptv.web.WishItem, by: String = wisherName): Result<se.jptv.web.WishItem> =
         try {
@@ -183,7 +220,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun open(screen: Screen) {
         // Plex-uppspelning tar över skärmen och ljudet: stäng bild-i-bild först.
-        if (screen is Screen.Player && screen.request is PlayRequest.Vod) closePip()
+        if (screen is Screen.Player && screen.request !is PlayRequest.Live) closePip()
         cameBack = false
         stack.add(screen)
     }
@@ -227,7 +264,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Byter ut översta skärmen, t.ex. när nästa avsnitt tar över efter det förra. */
     fun replaceTop(screen: Screen) {
-        if (screen is Screen.Player && screen.request is PlayRequest.Vod) closePip()
+        if (screen is Screen.Player && screen.request !is PlayRequest.Live) closePip()
         cameBack = false
         if (stack.isEmpty()) stack.add(screen) else stack[stack.lastIndex] = screen
     }

@@ -107,6 +107,71 @@ class JptvWeb(http: OkHttpClient) {
         }
     }
 
+    // ---------- YouTube
+
+    private suspend fun getJson(path: String, timeoutSec: Long = 15): JSONObject = withContext(Dispatchers.IO) {
+        val base = baseUrl ?: throw IOException("JPTV Web hittades inte")
+        val c = if (timeoutSec > 15) client.newBuilder().readTimeout(timeoutSec, TimeUnit.SECONDS).build() else client
+        c.newCall(Request.Builder().url(base + path).header("Accept", "application/json").get().build()).execute().use { resp ->
+            val text = resp.body?.string().orEmpty()
+            if (resp.code == 404 && path.startsWith("/api/yt/")) throw IOException("JPTV Web på Unraid behöver uppdateras för YouTube")
+            if (!resp.isSuccessful) throw IOException(errorOf(text) ?: "JPTV Web svarade HTTP ${resp.code}")
+            JSONObject(text)
+        }
+    }
+
+    private suspend fun send(method: String, path: String, body: JSONObject?): JSONObject = withContext(Dispatchers.IO) {
+        val base = baseUrl ?: throw IOException("JPTV Web hittades inte")
+        val rb = (body ?: JSONObject()).toString().toRequestBody("application/json".toMediaType())
+        val req = Request.Builder().url(base + path).method(method, if (method == "DELETE" && body == null) null else rb).build()
+        client.newCall(req).execute().use { resp ->
+            val text = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) throw IOException(errorOf(text) ?: "JPTV Web svarade HTTP ${resp.code}")
+            if (text.isBlank()) JSONObject() else JSONObject(text)
+        }
+    }
+
+    suspend fun ytHome(): YtHome = YtJson.home(getJson("/api/yt/home", 30))
+
+    /** Sök tar några sekunder (YouTube frågas via yt-dlp). */
+    suspend fun ytSearch(query: String): YtSearch {
+        val q = java.net.URLEncoder.encode(query, "UTF-8")
+        return YtJson.search(getJson("/api/yt/search?q=$q", 60))
+    }
+
+    suspend fun ytChannel(id: String): YtChannelPage =
+        YtJson.channelPage(getJson("/api/yt/channel/$id", 60)) ?: throw IOException("Kanalen hittades inte")
+
+    suspend fun ytVideo(id: String): YtVideoInfo =
+        YtJson.videoInfo(getJson("/api/yt/video/$id", 90)) ?: throw IOException("Videon hittades inte")
+
+    suspend fun ytSubscribe(channel: YtChannel, on: Boolean) {
+        if (on) {
+            send("POST", "/api/yt/subs", JSONObject().put("id", channel.id).put("name", channel.name).put("avatar", channel.avatar ?: JSONObject.NULL))
+        } else {
+            send("DELETE", "/api/yt/subs/${channel.id}", null)
+        }
+    }
+
+    suspend fun ytProgress(video: YtVideoInfo, positionMs: Long, durationMs: Long) {
+        send(
+            "POST", "/api/yt/progress",
+            JSONObject().put("id", video.id).put("pos", positionMs / 1000.0).put("dur", durationMs / 1000.0)
+                .put("title", video.title).put("channel", video.channel).put("channelId", video.channelId)
+                .put("thumb", video.thumb ?: JSONObject.NULL),
+        )
+    }
+
+    /** Full adress till en sökväg på JPTV Web (spellistor, bilder). */
+    fun url(path: String): String? = baseUrl?.let { it + path }
+
+    /** YouTubes bilder via JPTV Web, så att TV:n aldrig pratar med Google själv. */
+    fun ytImage(url: String?): String? {
+        val u = url?.takeIf { it.isNotBlank() } ?: return null
+        val full = if (u.startsWith("//")) "https:$u" else u
+        return baseUrl?.let { it + "/yt/img?u=" + java.net.URLEncoder.encode(full, "UTF-8") }
+    }
+
     private fun errorOf(text: String): String? = try {
         JSONObject(text).optString("error").takeIf { it.isNotBlank() }
     } catch (e: Exception) {

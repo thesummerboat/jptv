@@ -106,4 +106,6 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     // XmlPullParser-implementation för att testa XMLTV-läsningen utanför Android.
     testImplementation("net.sf.kxml:kxml2:2.3.0")
+    // Riktig org.json i testerna (Androids egen finns bara som tom stubbe utanför telefonen).
+    testImplementation("org.json:json:20240303")
 }

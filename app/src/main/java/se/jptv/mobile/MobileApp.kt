@@ -139,6 +139,7 @@ private fun PlayerOrCast(vm: AppViewModel, screen: Screen.Player) {
             when (val r = screen.request) {
                 is PlayRequest.Vod -> CastManager.castPlex(vm, r.item, if (r.fromStart) 0L else null)
                 is PlayRequest.Live -> r.channels.getOrNull(r.index)?.let { CastManager.castChannel(it) }
+                is PlayRequest.YouTube -> Unit
             }
             vm.back()
         }
@@ -147,6 +148,8 @@ private fun PlayerOrCast(vm: AppViewModel, screen: Screen.Player) {
         when (val r = screen.request) {
             is PlayRequest.Vod -> MobileVodPlayer(vm, r)
             is PlayRequest.Live -> MobileLivePlayer(vm, r)
+            // YouTube finns än så länge på TV:n och i webben.
+            is PlayRequest.YouTube -> LaunchedEffect(r) { vm.back() }
         }
     }
 }
@@ -249,6 +252,9 @@ private fun MobileShell(vm: AppViewModel, screen: Screen) {
                 Screen.Search -> MobileSearch(vm)
                 Screen.Settings -> MobileSettings(vm)
                 is Screen.Player -> Unit
+                Screen.YouTube, is Screen.YouTubeChannel, Screen.YouTubeSearch -> Box(Modifier.fillMaxSize().padding(24.dp)) {
+                    Text("YouTube finns än så länge på TV:n och i webben (JPTV Web).")
+                }
             }
         }
     }
