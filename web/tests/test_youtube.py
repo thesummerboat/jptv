@@ -269,12 +269,15 @@ class YouTubeApiTest(unittest.IsolatedAsyncioTestCase):
         # Hela videon går att läsa som HLS (ffmpeg följer spellistorna och byte-intervallen).
         url = f"http://127.0.0.1:{self.client.port}/yt/{VID}/master.m3u8"
         proc = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", url,
+            "ffmpeg", "-v", "error", "-i", url, "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-",
+            "-progress", "pipe:1", "-nostats",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         out, err = await proc.communicate()
         self.assertEqual(proc.returncode, 0, err.decode())
-        self.assertAlmostEqual(float(out.decode().strip()), 12.0, delta=0.5)
+        times = [int(l.split("=")[1]) for l in out.decode().splitlines() if l.startswith("out_time_us=") and l.split("=")[1].isdigit()]
+        # Både bild och ljud avkodades ända till slutet (12 s).
+        self.assertAlmostEqual(max(times) / 1e6, 12.0, delta=0.5)
 
     async def test_errors_and_images(self):
         err = await self.get_json("/api/yt/video/privatevid0", status=502)
