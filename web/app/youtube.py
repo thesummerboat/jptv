@@ -31,7 +31,7 @@ import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, quote, urlparse
 
 import aiohttp
@@ -536,18 +536,83 @@ _SV_UNIT = {"sekund": "second", "minut": "minute", "timm": "hour", "tim": "hour"
             "månad": "month", "år": "year"}
 
 
+# Övriga språk: ordet efter talet börjar med någon av de här (vor 3 Jahren, il y a 3 ans, 3 jaar geleden …).
+_UNIT_STEMS = (
+    ("month", ("month", "månad", "måned", "monat", "mois", "mes", "maand", "mese", "kuukau", "miesi", "hónap", "mês")),
+    ("minute", ("min",)),
+    ("second", ("sec", "sek", "seg", "secon", "sekunt")),
+    ("hour", ("hour", "tim", "stund", "heure", "hora", "uur", "ore", "ora", "tunti", "godz")),
+    ("day", ("day", "dag", "tag", "jour", "día", "dia", "giorn", "päiv", "dni", "dzie")),
+    ("week", ("week", "veck", "uke", "uge", "woche", "semaine", "semana", "settiman", "viikk", "tydz")),
+    ("year", ("year", "år", "jahr", "ans", "an", "año", "ano", "jaar", "ann", "vuo", "lat", "rok")),
+)
+_AGO_ANY = re.compile(r"(\d+)\s+([^\W\d_]+)")
+
+
 def parse_ago(text: str, now: float | None = None) -> int | None:
-    """"3 years ago", "Streamed 2 weeks ago", "för 3 år sedan" → ungefärlig tidpunkt i ms."""
+    """"3 years ago", "Streamed 2 weeks ago", "för 3 år sedan", "vor 3 Jahren" → ungefärlig tidpunkt i ms."""
     now = time.time() if now is None else now
     m = _AGO_EN.search(text or "")
     if m:
-        unit = m.group(2).lower()
+        n, unit = int(m.group(1)), m.group(2).lower()
     else:
         m = _AGO_SV.search(text or "")
-        if not m:
-            return None
-        unit = _SV_UNIT[m.group(2).lower()]
-    return int((now - int(m.group(1)) * _UNIT_S[unit]) * 1000)
+        if m:
+            n, unit = int(m.group(1)), _SV_UNIT[m.group(2).lower()]
+        else:
+            n = unit = None
+            for g in _AGO_ANY.finditer(text or ""):
+                word = g.group(2).lower()
+                unit = next((u for u, stems in _UNIT_STEMS if any(word.startswith(st) for st in stems)), None)
+                if unit:
+                    n = int(g.group(1))
+                    break
+            if unit is None:
+                return None
+    return int((now - n * _UNIT_S[unit]) * 1000)
+
+
+_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "mär": 3, "apr": 4, "may": 5, "maj": 5, "mai": 5, "mei": 5, "mag": 5, "jun": 6,
+    "jul": 7, "aug": 8, "ago": 8, "sep": 9, "set": 9, "okt": 10, "oct": 10, "ott": 10, "out": 10, "nov": 11,
+    "dec": 12, "dez": 12, "déc": 12, "dic": 12, "des": 12,
+}
+
+
+def parse_date_text(text: str) -> int | None:
+    """
+    Datum som YouTube skriver det under videon: "Oct 3, 2024", "3 okt. 2024", "03.10.2024",
+    "Premiered Oct 3, 2024", "2024-10-03". Klockan 12 UTC samma dag, i ms.
+    """
+    t = (text or "").strip()
+    y = mo = d = None
+    if m := re.search(r"(\d{4})-(\d{2})-(\d{2})", t):
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    elif m := re.search(r"\b(\d{1,2})[./](\d{1,2})[./](\d{4})\b", t):
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    elif m := re.search(r"\b([^\W\d_]{3})[^\W\d_]*\.?\s+(\d{1,2}),?\s+(\d{4})", t):
+        mo, d, y = _MONTHS.get(m.group(1).lower()), int(m.group(2)), int(m.group(3))
+    elif m := re.search(r"\b(\d{1,2})\.?\s+(?:de\s+)?([^\W\d_]{3})[^\W\d_]*\.?\s+(?:de\s+)?(\d{4})", t):
+        d, mo, y = int(m.group(1)), _MONTHS.get(m.group(2).lower()), int(m.group(3))
+    if not (y and mo and d):
+        return None
+    try:
+        return int(datetime(y, mo, d, 12, tzinfo=timezone.utc).timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def parse_watch_page(data: dict) -> dict:
+    """Uppladdningsdatum och visningar ur svaret för en video (texten under videon)."""
+    results = _dig(data, "contents", "twoColumnWatchNextResults", "results") or {}
+    vpir = next((x for _, x in _walk(results, ("videoPrimaryInfoRenderer",))), {})
+    texts = [_text(vpir.get("dateText")), _text(vpir.get("relativeDateText"))]
+    for _, hdr in _walk(data.get("engagementPanels") or [], ("videoDescriptionHeaderRenderer",)):
+        texts.append(_text(hdr.get("publishDate")))
+    published = next((ts for ts in map(parse_date_text, texts) if ts), None)
+    published = published or next((ts for ts in map(parse_ago, texts) if ts), None)
+    views = parse_count(_text(_dig(vpir, "viewCount", "videoViewCountRenderer", "viewCount")))
+    return {"published": published, "views": views}
 
 
 def _is_live_text(low: str) -> bool:
@@ -669,6 +734,14 @@ def _renderer_video(r: dict) -> dict | None:
         "live": live,
         "short": bool(_dig(r, "navigationEndpoint", "reelWatchEndpoint")),
     }
+
+
+def _first_meta_texts(data: dict) -> str:
+    """Texterna under första förslaget, som de kom från YouTube (för felsökning)."""
+    for _, vm in _walk(data, ("lockupViewModel",), ("playerOverlays", "engagementPanels", "frameworkUpdates")):
+        rows = _dig(vm, "metadata", "lockupMetadataViewModel", "metadata", "contentMetadataViewModel", "metadataRows") or []
+        return " | ".join(_text((p or {}).get("text")) for r in rows for p in (r or {}).get("metadataParts") or [])
+    return "inga"
 
 
 def parse_related(data: dict) -> list[dict]:
@@ -1314,6 +1387,7 @@ class YouTube:
         self._related: dict[str, tuple[float, list[dict]]] = {}
         self._warming: set[str] = set()
         self._related_tasks: dict[str, asyncio.Future] = {}
+        self._watch_tasks: dict[str, asyncio.Future] = {}
         self._sheets: dict[str, bytes] = {}
         self._comments: dict[str, tuple[float, dict]] = {}
         self._prefetching: set[str] = set()
@@ -1579,8 +1653,39 @@ class YouTube:
         self._bg.add(task)
         task.add_done_callback(self._bg.discard)
 
+    def _watch_task(self, vid: str) -> asyncio.Future:
+        """Sidan för videon (next): datum och visningar, och förslagen bredvid (sparas för startsidan)."""
+        task = self._watch_tasks.get(vid)
+        if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
+            task = self._watch_tasks[vid] = asyncio.ensure_future(self._load_watch(vid))
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            while len(self._watch_tasks) > 100:
+                self._watch_tasks.pop(next(iter(self._watch_tasks)))
+        return task
+
+    async def _load_watch(self, vid: str) -> dict:
+        data = await self._next(vid)
+        items = [i for i in parse_related(data) if i["id"] != vid]
+        if items and vid not in self._related:
+            self._related[vid] = (time.monotonic(), items)
+        return parse_watch_page(data)
+
+    async def _fill_date(self, vid: str, v: dict, wait: float = 3.0) -> None:
+        """Snabbstarten ger inget uppladdningsdatum: ta det från sidan för videon."""
+        if v.get("published") or _published(v["info"]):
+            return
+        try:
+            w = await asyncio.wait_for(asyncio.shield(self._watch_task(vid)), wait)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, YtError):
+            return
+        v["published"] = w.get("published")
+        if v["info"].get("view_count") is None and w.get("views") is not None:
+            v["info"]["view_count"] = w["views"]
+
     async def video(self, vid: str) -> dict:
         sponsor_task = asyncio.ensure_future(self.sponsor_segments(vid))
+        # Datum och förslag hämtas samtidigt som videon (snabbstarten saknar datum).
+        self._watch_task(vid)
         try:
             v = await self._video(vid)
         except BaseException:
@@ -1588,6 +1693,7 @@ class YouTube:
             raise
         # Spelaren ber om spellistorna strax: läs filernas index redan nu.
         self._warm_indexes(v)
+        await self._fill_date(vid, v)
         info = v["info"]
         chapters = [
             {"title": c.get("title") or "", "start": float(c.get("start_time") or 0), "end": float(c.get("end_time") or 0)}
@@ -1605,7 +1711,7 @@ class YouTube:
             "duration": int(info.get("duration") or 0),
             "views": info.get("view_count"),
             "likes": info.get("like_count"),
-            "published": _published(info),
+            "published": _published(info) or v.get("published"),
             "thumb": _best_thumb(info.get("thumbnails"), 1280),
             "chapters": chapters,
             "sponsor": sponsor,
@@ -1704,9 +1810,11 @@ class YouTube:
 
         async def run():
             try:
+                self._watch_task(vid)
                 v = await self._video(vid)
                 self._warm_indexes(v)
                 await self.sponsor_segments(vid)
+                await self._fill_date(vid, v, wait=10)
             except Exception as e:
                 log.info("Förberedelse av %s misslyckades: %s", vid, e)
             finally:
@@ -1810,12 +1918,18 @@ class YouTube:
         text = (f"yt-dlp {self.ytdlp.version or '?'} fungerar · upp till {best}p · hämtning {first}, "
                 f"igen {self.last_extract} s ({self.last_mode}) · yt-dlp {process} · snabbstart {self.fast.describe()}")
         try:
-            items = parse_related(await self._next(TEST_VIDEO))
+            data = await self._next(TEST_VIDEO)
+            items = parse_related(data)
             n = len(items)
             nv = sum(1 for i in items if i.get("views") is not None)
             nd = sum(1 for i in items if i.get("published"))
             text += (f" · YouTubes förslag: {n} st (visningar på {nv}, datum på {nd})" if n
                      else " · YouTubes förslag gick inte att läsa (sök används i stället)")
+            if n and nd < n:
+                text += f" · YouTube skrev: {_first_meta_texts(data)[:160]}"
+            page = parse_watch_page(data)
+            text += " · videons datum: " + (datetime.fromtimestamp(page["published"] / 1000).strftime("%Y-%m-%d")
+                                             if page["published"] else "saknas")
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, YtError) as e:
             text += f" · YouTubes förslag fungerar inte ({e or type(e).__name__}); sök används i stället"
         return text
@@ -1833,7 +1947,7 @@ class YouTube:
             meta.setdefault("channelId", info.get("channel_id"))
             meta["thumb"] = _best_thumb(info.get("thumbnails")) or meta.get("thumb")
             meta["views"] = info.get("view_count")
-            meta["published"] = _published(info)
+            meta["published"] = _published(info) or v.get("published")
         p = self.data.set_progress(vid, pos, dur, meta)
         if p.get("watched") or p.get("pos", 0) >= 60:
             self.warm(vid, p.get("title") or "")
@@ -1874,7 +1988,8 @@ class YouTube:
             "Content-Type": "application/json", "User-Agent": _BROWSER_UA, "Origin": YT,
             "Accept-Language": "en-US,en;q=0.9",
             "X-YouTube-Client-Name": "1", "X-YouTube-Client-Version": WEB_CLIENT_VERSION,
-            "Cookie": "SOCS=CAI; CONSENT=YES+",
+            # PREF=hl=en: svaret på engelska (som yt-dlp ber om det), oavsett varifrån vi frågar.
+            "Cookie": "SOCS=CAI; CONSENT=YES+; PREF=hl=en&tz=UTC",
         }
         async with self.http.post(_api_base() + "/youtubei/v1/next?prettyPrint=false", json=body, headers=headers,
                                   timeout=aiohttp.ClientTimeout(total=15)) as r:

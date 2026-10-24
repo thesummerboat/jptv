@@ -107,7 +107,9 @@ def respond(args: list) -> tuple:
         if fast and mode == "fail":
             return 1, None, f"ERROR: [youtube] {vid}: No video formats found!\n"
         if fast:
-            # visionOS-klienten: bara det som går att spela (som riktiga svaret utan JavaScript).
+            # visionOS-klienten: bara det som går att spela (som riktiga svaret utan JavaScript),
+            # och inget uppladdningsdatum.
+            out.pop("timestamp", None)
             out["formats"] = [f for f in out["formats"] if f["format_id"] in ("134", "140") or f.get("format_note") == "storyboard"]
             if mode == "low":
                 # Snabbstarten ger sämre kvalitet än den vanliga hämtningen (bara 144p).

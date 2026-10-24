@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 import unittest
 
 from unittest import mock
@@ -15,7 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from app import main as jptv
 from app.youtube import YtDlp, YtError
-from app.youtube import comment_token, parse_comments
+from app.youtube import comment_token, parse_comments, parse_date_text, parse_watch_page
 from app.youtube import (parse_ago, parse_clock, parse_count, parse_import, parse_index, parse_related, parse_rss,
                          pick_formats, pick_subtitles)
 
@@ -179,7 +180,11 @@ def next_response(vid):
     items = RELATED.get(vid, [])
     return {
         "contents": {"twoColumnWatchNextResults": {
-            "results": {"results": {"contents": [{"videoPrimaryInfoRenderer": {"title": {"runs": [{"text": "Videon"}]}}}]}},
+            # Texten under videon: datum och visningar (på svenska, som YouTube ibland svarar).
+            "results": {"results": {"contents": [{"videoPrimaryInfoRenderer": {
+                "title": {"runs": [{"text": "Videon"}]}, "dateText": {"simpleText": "3 okt. 2024"},
+                "relativeDateText": {"simpleText": "för 1 år sedan"},
+                "viewCount": {"videoViewCountRenderer": {"viewCount": {"simpleText": "4 242 visningar"}}}}}]}},
             "secondaryResults": {"secondaryResults": {"results": [
                 {"itemSectionRenderer": {"contents": items + [{"continuationItemRenderer": {"trigger": "CONTINUATION_TRIGGER_ON_ITEM_SHOWN"}}]}}]}},
         }},
@@ -329,6 +334,17 @@ class ParseTest(unittest.TestCase):
         self.assertAlmostEqual((now - c["published"]) / 86400e3, 5, delta=0.1)
         self.assertTrue(items["sv000000004"]["live"])
 
+    def test_watch_page_date(self):
+        oct3 = int(datetime(2024, 10, 3, 12, tzinfo=timezone.utc).timestamp() * 1000)
+        self.assertEqual(parse_watch_page(next_response(VID)), {"published": oct3, "views": 4242})
+        for t in ("Oct 3, 2024", "3 okt. 2024", "03.10.2024", "Premiered Oct 3, 2024", "2024-10-03", "3. Okt. 2024"):
+            self.assertEqual(parse_date_text(t), oct3, t)
+        self.assertIsNone(parse_date_text("igår"))
+        # Bara relativ tid: den används.
+        page = parse_watch_page({"contents": {"twoColumnWatchNextResults": {"results": {"results": {"contents": [
+            {"videoPrimaryInfoRenderer": {"relativeDateText": {"simpleText": "vor 2 Wochen"}}}]}}}}})
+        self.assertAlmostEqual((time.time() * 1000 - page["published"]) / 86400e3, 14, delta=0.1)
+
     def test_comments_parse(self):
         header, items, nxt = parse_comments(COMMENTS["SORTTOP"])
         self.assertIsNone(header)
@@ -361,6 +377,11 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(parse_ago("Streamed 2 weeks ago", now), (now - 2 * 604800) * 1000)
         self.assertEqual(parse_ago("1 day ago", now), (now - 86400) * 1000)
         self.assertIsNone(parse_ago("igår", now))
+        self.assertEqual(parse_ago("vor 3 Jahren", now), (now - 3 * 31536000) * 1000)
+        self.assertEqual(parse_ago("il y a 2 semaines", now), (now - 2 * 604800) * 1000)
+        self.assertEqual(parse_ago("hace 5 días", now), (now - 5 * 86400) * 1000)
+        for not_time in ("1.2M views", "58 tn visningar", "4 242 visningar", "12 svar", "2 Mio. Aufrufe"):
+            self.assertIsNone(parse_ago(not_time, now), not_time)
         self.assertEqual(parse_ago("för 3 år sedan", now), (now - 3 * 31536000) * 1000)
         self.assertEqual(parse_ago("för 5 timmar sedan", now), (now - 5 * 3600) * 1000)
         self.assertEqual(parse_ago("Streamades för 1 vecka sedan", now), (now - 604800) * 1000)
@@ -490,7 +511,8 @@ class YouTubeApiTest(unittest.IsolatedAsyncioTestCase):
         await self.post("/api/yt/progress", {"id": "olderolder1", "pos": 400, "dur": 410, "title": "Äldre video", "channelId": CID})
         hist = (await self.get_json("/api/yt/history"))["videos"]
         self.assertEqual([v["id"] for v in hist], ["olderolder1", VID])
-        self.assertEqual((hist[1]["title"], hist[1]["views"], hist[1]["published"]), ("Testvideo", 4242, 1760000000 * 1000))
+        oct3 = int(datetime(2024, 10, 3, 12, tzinfo=timezone.utc).timestamp() * 1000)
+        self.assertEqual((hist[1]["title"], hist[1]["views"], hist[1]["published"]), ("Testvideo", 4242, oct3))
 
         recs = await self.get_json("/api/yt/recommended")
         ids = [v["id"] for v in recs["recommended"]]
@@ -536,6 +558,8 @@ class YouTubeApiTest(unittest.IsolatedAsyncioTestCase):
     async def test_video_hls_and_proxy(self):
         v = await self.get_json(f"/api/yt/video/{VID}")
         self.assertEqual((v["title"], v["duration"], v["hls"]), ("Testvideo", 12, f"/yt/{VID}/master.m3u8"))
+        # Snabbstarten gav inget datum: det kom från sidan för videon.
+        self.assertEqual(v["published"], int(datetime(2024, 10, 3, 12, tzinfo=timezone.utc).timestamp() * 1000))
         self.assertEqual([c["title"] for c in v["chapters"]], ["Början", "Slutet"])
         # Bara sponsor (inte musik) och bara för den här videon.
         self.assertEqual(v["sponsor"], [{"start": 2.0, "end": 4.5, "category": "sponsor"}])
@@ -696,6 +720,7 @@ class YouTubeApiTest(unittest.IsolatedAsyncioTestCase):
         ok = await self.post("/api/yt/test")
         self.assertIn("fungerar", ok["ok"])
         self.assertIn("YouTubes förslag", ok["ok"])
+        self.assertIn("videons datum: 2024-10-03", ok["ok"])
 
     async def test_import(self):
         text = json.dumps({"subscriptions": [{"url": f"https://www.youtube.com/channel/{CID}", "name": "Testkanalen"}]})
