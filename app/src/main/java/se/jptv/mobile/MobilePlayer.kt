@@ -336,6 +336,8 @@ private fun PlayerTopBar(title: String, subtitle: String?, onBack: () -> Unit) {
 @OptIn(UnstableApi::class)
 @Composable
 fun MobileLivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
+    // Skärmen spelaren hör till: har appen börjat om på Hem ska strömmen inte öppnas igen.
+    val ownScreen = remember { vm.current }
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     FullscreenPlayer(forceLandscape = false, hideBars = landscape)
     val context = LocalContext.current
@@ -425,6 +427,7 @@ fun MobileLivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
         exo.stop()
     }
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        if (vm.current !== ownScreen) return@LifecycleEventEffect
         if (stoppedInBackground) {
             stoppedInBackground = false
             retries = 0

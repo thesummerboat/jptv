@@ -1,6 +1,7 @@
 package se.jptv.mobile
 
 import android.app.Activity
+import android.os.PowerManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -104,8 +105,16 @@ fun MobileApp(vm: AppViewModel = viewModel()) {
     BackHandler(enabled = vm.stack.size > 1) { vm.back() }
     // Telefonen kan ha bytt nät (hemma → hotell): leta upp servern igen om den inte svarar.
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        // Som på TV:n: släcktes skärmen mitt i en film (eller var appen borta länge) börjar den på Hem.
+        vm.onForeground()
         vm.reconnectIfNeeded()
         vm.refreshIfStale()
+    }
+    // Spelaren håller skärmen tänd, så släcks den där har man tryckt av telefonen: börja om på Hem
+    // nästa gång. I menyerna behålls platsen, eftersom telefonen ofta låser sig själv efter en stund.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        val asleep = context.getSystemService(PowerManager::class.java)?.isInteractive == false
+        vm.onBackground(asleep = asleep && vm.current is Screen.Player)
     }
 
     MobileTheme {
