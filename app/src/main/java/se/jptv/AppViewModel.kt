@@ -857,9 +857,42 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var returnCount by mutableStateOf(0)
         private set
 
-    /** Appen lämnas (hem-knappen, TV:n stängs av). */
-    fun onBackground() {
+    /** Appen lämnas (hem-knappen, TV:n stängs av). asleep: skärmen släcktes, dvs. Shield stängdes av. */
+    fun onBackground(asleep: Boolean = false) {
         backgroundedAt = System.currentTimeMillis()
+        if (asleep) startOver()
+    }
+
+    /** Skärmen släcktes medan appen redan låg i bakgrunden (först hem-knappen, sedan av). */
+    fun onScreenOff() {
+        if (backgroundedAt > 0L) startOver()
+    }
+
+    /** Tillbaka till appen på TV:n. Efter en lång stund borta börjar den också om på hemskärmen. */
+    fun onForeground() {
+        if (backgroundedAt > 0L && System.currentTimeMillis() - backgroundedAt > START_OVER_AFTER_MS) startOver()
+        if (startedOver) {
+            startedOver = false
+            // Som vid en nystart: inställningen "Starta i senaste kanalen" gäller även här.
+            if (startInLastChannel && lastChannel != null && current == Screen.Home) playLastChannel()
+        }
+    }
+
+    private var startedOver = false
+
+    /**
+     * Shield avstängd, eller appen borta länge: nästa gång börjar appen på hemskärmen som vid en
+     * nystart, i stället för i spelaren (pausad i samma sekund) eller på sidan man lämnade.
+     * Spelaren har redan pausat och skickat positionen till Plex när appen lämnades.
+     */
+    private fun startOver() {
+        if (stack.isEmpty() || current == Screen.Login) return
+        if (stack.size > 1 || current != Screen.Home) {
+            cameBack = false
+            stack.clear()
+            stack.add(Screen.Home)
+        }
+        startedOver = true
     }
 
     /** Bara "Fortsätt titta" från Plex, utan resten av hemskärmen. */
@@ -1695,6 +1728,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         const val HOUR = 60 * 60 * 1000L
+        /** Så länge appen får ligga i bakgrunden innan den börjar om på hemskärmen. */
+        const val START_OVER_AFTER_MS = HOUR
         const val DECK_TITLE = "Fortsätt titta"
         const val GROUP_FAVORITES = "★ Favoriter"
         const val GROUP_RECENTS = "Senaste"

@@ -1,7 +1,13 @@
 package se.jptv
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Bundle
+import android.os.PowerManager
 import androidx.activity.ComponentActivity
+import androidx.activity.viewModels
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -11,6 +17,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -31,6 +39,21 @@ import se.jptv.ui.SettingsScreen
 import se.jptv.ui.ignoreUnpairedOk
 
 class MainActivity : ComponentActivity() {
+    private val vm: AppViewModel by viewModels()
+
+    /** Shield stängs av medan appen ligger i bakgrunden: börja om på hemskärmen nästa gång. */
+    private val screenOff = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            vm.onScreenOff()
+        }
+    }
+    private var screenOffRegistered = false
+
+    override fun onDestroy() {
+        if (screenOffRegistered) runCatching { unregisterReceiver(screenOff) }
+        super.onDestroy()
+    }
+
     override fun onStop() {
         super.onStop()
         // Appen lämnas: släpp filmens bildfrekvens, så att menyerna startar i TV:ns vanliga läge nästa gång.
@@ -47,6 +70,8 @@ class MainActivity : ComponentActivity() {
         if (isTv) {
             se.jptv.player.DisplayModes.attach(this)
             se.jptv.ui.NavSounds.init(this)
+            ContextCompat.registerReceiver(this, screenOff, IntentFilter(Intent.ACTION_SCREEN_OFF), ContextCompat.RECEIVER_NOT_EXPORTED)
+            screenOffRegistered = true
         } else {
             // Telefonen visar statusfältet utom i spelaren.
             window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN)
@@ -131,11 +156,18 @@ fun JptvApp(vm: AppViewModel = viewModel()) {
     }
 
     // TV:n låter appen leva i dagar i bakgrunden: uppdatera spellista, guide och hemskärm vid återkomst.
-    LifecycleEventEffect(Lifecycle.Event.ON_START) { vm.refreshIfStale() }
+    // Var Shield avstängd (eller appen borta länge) börjar den om på hemskärmen.
+    LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        vm.onForeground()
+        vm.refreshIfStale()
+    }
     // Appen lämnas: bild-i-bild stängs, så att strömmen inte tar en anslutning i onödan.
+    val context = LocalContext.current
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
         vm.closePip()
-        vm.onBackground()
+        // Släckt skärm = Shield stängs av (hem-knappen lämnar skärmen tänd).
+        val asleep = context.getSystemService(PowerManager::class.java)?.isInteractive == false
+        vm.onBackground(asleep)
     }
 
     Box(

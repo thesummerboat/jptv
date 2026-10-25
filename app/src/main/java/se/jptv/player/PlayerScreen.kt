@@ -289,6 +289,9 @@ private enum class VodPanel { NONE, TRACKS, SEARCH, SYNC, STYLE, OPTIONS }
 @Composable
 private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     val context = LocalContext.current
+    // Skärmen som spelaren hör till: har appen börjat om på hemskärmen (Shield avstängd) ska den
+    // inte starta igen när appen kommer tillbaka.
+    val ownScreen = remember { vm.current }
     val exo = rememberExoPlayer(tunneling = vm.useTunneling(), vod = true)
     var session by remember { mutableStateOf(UUID.randomUUID().toString()) }
     val scope = rememberCoroutineScope()
@@ -884,6 +887,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
 
     // Tillbaka till appen: TV:n gick till sitt vanliga läge när appen lämnades; byt till filmens igen.
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        if (vm.current !== ownScreen) return@LifecycleEventEffect
         // Tillbaka efter en stund: har man tittat vidare på en annan TV visas valen direkt.
         val away = backgroundedAt > 0L && System.currentTimeMillis() - backgroundedAt > 20_000
         backgroundedAt = 0L
@@ -2162,6 +2166,7 @@ private fun StillWatchingCard(onContinue: () -> Unit, onStop: () -> Unit, modifi
 @Composable
 private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
     val context = LocalContext.current
+    val ownScreen = remember { vm.current }
     // Från bild-i-bild: samma spelare och ström fortsätter i helskärm, ingen ny anslutning.
     val handoff = remember { vm.pip }
     val exo = remember { handoff?.exo ?: buildExoPlayer(context, vm.useTunneling()) }
@@ -2469,6 +2474,8 @@ private fun LivePlayer(vm: AppViewModel, request: PlayRequest.Live) {
         }
     }
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        // Appen började om på hemskärmen: strömmen ska inte öppnas igen (den här spelaren försvinner).
+        if (vm.current !== ownScreen) return@LifecycleEventEffect
         if (stoppedInBackground) {
             stoppedInBackground = false
             retries = 0
