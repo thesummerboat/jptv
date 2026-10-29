@@ -157,14 +157,17 @@ class LiveTest(unittest.IsolatedAsyncioTestCase):
         live.MIN_SPEED, live.SLOW_SECONDS, live.GRACE = 100, 0.5, 0
         await live.start(self.chan("i3"), deinterlace=True)
         # Bytet kan ske medan start väntar eller efteråt; i båda fallen hamnar vi på kanalens egen bild.
+        # status() är None en kort stund medan strömmen byts: vänta tills den finns med förklaringen.
+        st = None
         for _ in range(80):
-            if not live.deinterlacing and live.session:
+            st = live.status()
+            if not live.deinterlacing and live.session and st and st.get("note"):
                 break
             await asyncio.sleep(0.25)
         self.assertFalse(live.deinterlacing)
         self.assertIsNotNone(live.session)
         self.assertIn("c" + "i3", live.too_slow)
-        self.assertTrue(live.status()["note"])
+        self.assertTrue(st and st["note"])
         await live.stop()
 
     async def test_hardware_missing_is_reported(self):
