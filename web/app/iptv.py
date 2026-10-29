@@ -295,6 +295,36 @@ class Epg:
         return [p for p in self.for_channel(ch) if p.stop > frm and p.start < to]
 
 
+def search_programmes(channels: list, epg: "Epg | None", query: str, now_ms: int, limit: int = 80) -> list:
+    """
+    Som på TV:n: program som inte har slutat och vars titel innehåller alla sökorden
+    ("hockey frölunda"), det som går nu först. Samma program på flera kanalvarianter (SVT1 HD,
+    SVT1 FHD …) visas en gång, på den kanal som kommer först; favoriterna läggs först av den som anropar.
+    """
+    words = [w for w in (query or "").lower().split() if w]
+    if not epg or sum(len(w) for w in words) < 2:
+        return []
+    hits, seen, scanned = [], set(), set()
+    for ch in channels:
+        progs = epg.for_channel(ch)
+        # Kanalvarianter delar samma lista i guiden: den gås bara igenom en gång.
+        if not progs or id(progs) in scanned:
+            continue
+        scanned.add(id(progs))
+        for p in progs:
+            if p.stop <= now_ms:
+                continue
+            title = p.title.lower()
+            if any(w not in title for w in words):
+                continue
+            key = (p.start, p.stop, title)
+            if key not in seen:
+                seen.add(key)
+                hits.append((ch, p))
+    hits.sort(key=lambda hit: hit[1].start)
+    return hits[:limit]
+
+
 _BAD_AMP = re.compile(rb"&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)")
 
 

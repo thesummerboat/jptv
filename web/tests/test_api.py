@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
 
 from aiohttp.test_utils import TestClient, TestServer
@@ -140,12 +141,25 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([c["id"] for c in favs], [chans[0]["id"]])
         found = await self.get("/api/search?q=svt")
         self.assertEqual(len(found["channels"]), 2)
+        # Program i guiden: titeln, det som går nu först, inga slutade.
+        progs = (await self.get("/api/live/search?q=RAPPORT"))["programmes"]
+        self.assertTrue(progs)
+        self.assertTrue(all(p["programme"]["title"] == "Rapport" for p in progs))
+        starts = [p["programme"]["start"] for p in progs]
+        self.assertEqual(starts, sorted(starts))
+        now_ms = int(time.time() * 1000)
+        self.assertTrue(all(p["programme"]["stop"] > now_ms for p in progs))
+        self.assertEqual((await self.get("/api/live/search?q=r"))["programmes"], [])
+        self.assertEqual({"id", "name", "group", "logo", "number"}, set(progs[0]["channel"]))
         # Dolda grupper syns inte i sök, men gruppen går att öppna och favoriter finns kvar.
         r = await self.client.post("/api/live/hidden", data=json.dumps({"groups": ["Sverige", "Film"]}))
         self.assertEqual((await r.json())["hidden"], ["Film", "Sverige"])
         groups = await self.get("/api/live/groups")
         self.assertEqual(groups["hidden"], ["Film", "Sverige"])
         self.assertEqual((await self.get("/api/search?q=svt"))["channels"], [])
+        # Dolda grupper räknas inte i programsöket heller.
+        hidden_progs = (await self.get("/api/live/search?q=rapport"))["programmes"]
+        self.assertFalse(any(p["channel"]["group"] in ("Sverige", "Film") for p in hidden_progs))
         self.assertEqual(await self.get("/api/live/channels?q=svt"), [])
         self.assertEqual(len(await self.get("/api/live/channels?group=Sverige")), 8)
         self.assertEqual(len(await self.get("/api/live/channels?fav=1")), 1)

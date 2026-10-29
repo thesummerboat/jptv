@@ -165,7 +165,7 @@
     const info = h('div', { class: 'live-info' });
     const tech = h('div', { class: 'live-tech' });
     const groupList = h('div', { class: 'group-list' });
-    const filter = h('input', { type: 'search', class: 'live-filter', placeholder: 'Sök kanal', autocomplete: 'off' });
+    const filter = h('input', { type: 'search', class: 'live-filter', placeholder: 'Sök kanal eller program', autocomplete: 'off' });
     const listHead = h('div', { class: 'list-head' });
     const list = h('div', { class: 'channel-list', tabindex: '-1' });
     v.el.append(
@@ -293,6 +293,34 @@
       return r;
     }
 
+    // Program i sökträffarna: "Nu · 20:00–22:00", "I dag 21:00–22:30", "I morgon …" eller "Lör …".
+    const DAYS = ['Sön', 'Mån', 'Tis', 'Ons', 'Tor', 'Fre', 'Lör'];
+    function whenText(p, now) {
+      const t = `${JP.hm(p.start)}–${JP.hm(p.stop)}`;
+      if (p.start <= now && p.stop > now) return 'Nu · ' + t;
+      const d0 = new Date(now); d0.setHours(0, 0, 0, 0);
+      const d1 = new Date(p.start); d1.setHours(0, 0, 0, 0);
+      const days = Math.round((d1 - d0) / 86400000);
+      return (days === 0 ? 'I dag' : days === 1 ? 'I morgon' : DAYS[d1.getDay()]) + ' ' + t;
+    }
+
+    /** Går det nu (eller inom fem minuter): klick spelar kanalen. Senare program visas bara. */
+    function progRow(hit) {
+      const p = hit.programme, ch = hit.channel, now = Date.now();
+      const live = p.start <= now;
+      const watchable = p.start - now <= 5 * 60000;
+      const parts = [
+        h('span', { class: 'ch-logo' }, ch.logo ? h('img', { src: ch.logo, alt: '', loading: 'lazy', onerror: (e) => e.target.remove() }) : null),
+        h('span', { class: 'ch-text' },
+          h('span', { class: 'ch-name' }, p.title),
+          h('span', { class: 'ch-now' + (live ? ' live' : '') }, `${whenText(p, now)} · ${ch.name}`),
+          live ? progBar(p) : null),
+      ];
+      if (watchable) return h('button', { class: 'ch prog', title: 'Titta på ' + ch.name, onclick: () => play(ch) }, ...parts);
+      return h('div', { class: 'ch prog later', title: `${p.title} börjar ${JP.hm(p.start)} på ${ch.name}` }, ...parts);
+    }
+
+    let searchToken = 0;
     async function loadList(g, keepScroll) {
       group = g;
       JP.store.set('liveGroup', g);
@@ -301,11 +329,23 @@
       const text = filter.value.trim();
       const url = text ? '/api/live/channels?q=' + encodeURIComponent(text) : '/api/live/channels?' + qs;
       const top = list.scrollTop;
+      const my = ++searchToken;
+      // Sökning: kanaler och program i guiden hämtas samtidigt.
+      const progs = text.length >= 2 ? JP.api('/api/live/search?q=' + encodeURIComponent(text)).catch(() => ({ programmes: [] })) : null;
       channels = await JP.api(url);
-      listHead.replaceChildren(h('h2', null, text ? `Sök: ${text}` : g === '★' ? 'Favoriter' : g === '⟲' ? 'Senast sedda' : g), h('span', { class: 'dim' }, channels.length + ' kanaler'));
-      list.replaceChildren(...channels.map(row));
+      const hits = progs ? (await progs).programmes : [];
+      if (my !== searchToken) return;
+      listHead.replaceChildren(
+        h('h2', null, text ? `Sök: ${text}` : g === '★' ? 'Favoriter' : g === '⟲' ? 'Senast sedda' : g),
+        h('span', { class: 'dim' }, channels.length + ' kanaler' + (text ? ` · ${hits.length} program` : '')));
+      list.replaceChildren(
+        ...(text && channels.length && hits.length ? [h('h3', { class: 'list-sub' }, 'Kanaler')] : []),
+        ...channels.map(row),
+        ...(hits.length ? [h('h3', { class: 'list-sub' }, 'Program', h('span', { class: 'dim' }, ' · klicka på det som går nu')), ...hits.map(progRow)] : []));
       if (keepScroll) list.scrollTop = top;
-      if (!channels.length) list.append(h('div', { class: 'empty small' }, g === '★' ? 'Inga favoriter än. Tryck på stjärnan när en kanal spelas.' : 'Inga kanaler'));
+      if (!channels.length && !hits.length) {
+        list.append(h('div', { class: 'empty small' }, text ? `Inget hittades för "${text}".` : g === '★' ? 'Inga favoriter än. Tryck på stjärnan när en kanal spelas.' : 'Inga kanaler'));
+      }
     }
 
     function groupButton(key, label, count) {

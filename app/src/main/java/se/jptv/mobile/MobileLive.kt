@@ -2,6 +2,7 @@ package se.jptv.mobile
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -48,6 +49,8 @@ import kotlinx.coroutines.delay
 import se.jptv.AppViewModel
 import se.jptv.Screen
 import se.jptv.iptv.Channel
+import se.jptv.iptv.ProgrammeHit
+import se.jptv.iptv.ProgrammeSearch
 import se.jptv.ui.clock
 
 /** Live-TV på telefonen: grupper överst, kanaler med vad som går nu, och dagens program per kanal. */
@@ -80,6 +83,22 @@ fun MobileLive(vm: AppViewModel) {
             now = System.currentTimeMillis()
         }
     }
+    // Sökläget: kanaler med namnet och program i guiden med titeln ("hockey", "Rapport").
+    val searching = group == AppViewModel.GROUP_SEARCH
+    var programmeHits by remember { mutableStateOf<List<ProgrammeHit>>(emptyList()) }
+    var searchPending by remember { mutableStateOf(false) }
+    LaunchedEffect(searching, query, vm.epg, vm.hiddenGroups) {
+        if (!searching || query.trim().length < ProgrammeSearch.MIN_LENGTH) {
+            programmeHits = emptyList()
+            searchPending = false
+            return@LaunchedEffect
+        }
+        searchPending = true
+        delay(250)
+        programmeHits = vm.searchProgrammes(query)
+        searchPending = false
+    }
+    val shownChannels = if (searching) channels.take(30) else channels
 
     Column(Modifier.fillMaxSize()) {
         LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -98,23 +117,33 @@ fun MobileLive(vm: AppViewModel) {
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
-                placeholder = { Text("Kanalnamn") },
+                placeholder = { Text("Kanal eller program, t.ex. hockey") },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
             )
         }
-        if (channels.isEmpty()) {
-            Centered(if (group == AppViewModel.GROUP_SEARCH) "Skriv en del av kanalnamnet." else "Inga kanaler här.")
+        val empty = when {
+            searching && query.isBlank() -> "Skriv en del av ett kanalnamn eller ett program."
+            searching && channels.isEmpty() && programmeHits.isEmpty() && !searchPending -> "Inget hittades för \"${query.trim()}\"."
+            !searching && channels.isEmpty() -> "Inga kanaler här."
+            else -> null
+        }
+        if (empty != null) {
+            Centered(empty)
         } else {
             Text(
-                "Tryck = titta · håll = favorit · kalendern = dagens program",
+                if (searching && programmeHits.isNotEmpty()) "Program: tryck = titta om det går nu, annars 🔔 påminnelse"
+                else "Tryck = titta · håll = favorit · kalendern = dagens program",
                 color = Dim,
                 style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             )
             LazyColumn(contentPadding = PaddingValues(bottom = 16.dp)) {
-                itemsIndexed(channels, key = { i, ch -> "${i}_${ch.key}" }) { i, ch ->
+                if (searching && shownChannels.isNotEmpty() && programmeHits.isNotEmpty()) {
+                    item(key = "h_channels") { SectionHeader("Kanaler", if (channels.size > shownChannels.size) "${channels.size} träffar" else null) }
+                }
+                itemsIndexed(shownChannels, key = { i, ch -> "${i}_${ch.key}" }) { i, ch ->
                     ChannelListRow(
                         vm = vm,
                         channel = ch,
@@ -123,6 +152,12 @@ fun MobileLive(vm: AppViewModel) {
                         onLongClick = { vm.toggleFavorite(ch) },
                         onGuide = { guideFor = ch },
                     )
+                }
+                if (programmeHits.isNotEmpty()) {
+                    item(key = "h_programmes") { SectionHeader("Program") }
+                    itemsIndexed(programmeHits, key = { i, hit -> "p_${i}_${hit.channel.key}_${hit.programme.start}" }) { _, hit ->
+                        ProgrammeListRow(vm, hit, now)
+                    }
                 }
             }
         }
@@ -140,6 +175,61 @@ fun MobileLive(vm: AppViewModel) {
                 },
             )
         }
+    }
+}
+
+@Composable
+private fun SectionHeader(title: String, hint: String? = null) {
+    Row(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 2.dp), verticalAlignment = Alignment.Bottom) {
+        Text(title, style = MaterialTheme.typography.titleSmall, color = Accent)
+        if (hint != null) {
+            Spacer(Modifier.width(8.dp))
+            Text(hint, color = Dim, style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+/** Ett program i sökträffarna. Går det nu (eller snart): tryck = titta. Annars tryck = 🔔 påminnelse. */
+@Composable
+private fun ProgrammeListRow(vm: AppViewModel, hit: ProgrammeHit, now: Long) {
+    val p = hit.programme
+    val live = hit.isLive(now)
+    val watchable = hit.isWatchable(now)
+    val reminded = vm.hasReminder(hit.channel, p.start)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable {
+                if (hit.isWatchable(System.currentTimeMillis())) vm.playChannelInGroup(hit.channel) else vm.toggleReminder(hit.channel, p)
+            }
+            .padding(start = 16.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ChannelLogoSmall(hit.channel, 44.dp)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(p.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                "${ProgrammeSearch.whenText(p, now)} · ${hit.channel.name}",
+                color = if (live) Accent else Dim,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (live) {
+                Spacer(Modifier.height(3.dp))
+                LinearProgressIndicator(progress = { p.progress(now) }, modifier = Modifier.fillMaxWidth().height(3.dp), color = Accent)
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(
+            when {
+                watchable -> "▶"
+                reminded -> "🔔"
+                else -> "🔕"
+            },
+            style = MaterialTheme.typography.titleMedium,
+        )
     }
 }
 

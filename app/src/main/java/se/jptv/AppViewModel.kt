@@ -8,6 +8,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -1598,18 +1599,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val lower = q.lowercase()
         val pl = playlist
         val channels = pl?.channels?.filter { it.name.lowercase().contains(lower) }?.take(40) ?: emptyList()
-        val now = System.currentTimeMillis()
-        val programmes = mutableListOf<Pair<Channel, se.jptv.iptv.Programme>>()
-        val e = epg
-        if (pl != null && e != null) {
-            for (ch in pl.channels) {
-                for (p in e.programmesFor(ch)) {
-                    if (p.stop > now && p.title.lowercase().contains(lower)) programmes += ch to p
-                }
-                if (programmes.size > 200) break
-            }
-        }
-        programmes.sortBy { it.second.start }
+        val programmes = searchProgrammes(q, limit = 60).map { it.channel to it.programme }
         var error: String? = null
         val hubs = if (plex.server != null) {
             try {
@@ -1621,7 +1611,26 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 emptyList()
             }
         } else emptyList()
-        return SearchResults(hubs, channels, programmes.take(60), error)
+        return SearchResults(hubs, channels, programmes, error)
+    }
+
+    /**
+     * Program i guiden vars titel innehåller sökorden (Live-TV:s sök och den vanliga Sök). Dolda
+     * grupper räknas inte; vid samma program på flera kanaler vinner favoriter och senast sedda.
+     */
+    suspend fun searchProgrammes(query: String, limit: Int = 80): List<se.jptv.iptv.ProgrammeHit> {
+        val pl = playlist ?: return emptyList()
+        val e = epg ?: return emptyList()
+        if (query.isBlank()) return emptyList()
+        val favs = favorites.toHashSet()
+        val recent = recents.toHashSet()
+        val hidden = hiddenGroups.toHashSet()
+        return withContext(Dispatchers.Default) {
+            val ordered = pl.channels
+                .filter { it.group !in hidden }
+                .sortedBy { if (it.key in favs) 0 else if (it.key in recent) 1 else 2 }
+            se.jptv.iptv.ProgrammeSearch.find(ordered, e, query, System.currentTimeMillis(), limit)
+        }
     }
 
     fun channelsForGroup(group: String, query: String = ""): List<Channel> {
@@ -1720,10 +1729,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Spela senaste kanalen, i sin grupp så att ▲▼ fungerar som vanligt. */
     fun playLastChannel() {
-        val ch = lastChannel ?: return
+        playChannelInGroup(lastChannel ?: return)
+    }
+
+    /** Spela en kanal med dess grupp som zapplista (upp/ned i spelaren), t.ex. från en programträff. */
+    fun playChannelInGroup(ch: Channel) {
         val inGroup = channelsForGroup(ch.group)
-        val index = inGroup.indexOfFirst { it.key == ch.key }.coerceAtLeast(0)
-        playChannel(inGroup.ifEmpty { listOf(ch) }, index)
+        val index = inGroup.indexOfFirst { it.key == ch.key }
+        if (index >= 0) playChannel(inGroup, index) else playChannel(listOf(ch), 0)
     }
 
     companion object {
@@ -1733,7 +1746,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         const val DECK_TITLE = "Fortsätt titta"
         const val GROUP_FAVORITES = "★ Favoriter"
         const val GROUP_RECENTS = "Senaste"
-        const val GROUP_SEARCH = "Sök kanal"
+        const val GROUP_SEARCH = "Sök kanal och program"
 
         /** Kvalitetsval för telefonen och casting hemifrån. */
         val REMOTE_QUALITIES: List<Pair<String, Pair<Int, String>?>> = listOf(

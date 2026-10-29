@@ -56,6 +56,8 @@ import se.jptv.AppViewModel
 import se.jptv.Screen
 import se.jptv.iptv.Channel
 import se.jptv.iptv.Epg
+import se.jptv.iptv.ProgrammeHit
+import se.jptv.iptv.ProgrammeSearch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -126,6 +128,24 @@ private fun ChannelBrowser(vm: AppViewModel) {
         }
     }
 
+    // Sökläget: kanaler med namnet och program i guiden med titeln ("hockey", "Rapport").
+    val searching = group == AppViewModel.GROUP_SEARCH
+    var programmeHits by remember { mutableStateOf<List<ProgrammeHit>>(emptyList()) }
+    var searchPending by remember { mutableStateOf(false) }
+    LaunchedEffect(searching, query, vm.epg, vm.hiddenGroups) {
+        if (!searching || query.trim().length < ProgrammeSearch.MIN_LENGTH) {
+            programmeHits = emptyList()
+            searchPending = false
+            return@LaunchedEffect
+        }
+        searchPending = true
+        delay(250)
+        programmeHits = vm.searchProgrammes(query)
+        searchPending = false
+    }
+    // Många kanalträffar ("sv") ska inte trycka ner programmen för långt.
+    val shownChannels = if (searching) channels.take(SEARCH_CHANNELS) else channels
+
     Column(
         Modifier
             .fillMaxSize()
@@ -184,16 +204,17 @@ private fun ChannelBrowser(vm: AppViewModel) {
             }
             Spacer(Modifier.width(24.dp))
             Column(Modifier.weight(1f)) {
-                if (group == AppViewModel.GROUP_SEARCH) {
+                if (searching) {
                     SearchField(query = query, onQuery = { query = it })
                     Spacer(Modifier.height(12.dp))
                 }
-                if (channels.isEmpty()) {
-                    Text(
-                        if (group == AppViewModel.GROUP_SEARCH) "Skriv en del av kanalnamnet." else "Inga kanaler här.",
-                        color = JptvColors.TextDim,
-                    )
+                val empty = when {
+                    searching && query.isBlank() -> "Skriv en del av ett kanalnamn eller ett program, t.ex. \"hockey\" eller \"Rapport\"."
+                    searching && channels.isEmpty() && programmeHits.isEmpty() && !searchPending -> "Inget hittades för \"${query.trim()}\"."
+                    !searching && channels.isEmpty() -> "Inga kanaler här."
+                    else -> null
                 }
+                if (empty != null) Text(empty, color = JptvColors.TextDim)
                 LazyColumn(
                     state = channelList,
                     modifier = Modifier
@@ -210,7 +231,15 @@ private fun ChannelBrowser(vm: AppViewModel) {
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                     contentPadding = PaddingValues(bottom = 48.dp),
                 ) {
-                    itemsIndexed(channels, key = { i, ch -> "${i}_${ch.key}" }) { i, ch ->
+                    if (searching && shownChannels.isNotEmpty() && programmeHits.isNotEmpty()) {
+                        item(key = "h_channels") {
+                            SectionLabel(
+                                "Kanaler",
+                                if (channels.size > shownChannels.size) "${channels.size} träffar – skriv mer för att se färre" else null,
+                            )
+                        }
+                    }
+                    itemsIndexed(shownChannels, key = { i, ch -> "${i}_${ch.key}" }) { i, ch ->
                         ChannelRow(
                             modifier = Modifier
                                 .onFocusChanged { if (it.hasFocus) vm.focusKeys["live_channel"] = ch.key }
@@ -226,6 +255,23 @@ private fun ChannelBrowser(vm: AppViewModel) {
                             playing = vm.pip?.channel?.key == ch.key,
                             compact = vm.pip != null,
                         )
+                    }
+                    if (programmeHits.isNotEmpty()) {
+                        item(key = "h_programmes") { SectionLabel("Program", "OK = titta om det går nu, annars påminnelse") }
+                        itemsIndexed(programmeHits, key = { i, hit -> "p_${i}_${hit.channel.key}_${hit.programme.start}" }) { _, hit ->
+                            ProgrammeRow(
+                                hit = hit,
+                                now = now,
+                                reminded = vm.hasReminder(hit.channel, hit.programme.start),
+                                onClick = {
+                                    if (hit.isWatchable(System.currentTimeMillis())) {
+                                        vm.playChannelInGroup(hit.channel)
+                                    } else {
+                                        vm.toggleReminder(hit.channel, hit.programme)
+                                    }
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -285,9 +331,64 @@ private fun SearchField(query: String, onQuery: (String) -> Unit) {
             .padding(horizontal = 16.dp, vertical = 12.dp),
         decorationBox = { inner ->
             Box {
-                if (query.isEmpty()) Text("Sök kanal…", color = JptvColors.TextDim, fontSize = 20.sp)
+                if (query.isEmpty()) Text("Sök kanal eller program…", color = JptvColors.TextDim, fontSize = 20.sp)
                 inner()
             }
+        },
+    )
+}
+
+/** Högst så många kanaler i sökläget; programmen kommer under. */
+private const val SEARCH_CHANNELS = 30
+
+@Composable
+private fun SectionLabel(title: String, hint: String? = null) {
+    Row(Modifier.padding(top = 12.dp, bottom = 4.dp), verticalAlignment = Alignment.Bottom) {
+        Text(title, style = MaterialTheme.typography.titleMedium)
+        if (hint != null) {
+            Spacer(Modifier.width(12.dp))
+            Text(hint, color = JptvColors.TextDim, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+/** Ett program i sökträffarna: titel, när och var. Går det nu: förlopp och ▶ Titta; annars 🔔. */
+@Composable
+private fun ProgrammeRow(hit: ProgrammeHit, now: Long, reminded: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val p = hit.programme
+    val live = hit.isLive(now)
+    ListItem(
+        selected = false,
+        onClick = onClick,
+        modifier = modifier,
+        leadingContent = { ChannelLogo(hit.channel) },
+        headlineContent = {
+            Text(p.title + if (reminded) "  🔔" else "", maxLines = 1, overflow = TextOverflow.Ellipsis)
+        },
+        supportingContent = {
+            Column {
+                Text(
+                    "${ProgrammeSearch.whenText(p, now)} · ${hit.channel.name}",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = if (live) JptvColors.Accent else JptvColors.TextDim,
+                )
+                if (live) {
+                    Spacer(Modifier.height(4.dp))
+                    ProgressBar(p.progress(now), Modifier.width(220.dp))
+                }
+            }
+        },
+        trailingContent = {
+            Text(
+                when {
+                    hit.isWatchable(now) -> "▶ Titta"
+                    reminded -> "🔔 Påminner"
+                    else -> "OK = påminn"
+                },
+                color = JptvColors.TextDim,
+                style = MaterialTheme.typography.bodySmall,
+            )
         },
     )
 }

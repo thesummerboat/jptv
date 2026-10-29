@@ -16,7 +16,7 @@ from aiohttp import web
 
 from . import imdb
 from .arr import DEFAULTS as ARR_DEFAULTS, Arr, ArrError
-from .iptv import HwAccel, LiveStream
+from .iptv import HwAccel, LiveStream, search_programmes
 from .library import Library
 from .plex import QUALITIES, Plex, PlexError, metadata_list, public, slim
 from .store import Store
@@ -1207,6 +1207,25 @@ async def live_channels(request: web.Request):
     c = ctx(request)
     now = int(time.time() * 1000)
     return web.json_response([channel_json(c, ch, now) for ch in _channels_for(c, request.query)])
+
+
+@routes.get("/api/live/search")
+async def live_search(request: web.Request):
+    """Program i guiden för Live-TV:s sökruta: det som går nu först, sedan det som kommer."""
+    c = ctx(request)
+    pl, epg = c["iptv"].playlist, c["iptv"].epg
+    text = (request.query.get("q") or "").strip()
+    if not pl or not epg or len(text) < 2:
+        return web.json_response({"programmes": []})
+    now = int(time.time() * 1000)
+    st = c["store"]
+    hidden = set(st.get("hidden_groups", []))
+    rank = {i: 0 for i in st.get("favorites", [])}
+    for i in st.get("recent", []):
+        rank.setdefault(i, 1)
+    chans = sorted((ch for ch in pl.channels if ch.group not in hidden), key=lambda ch: rank.get(ch.id, 2))
+    hits = await asyncio.to_thread(search_programmes, chans, epg, text, now)
+    return web.json_response({"programmes": [{"channel": ch.public(), "programme": p.public()} for ch, p in hits]})
 
 
 @routes.get("/api/live/guide")

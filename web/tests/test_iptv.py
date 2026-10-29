@@ -2,7 +2,7 @@ import gzip
 import io
 import unittest
 
-from app.iptv import guess_epg_url, is_live, normalize, parse_m3u, parse_time, parse_xmltv, write_m3u
+from app.iptv import Epg, Programme, guess_epg_url, is_live, normalize, parse_m3u, parse_time, parse_xmltv, search_programmes, write_m3u
 
 M3U = """#EXTM3U url-tvg="http://epg.example/guide.xml.gz"
 #EXTINF:-1 tvg-id="svt1.se" tvg-name="SE: SVT1 HD" tvg-logo="http://logo/svt1.png" group-title="Sverige",SE: SVT1 HD
@@ -116,3 +116,50 @@ class EpgTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProgrammeSearchTest(unittest.TestCase):
+    """Samma regler som på TV:n (ProgrammeSearchTest.kt)."""
+
+    def setUp(self):
+        t = lambda s: parse_time(s + " +0100")
+        self.t = t
+        self.now = t("20261029203000")
+        pl = parse_m3u("""#EXTM3U
+#EXTINF:-1 tvg-id="svt1.se" group-title="Sverige",SVT1 HD
+http://x/1.ts
+#EXTINF:-1 tvg-id="svt1.se" group-title="Sverige",SVT1 FHD
+http://x/2.ts
+#EXTINF:-1 tvg-id="cmore.se" group-title="Sport",C More Hockey
+http://x/3.ts
+""")
+        self.hd, self.fhd, self.cmore = pl.channels
+        self.epg = Epg({
+            "svt1.se": [Programme(t("20261029180000"), t("20261029183000"), "Rapport"),
+                        Programme(t("20261029200000"), t("20261029210000"), "Hockeykväll"),
+                        Programme(t("20261030193000"), t("20261030200000"), "Rapport")],
+            "cmore.se": [Programme(t("20261029190000"), t("20261029220000"), "Hockey: Frölunda – Luleå"),
+                         Programme(t("20261031150000"), t("20261031173000"), "Hockey: Skellefteå – Frölunda")],
+        }, {}, 0)
+
+    def titles(self, hits):
+        return [p.title for _, p in hits]
+
+    def test_words_and_order(self):
+        hits = search_programmes([self.hd, self.cmore], self.epg, "frölunda HOCKEY", self.now)
+        self.assertEqual(self.titles(hits), ["Hockey: Frölunda – Luleå", "Hockey: Skellefteå – Frölunda"])
+        hits = search_programmes([self.hd, self.cmore], self.epg, "hockey", self.now)
+        self.assertEqual(self.titles(hits), ["Hockey: Frölunda – Luleå", "Hockeykväll", "Hockey: Skellefteå – Frölunda"])
+        # Kvällens Rapport har slutat; morgondagens finns kvar.
+        self.assertEqual([p.start for _, p in search_programmes([self.hd], self.epg, "rapport", self.now)], [self.t("20261030193000")])
+
+    def test_variants_once_first_channel_wins(self):
+        hits = search_programmes([self.fhd, self.hd], self.epg, "hockeykväll", self.now)
+        self.assertEqual([(ch.name, p.title) for ch, p in hits], [("SVT1 FHD", "Hockeykväll")])
+
+    def test_too_short(self):
+        self.assertEqual(search_programmes([self.hd], self.epg, "r", self.now), [])
+        self.assertEqual(search_programmes([self.hd], self.epg, "   ", self.now), [])
+        self.assertEqual(search_programmes([self.hd], None, "rapport", self.now), [])
+        self.assertEqual(len(search_programmes([self.hd, self.cmore], self.epg, "ho", self.now, limit=1)), 1)
+
