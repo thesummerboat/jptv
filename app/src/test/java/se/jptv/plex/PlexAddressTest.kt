@@ -1,6 +1,8 @@
 package se.jptv.plex
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -15,5 +17,16 @@ class PlexAddressTest {
         assertFalse(PlexAddress.isLocal("https://172-32-1-1.0123abcd.plex.direct:32400"))
         assertFalse(PlexAddress.isLocal("https://abc.relay.plex.direct:8443"))
         assertFalse(PlexAddress.isLocal("https://plex.example.com"))
+    }
+
+    @Test
+    fun localHttpFallback() {
+        assertEquals("http://192.168.199.3:32400", PlexAddress.localHttp("https://192-168-199-3.0123abcd.plex.direct:32400"))
+        assertEquals("http://10.0.0.5:32400", PlexAddress.localHttp("https://10-0-0-5.0123abcd.plex.direct"))
+        assertEquals("http://192.168.1.10:8443", PlexAddress.localHttp("https://192-168-1-10.0123abcd.plex.direct:8443/"))
+        assertNull(PlexAddress.localHttp("http://192.168.1.10:32400"))
+        assertNull(PlexAddress.localHttp("https://85-228-10-20.0123abcd.plex.direct:32400"))
+        assertNull(PlexAddress.localHttp("https://abc.relay.plex.direct:8443"))
+        assertNull(PlexAddress.localHttp("https://plex.example.com"))
     }
 }

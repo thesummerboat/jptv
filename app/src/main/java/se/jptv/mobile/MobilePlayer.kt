@@ -182,6 +182,12 @@ fun MobileVodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     DisposableEffect(exo) {
         val listener = object : Player.Listener {
             override fun onPlayerError(e: PlaybackException) {
+                // Nådde inte servern (t.ex. internet nere): byt till en adress som svarar, så att nästa försök fungerar.
+                if (e.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+                    e.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT
+                ) {
+                    vm.reconnectIfNeeded()
+                }
                 // Telefonen klarar inte filen: be Plex koda om. Andra felet: visa det.
                 if (!transcoding) transcode(exo.currentPosition) else error = "Kan inte spela upp (${e.errorCodeName})"
             }

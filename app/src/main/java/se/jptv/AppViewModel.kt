@@ -23,6 +23,7 @@ import se.jptv.iptv.EpgRepository
 import se.jptv.iptv.IptvRepository
 import se.jptv.iptv.IptvUrls
 import se.jptv.iptv.Playlist
+import se.jptv.plex.PlexAddress
 import se.jptv.plex.PlexClient
 import se.jptv.plex.PlexHomeRow
 import se.jptv.plex.PlexItem
@@ -284,7 +285,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun reconnectIfNeeded() {
         val s = plex.server ?: return
         viewModelScope.launch {
-            if (!plex.isReachable(s.uri, s.token)) connectAndLoad(rediscover = true)
+            val saved = prefs.serverUri
+            when {
+                !plex.isReachable(s.uri, s.token) -> connectAndLoad(rediscover = true)
+                // Körde på http-reserven (internet var nere): tillbaka till den sparade https-adressen
+                // så fort den svarar igen, eftersom casting till Chromecast kräver https.
+                saved != null && saved != s.uri && plex.isReachable(saved, s.token) -> plex.server = s.copy(uri = saved)
+            }
         }
     }
 
@@ -794,6 +801,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Servern via vanlig http på hemnätet, när den sparade plex.direct-adressen inte går att nå
+     * (t.ex. när internet är nere). Sparas inte: när internet är tillbaka används https igen,
+     * som casting till Chromecast kräver.
+     */
+    private suspend fun localFallback(savedUri: String?, savedToken: String?): PlexServer? {
+        val alt = savedUri?.let { PlexAddress.localHttp(it) } ?: return null
+        val token = savedToken ?: return null
+        return if (plex.isReachable(alt, token)) PlexServer(prefs.serverName ?: "Plex", alt, token) else null
+    }
+
     /** Ansluter till sparad server (eller letar upp den igen) och laddar hemskärmen. */
     fun connectAndLoad(rediscover: Boolean) {
         val token = prefs.plexToken ?: return
@@ -808,10 +826,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 ) {
                     PlexServer(prefs.serverName ?: "Plex", savedUri, savedToken)
                 } else {
-                    plex.findServer(token).also {
-                        prefs.serverUri = it.uri
-                        prefs.serverToken = it.token
-                        prefs.serverName = it.name
+                    try {
+                        plex.findServer(token).also {
+                            prefs.serverUri = it.uri
+                            prefs.serverToken = it.token
+                            prefs.serverName = it.name
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        // Internet nere: plex.tv svarar inte och plex.direct-namnet går inte att slå upp.
+                        localFallback(savedUri, savedToken) ?: throw e
                     }
                 }
                 plex.server = server

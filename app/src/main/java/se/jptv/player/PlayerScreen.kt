@@ -640,6 +640,12 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     DisposableEffect(exo) {
         val listener = object : Player.Listener {
             override fun onPlayerError(e: PlaybackException) {
+                // Nådde inte servern (t.ex. internet nere): byt till en adress som svarar, så att nästa försök fungerar.
+                if (e.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+                    e.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT
+                ) {
+                    vm.reconnectIfNeeded()
+                }
                 if (transcodeAttempts < 2) {
                     // Första felet: byt till Plex-omkodning. Andra: starta en ny omkodning (t.ex. efter lång paus).
                     switchToTranscode(maxOf(exo.currentPosition, startAt))
