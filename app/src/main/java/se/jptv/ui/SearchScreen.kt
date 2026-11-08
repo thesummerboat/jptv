@@ -154,7 +154,9 @@ fun SearchScreen(vm: AppViewModel) {
                                 itemsIndexed(results.wishes, key = { _, w -> "w_${w.guid}" }) { _, w ->
                                     PosterCard(
                                         title = w.title,
-                                        subtitle = w.statusText ?: listOfNotNull(w.year?.toString(), if (w.isShow) "Serie" else "Film").joinToString(" · "),
+                                        subtitle = w.statusText
+                                            ?: if (!w.canWish && w.canWishUhd) "Finns i Plex · kan önskas i 4K"
+                                            else listOfNotNull(w.year?.toString(), if (w.isShow) "Serie" else "Film").joinToString(" · "),
                                         imageUrl = w.thumb,
                                         progress = 0f,
                                         watched = w.status == "available",
@@ -257,28 +259,38 @@ private fun BoxScope.WishPopup(vm: AppViewModel, item: WishItem, onClose: () -> 
         item.summary?.let { Text(it, color = JptvColors.TextDim, maxLines = 4, overflow = TextOverflow.Ellipsis) }
         message?.let { Text(it, color = JptvColors.Accent) }
         Spacer(Modifier.height(6.dp))
+        // Med Radarr 4K på JPTV Web kan filmen också önskas i 4K (hamnar i 4K-biblioteket).
+        val canHd = item.canWish && message == null
+        val canUhd = item.canWishUhd && message == null
+        fun send(uhd: Boolean) {
+            if (sending) return
+            sending = true
+            scope.launch {
+                vm.wish(item, uhd = uhd)
+                    .onSuccess {
+                        onUpdated(it)
+                        message = (if (uhd) "Önskad i 4K!" else "Önskad!") + " Den syns under Önskemål i JPTV Web på Unraid."
+                        delay(2000)
+                        onClose()
+                    }
+                    .onFailure {
+                        message = it.message ?: "Det gick inte att önska"
+                        sending = false
+                    }
+            }
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (item.canWish && message == null) {
-                Button(
-                    onClick = {
-                        if (sending) return@Button
-                        sending = true
-                        scope.launch {
-                            vm.wish(item)
-                                .onSuccess {
-                                    onUpdated(it)
-                                    message = "Önskad! Den syns under Önskemål i JPTV Web på Unraid."
-                                    delay(2000)
-                                    onClose()
-                                }
-                                .onFailure {
-                                    message = it.message ?: "Det gick inte att önska"
-                                    sending = false
-                                }
-                        }
-                    },
-                    modifier = Modifier.focusRequester(focus),
-                ) { Text(if (sending) "Skickar…" else if (item.isShow) "Önska serien" else "Önska filmen") }
+            if (canHd || canUhd) {
+                if (canHd) {
+                    Button(onClick = { send(false) }, modifier = Modifier.focusRequester(focus)) {
+                        Text(if (sending) "Skickar…" else if (item.isShow) "Önska serien" else "Önska filmen")
+                    }
+                }
+                if (canUhd) {
+                    Button(onClick = { send(true) }, modifier = if (canHd) Modifier else Modifier.focusRequester(focus)) {
+                        Text(if (sending) "Skickar…" else "Önska i 4K")
+                    }
+                }
                 OutlinedButton(onClick = onClose) { Text("Avbryt") }
             } else {
                 Button(onClick = onClose, modifier = Modifier.focusRequester(focus)) { Text("Stäng") }

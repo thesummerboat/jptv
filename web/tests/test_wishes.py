@@ -400,6 +400,81 @@ class WishesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(got["state"], "error")
         self.assertIn("API-nyckeln", got["text"])
 
+    async def test_uhd_wishes(self):
+        """Önska i 4K: en egen Radarr för 4K, ett eget önskemål, klart när den finns i 4K-biblioteket."""
+        log4k, state4k = [], {}
+        radarr4k = TestServer(fake_arr("radarr", log4k, state4k))
+        await radarr4k.start_server()
+        fake_plex.extra_sections[:] = [{"key": "4", "title": "Filmer 4K", "type": "movie"}]
+        try:
+            # Utan Radarr 4K går det inte att önska i 4K.
+            self.assertFalse((await (await self.client.get("/api/status")).json())["uhd"])
+            film = (await self.search("Polarexpressen"))[0]
+            self.assertNotIn("uhdKey", film)
+            await self.post("/api/requests", film | {"by": "Ebba", "uhd": True}, status=400)
+
+            await self.post("/api/settings", {
+                "radarrUrl": f"127.0.0.1:{self.radarr.port}", "radarrKey": "nyckel",
+                "radarr4kUrl": f"127.0.0.1:{radarr4k.port}", "radarr4kKey": "nyckel",
+            })
+            self.assertTrue((await (await self.client.get("/api/status")).json())["uhd"])
+            # 4K-biblioteket hittas på namnet.
+            secs = await (await self.client.get("/api/plex/sections")).json()
+            self.assertEqual((secs["uhd"], [x["title"] for x in secs["sections"]]), ("4", ["Filmer", "Filmer 4K"]))
+            film = (await self.search("Polarexpressen"))[0]
+            self.assertEqual((film["hdKey"], film["uhdKey"], film["request"], film["requestUhd"]), (None, None, None, None))
+
+            # Vanligt önskemål och 4K-önskemål är två olika.
+            hd = (await self.post("/api/requests", film | {"by": "Ebba"}))["request"]
+            uhd = (await self.post("/api/requests", film | {"by": "Jonas", "uhd": True}))["request"]
+            self.assertNotEqual(hd["id"], uhd["id"])
+            self.assertTrue(uhd["uhd"])
+            self.assertFalse(hd["uhd"])
+            again = await self.post("/api/requests", film | {"by": "Ebba", "uhd": True})
+            self.assertEqual((again["request"]["id"], again["new"]), (uhd["id"], False))
+            film = (await self.search("Polarexpressen"))[0]
+            self.assertEqual((film["request"]["id"], film["requestUhd"]["id"]), (hd["id"], uhd["id"]))
+
+            # Radarr 4K har två rotmappar och ingen vald: tydligt fel.
+            err = await self.post(f"/api/requests/{uhd['id']}/approve", status=502)
+            self.assertIn("Välj rotmapp för Radarr 4K", err["error"])
+            await self.post("/api/settings", {"radarr4kRoot": "/data/Filmer"})
+            ok = await self.post(f"/api/requests/{uhd['id']}/approve")
+            self.assertEqual(ok["request"]["note"], "Skickad till Radarr 4K")
+            sent = next(x for x in log4k if "qualityProfileId" in x)
+            self.assertEqual((sent["qualityProfileId"], sent["rootFolderPath"]), (5, "/data/Filmer"))
+            # Den vanliga Radarr fick inget.
+            self.assertFalse(any("qualityProfileId" in x for x in self.radarr_log))
+
+            # Status hämtas från Radarr 4K.
+            st = await (await self.client.get("/api/requests/arr")).json()
+            self.assertEqual(st["items"][uhd["id"]]["state"], "missing")
+            self.assertNotIn(hd["id"], st["items"])
+            await self.post(f"/api/requests/{uhd['id']}/search")
+            self.assertEqual(log4k[-1], {"command": {"name": "MoviesSearch", "movieIds": [9]}})
+
+            # Filmen dyker upp i 4K-biblioteket: bara 4K-önskemålet blir klart.
+            fake_plex.items["uhd1"] = {"ratingKey": "uhd1", "key": "/library/metadata/uhd1", "type": "movie", "title": "Polarexpressen 2",
+                                       "guid": "plex://movie/nyfilm1", "year": 2026, "librarySectionID": 4, "addedAt": fake_plex.NOW}
+            fake_plex.order.append("uhd1")
+            self.app[jptv.JPTV]["library"].invalidate()
+            self.app[jptv.JPTV]["plex"].forget_cache()
+            lst = await (await self.client.get("/api/requests")).json()
+            by_id = {w["id"]: w for w in lst["items"]}
+            self.assertEqual((by_id[uhd["id"]]["status"], by_id[uhd["id"]]["libraryKey"]), ("available", "uhd1"))
+            self.assertEqual(by_id[hd["id"]]["status"], "pending")
+            self.assertTrue(lst["radarr4k"])
+            film = (await self.search("Polarexpressen"))[0]
+            self.assertEqual((film["uhdKey"], film["hdKey"], film["libraryKey"]), ("uhd1", None, "uhd1"))
+            err = await self.post("/api/requests", film | {"by": "Ebba", "uhd": True}, status=409)
+            self.assertEqual(err["error"], "Finns redan i 4K")
+        finally:
+            fake_plex.extra_sections.clear()
+            if "uhd1" in fake_plex.items:
+                del fake_plex.items["uhd1"]
+                fake_plex.order.remove("uhd1")
+            await radarr4k.close()
+
     async def test_scan_library(self):
         fake_plex.scans.clear()
         r = await self.post("/api/library/scan")

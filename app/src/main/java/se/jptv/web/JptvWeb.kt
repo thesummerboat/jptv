@@ -23,14 +23,37 @@ data class WishItem(
     val art: String?,
     val libraryKey: String?,
     val status: String?,
+    /** JPTV Web har Radarr 4K: filmer kan också önskas i 4K (ett eget önskemål bredvid det vanliga). */
+    val uhdEnabled: Boolean = false,
+    /** Finns utanför 4K-biblioteket (utan 4K: samma som libraryKey). */
+    val hdKey: String? = libraryKey,
+    /** Finns i 4K-biblioteket. */
+    val uhdKey: String? = null,
+    /** 4K-önskemålets status. */
+    val uhdStatus: String? = null,
 ) {
     val isShow: Boolean get() = type == "show"
 
     /** Kan önskas: finns inte i Plex och är inte redan önskad (eller fick nej). */
-    val canWish: Boolean get() = libraryKey == null && (status == null || status == "declined")
+    val canWish: Boolean get() = hdKey == null && isOpen(status)
+
+    /** Kan önskas i 4K: filmen saknas i 4K-biblioteket och är inte redan önskad i 4K. */
+    val canWishUhd: Boolean get() = uhdEnabled && !isShow && uhdKey == null && isOpen(uhdStatus)
 
     val statusText: String?
-        get() = when (status) {
+        get() = listOfNotNull(describe(status), describe(uhdStatus)?.let { "4K: $it" })
+            .joinToString(" · ").ifBlank { null }
+
+    fun toJson(by: String, uhd: Boolean = false): JSONObject = JSONObject()
+        .put("guid", guid).put("key", key).put("type", type).put("title", title)
+        .put("year", year ?: JSONObject.NULL).put("summary", summary ?: JSONObject.NULL)
+        .put("thumb", thumb ?: JSONObject.NULL).put("art", art ?: JSONObject.NULL)
+        .put("by", by).put("uhd", uhd)
+
+    companion object {
+        private fun isOpen(status: String?) = status == null || status == "declined"
+
+        private fun describe(status: String?): String? = when (status) {
             "pending" -> "Önskad · väntar på OK"
             "approved" -> "Godkänd · på väg"
             "available" -> "Finns nu i Plex"
@@ -38,14 +61,20 @@ data class WishItem(
             else -> null
         }
 
-    fun toJson(by: String): JSONObject = JSONObject()
-        .put("guid", guid).put("key", key).put("type", type).put("title", title)
-        .put("year", year ?: JSONObject.NULL).put("summary", summary ?: JSONObject.NULL)
-        .put("thumb", thumb ?: JSONObject.NULL).put("art", art ?: JSONObject.NULL)
-        .put("by", by)
+        private fun JSONObject.str(name: String): String? = optString(name).takeIf { it.isNotBlank() && it != "null" }
 
-    companion object {
-        fun parse(o: JSONObject): WishItem = WishItem(
+        fun parse(o: JSONObject): WishItem = parseBase(o).let { w ->
+            // Fälten finns bara när JPTV Web har Radarr 4K (och titeln är en film).
+            if (!o.has("uhdKey")) return@let w
+            w.copy(
+                uhdEnabled = true,
+                hdKey = if (o.has("hdKey")) o.str("hdKey") else w.libraryKey,
+                uhdKey = o.str("uhdKey"),
+                uhdStatus = o.optJSONObject("requestUhd")?.optString("status")?.takeIf { it.isNotBlank() },
+            )
+        }
+
+        private fun parseBase(o: JSONObject): WishItem = WishItem(
             guid = o.optString("guid"),
             key = o.optString("key"),
             type = o.optString("type", "movie"),
@@ -94,16 +123,19 @@ class JptvWeb(http: OkHttpClient) {
         }
     }
 
-    /** Skickar önskemålet. Returnerar titeln med ny status. */
-    suspend fun wish(item: WishItem, by: String): WishItem = withContext(Dispatchers.IO) {
+    /** Skickar önskemålet (uhd: önska i 4K). Returnerar titeln med ny status. */
+    suspend fun wish(item: WishItem, by: String, uhd: Boolean = false): WishItem = withContext(Dispatchers.IO) {
         val base = baseUrl ?: throw IOException("JPTV Web hittades inte")
-        val body = item.toJson(by).toString().toRequestBody("application/json".toMediaType())
+        val body = item.toJson(by, uhd).toString().toRequestBody("application/json".toMediaType())
         client.newCall(Request.Builder().url("$base/api/requests").post(body).build()).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
-            if (resp.code == 409) return@use item.copy(libraryKey = JSONObject(text).optString("libraryKey").ifBlank { item.key })
+            if (resp.code == 409) {
+                val key = JSONObject(text).optString("libraryKey").ifBlank { item.key }
+                return@use if (uhd) item.copy(uhdKey = key) else item.copy(libraryKey = key, hdKey = key)
+            }
             if (!resp.isSuccessful) throw IOException(errorOf(text) ?: "JPTV Web svarade HTTP ${resp.code}")
             val status = JSONObject(text).optJSONObject("request")?.optString("status") ?: "pending"
-            item.copy(status = status)
+            if (uhd) item.copy(uhdStatus = status) else item.copy(status = status)
         }
     }
 

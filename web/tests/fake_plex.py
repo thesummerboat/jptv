@@ -219,6 +219,8 @@ def draw_logo(title: str) -> bytes:
 
 scans: list[str] = []
 refreshing: set[str] = set()
+# Fler bibliotek för enskilda tester (t.ex. ett 4K-bibliotek).
+extra_sections: list[dict] = []
 
 
 def make_app(media_dir: str, port: int) -> web.Application:
@@ -232,6 +234,7 @@ def make_app(media_dir: str, port: int) -> web.Application:
     @r.get("/library/sections")
     async def sections(_):
         dirs = [{"key": "1", "title": "Filmer", "type": "movie"}, {"key": "2", "title": "TV-serier", "type": "show"}, {"key": "3", "title": "Musik", "type": "artist"}]
+        dirs += [dict(d) for d in extra_sections]
         # En skanning pågår tills den rapporterats en gång.
         for d in dirs:
             if d["key"] in refreshing:
@@ -530,4 +533,10 @@ if __name__ == "__main__":
     os.makedirs(media, exist_ok=True)
     make_media(media)
     build()
+    if os.environ.get("FAKE_PLEX_4K"):
+        # För att prova 4K-önskemål för hand: ett 4K-bibliotek med en kopia av första filmen.
+        extra_sections.append({"key": "4", "title": "4K", "type": "movie"})
+        first = items[order[0]]
+        items["uhd1"] = dict(first, ratingKey="uhd1", key="/library/metadata/uhd1", librarySectionID=4)
+        order.append("uhd1")
     web.run_app(make_app(media, port), port=port, access_log=None)

@@ -20,6 +20,8 @@ import aiohttp
 DEFAULTS = {
     "radarr": {"root": "/data/Filmer", "profile": "HD-1080p"},
     "sonarr": {"root": "/data/Serier", "profile": "HD - 720p/1080p"},
+    # Andra Radarr som bara sköter 4K-biblioteket. Har den en enda rotmapp används den.
+    "radarr4k": {"root": "", "profile": "Ultra-HD"},
 }
 
 
@@ -40,18 +42,23 @@ class ArrError(Exception):
 
 
 class Arr:
-    def __init__(self, http: aiohttp.ClientSession, kind: str, url: str, key: str, root: str = "", profile: str = ""):
+    def __init__(self, http: aiohttp.ClientSession, kind: str, url: str, key: str, root: str = "", profile: str = "",
+                 uhd: bool = False):
         self.http = http
         self.kind = kind  # "radarr" eller "sonarr"
+        self.uhd = uhd and kind == "radarr"  # Radarr 4K: den andra Radarr för 4K-biblioteket
+        defaults = DEFAULTS["radarr4k" if self.uhd else kind]
         self.url = (url or "").strip().rstrip("/")
         if self.url and not self.url.startswith(("http://", "https://")):
             self.url = "http://" + self.url
         self.key = (key or "").strip()
-        self.root = (root or "").strip() or DEFAULTS[kind]["root"]
-        self.profile = (profile or "").strip() or DEFAULTS[kind]["profile"]
+        self.root = (root or "").strip() or defaults["root"]
+        self.profile = (profile or "").strip() or defaults["profile"]
 
     @property
     def name(self) -> str:
+        if self.uhd:
+            return "Radarr 4K"
         return "Radarr" if self.kind == "radarr" else "Sonarr"
 
     @property
@@ -108,6 +115,12 @@ class Arr:
         if profile is None:
             names = ", ".join(p.get("name", "?") for p in profiles) or "inga"
             raise ArrError(f"{self.name} har ingen kvalitetsprofil som heter {want} (finns: {names})")
+        if not self.root:
+            # Ingen mapp vald (Radarr 4K): går bara om Radarr har en enda rotmapp.
+            if len(roots) == 1:
+                return int(profile["id"]), profile.get("name", want), roots[0]["path"]
+            paths = ", ".join(r.get("path", "?") for r in roots) or "inga"
+            raise ArrError(f"Välj rotmapp för {self.name} under Inställningar (finns: {paths})")
         want_root = _norm_path(self.root)
         root = next((r for r in roots if _norm_path(r.get("path", "")) == want_root), None)
         if root is None:
@@ -133,7 +146,7 @@ class Arr:
         if isinstance(movie, list):
             movie = movie[0] if movie else None
         if not movie:
-            raise ArrError("Radarr hittade inte filmen")
+            raise ArrError(f"{self.name} hittade inte filmen")
         if movie.get("id"):
             return await self._existing_movie(int(movie["id"]))
         profile, _, root = await self._defaults()
@@ -146,9 +159,9 @@ class Arr:
             await self._call("POST", "/api/v3/movie", json=body)
         except ArrError as e:
             if _exists(e):
-                return "Fanns redan i Radarr"
+                return f"Fanns redan i {self.name}"
             raise
-        return "Skickad till Radarr"
+        return f"Skickad till {self.name}"
 
     async def _add_series(self, item: dict, ids: dict) -> str:
         term = f"tvdb:{ids['tvdb']}" if ids.get("tvdb") else item.get("title", "")
@@ -187,11 +200,11 @@ class Arr:
         """Filmen finns redan i Radarr. Saknas filen: bevaka den och sök, annars händer inget."""
         movie = await self._call("GET", f"/api/v3/movie/{movie_id}") or {}
         if movie.get("hasFile"):
-            return "Fanns redan i Radarr"
+            return f"Fanns redan i {self.name}"
         if not movie.get("monitored"):
             await self._call("PUT", "/api/v3/movie/editor", json={"movieIds": [movie_id], "monitored": True})
         await self._call("POST", "/api/v3/command", json={"name": "MoviesSearch", "movieIds": [movie_id]})
-        return "Fanns redan i Radarr – sökning startad"
+        return f"Fanns redan i {self.name} – sökning startad"
 
     async def _existing_series(self, series_id: int) -> str:
         """Serien finns redan i Sonarr: sök efter de bevakade avsnitt som saknas."""
@@ -260,7 +273,7 @@ class Arr:
             st = _queue_status(mine, self.kind == "sonarr", self.name)
             st["link"] = self._link(found, "activity/queue") if st["state"] in PROBLEMS else self._link(found)
             return st
-        st = _movie_status(found, fid in searching) if self.kind == "radarr" else _series_status(found, fid in searching)
+        st = _movie_status(found, fid in searching, self.name) if self.kind == "radarr" else _series_status(found, fid in searching)
         st["link"] = self._link(found)
         return st
 
@@ -481,7 +494,7 @@ def _queue_status(items: list, series: bool, name: str = "Radarr") -> dict:
     )
 
 
-def _movie_status(movie: dict, searching: bool) -> dict:
+def _movie_status(movie: dict, searching: bool, name: str = "Radarr") -> dict:
     if movie.get("hasFile"):
         f = movie.get("movieFile") or {}
         quality = (((f.get("quality") or {}).get("quality") or {}).get("name")) or ""
@@ -489,7 +502,7 @@ def _movie_status(movie: dict, searching: bool) -> dict:
         return _state("done", f"Nedladdad{f' ({extra})' if extra else ''} – syns i Plex efter nästa skanning",
                       actions=["scan"])
     if not movie.get("monitored"):
-        return _state("unmonitored", "Inte bevakad i Radarr – letar inte", actions=["search"])
+        return _state("unmonitored", f"Inte bevakad i {name} – letar inte", actions=["search"])
     if movie.get("isAvailable") is False:
         now = time.time()
         dates = [("digitalt", movie.get("digitalRelease")), ("på skiva", movie.get("physicalRelease"))]
@@ -502,7 +515,7 @@ def _movie_status(movie: dict, searching: bool) -> dict:
         else:
             release = {"label": "på bio sedan", "at": cinema} if cinema else None
         return _state("waiting", "Väntar på release", release=release, actions=["search"],
-                      hint="Radarr börjar leta av sig själv när den släpps.")
+                      hint=f"{name} börjar leta av sig själv när den släpps.")
     if searching:
         return _state("searching", "Söker…")
     return _state(

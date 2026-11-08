@@ -149,7 +149,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun searchWishes(query: String): List<se.jptv.web.WishItem> {
         if (webBase() == null) return emptyList()
         return try {
-            kotlinx.coroutines.withTimeoutOrNull(8_000) { web.discover(query) }.orEmpty().filter { it.libraryKey == null }
+            // Det som saknas i Plex, och med Radarr 4K även filmer som saknas i 4K-biblioteket.
+            kotlinx.coroutines.withTimeoutOrNull(8_000) { web.discover(query) }.orEmpty()
+                .filter { it.libraryKey == null || it.canWishUhd || it.uhdStatus != null }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -213,11 +215,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Skickar ett önskemål. Returnerar titeln med ny status, eller felet. */
-    suspend fun wish(item: se.jptv.web.WishItem, by: String = wisherName): Result<se.jptv.web.WishItem> =
+    /** Skickar ett önskemål (uhd: i 4K). Returnerar titeln med ny status, eller felet. */
+    suspend fun wish(item: se.jptv.web.WishItem, by: String = wisherName, uhd: Boolean = false): Result<se.jptv.web.WishItem> =
         try {
             if (webBase() == null) throw java.io.IOException("JPTV Web på Unraid hittades inte")
-            Result.success(web.wish(item, by))
+            Result.success(web.wish(item, by, uhd))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

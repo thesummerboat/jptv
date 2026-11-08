@@ -253,17 +253,29 @@
 
   function actions(t, refresh) {
     const box = h('div', { class: 'actions d-actions' });
-    if (t.libraryKey) {
-      box.append(h('a', { class: 'btn primary', href: (t.type === 'show' ? '#/show/' : '#/item/') + t.libraryKey }, JP.icon('play'), 'Finns i Plex – öppna'));
+    // Med Radarr 4K har filmen två spår: den vanliga versionen och 4K-versionen.
+    const uhdOn = !!(JP.status && JP.status.uhd) && t.type === 'movie';
+    const hdKey = 'hdKey' in t ? t.hdKey : t.libraryKey;
+    const dialog = () => JP.wishDialog({
+      tmdb: t.tmdb, type: t.type, title: t.title, year: t.year, summary: t.overview, ids: t.ids,
+      thumb: t.posterFull, art: t.backdropFull, request: t.request, requestUhd: t.requestUhd,
+      libraryKey: t.libraryKey, hdKey: t.hdKey, uhdKey: t.uhdKey,
+    }, (item) => { t.request = item.request; t.requestUhd = item.requestUhd; refresh(); });
+    if (hdKey) {
+      box.append(h('a', { class: 'btn primary', href: (t.type === 'show' ? '#/show/' : '#/item/') + hdKey }, JP.icon('play'), 'Finns i Plex – öppna'));
     } else if (t.request && t.request.status !== 'declined') {
       box.append(h('span', { class: 'd-pill big ' + t.request.status }, STATUS[t.request.status] || t.request.status));
     } else {
-      box.append(h('button', { class: 'btn primary', onclick: () => {
-        JP.wishDialog({
-          tmdb: t.tmdb, type: t.type, title: t.title, year: t.year, summary: t.overview, ids: t.ids,
-          thumb: t.posterFull, art: t.backdropFull, request: t.request, libraryKey: t.libraryKey,
-        }, (item) => { t.request = item.request; refresh(); });
-      } }, JP.icon('star'), t.type === 'show' ? 'Önska serien' : 'Önska filmen'));
+      box.append(h('button', { class: 'btn primary', onclick: dialog }, JP.icon('star'), t.type === 'show' ? 'Önska serien' : 'Önska filmen'));
+    }
+    if (uhdOn) {
+      if (t.uhdKey) {
+        box.append(h('a', { class: 'btn', href: '#/item/' + t.uhdKey }, JP.icon('play'), 'Finns i 4K'));
+      } else if (t.requestUhd && t.requestUhd.status !== 'declined') {
+        box.append(h('span', { class: 'd-pill big ' + t.requestUhd.status }, '4K: ' + (STATUS[t.requestUhd.status] || t.requestUhd.status)));
+      } else {
+        box.append(h('button', { class: 'btn', onclick: dialog, title: 'Skickas till Radarr 4K och hamnar i 4K-biblioteket' }, JP.icon('star'), 'Önska i 4K'));
+      }
     }
     if (t.trailer && JP.status && JP.status.youtube) {
       box.append(h('button', { class: 'btn', onclick: () => JP.playYt(t.trailer.youtube, { trailer: true }) }, JP.icon('trailer'), 'Trailer'));

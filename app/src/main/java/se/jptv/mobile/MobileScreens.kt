@@ -765,8 +765,9 @@ private fun WishTile(item: WishItem, onClick: () -> Unit) {
                 .background(CardHigh),
         ) {
             AsyncImage(model = item.thumb, contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            val label = item.statusText ?: if (!item.canWish && item.canWishUhd) "☆ Önska i 4K" else "☆ Önska"
             Text(
-                item.statusText ?: "☆ Önska",
+                label,
                 color = if (item.status == null) Bg else Color.White,
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
@@ -791,6 +792,26 @@ private fun WishDialog(vm: AppViewModel, item: WishItem, onClose: () -> Unit, on
     var sending by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    val canHd = item.canWish && message == null
+    val canUhd = item.canWishUhd && message == null
+    val canAny = canHd || canUhd
+    fun send(uhd: Boolean) {
+        sending = true
+        vm.changeWisherName(name)
+        scope.launch {
+            vm.wish(item, name.trim(), uhd)
+                .onSuccess {
+                    onUpdated(it)
+                    message = (if (uhd) "Önskad i 4K!" else "Önskad!") + " Den syns under Önskemål i JPTV Web på Unraid."
+                    delay(1800)
+                    onClose()
+                }
+                .onFailure {
+                    message = it.message ?: "Det gick inte att önska"
+                    sending = false
+                }
+        }
+    }
     AlertDialog(
         onDismissRequest = onClose,
         title = { Text(item.title + (item.year?.let { " ($it)" } ?: "")) },
@@ -799,39 +820,32 @@ private fun WishDialog(vm: AppViewModel, item: WishItem, onClose: () -> Unit, on
                 Text(if (item.isShow) "Serie" else "Film", color = Dim, style = MaterialTheme.typography.labelMedium)
                 item.statusText?.let { Text(it, color = Accent) }
                 item.summary?.let { Text(it, maxLines = 6, overflow = TextOverflow.Ellipsis) }
-                if (item.canWish && message == null) {
+                if (canAny) {
                     OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Vem önskar?") }, singleLine = true)
                 }
                 message?.let { Text(it, color = Accent) }
             }
         },
         confirmButton = {
-            if (item.canWish && message == null) {
-                Button(
-                    enabled = !sending && name.isNotBlank(),
-                    onClick = {
-                        sending = true
-                        vm.changeWisherName(name)
-                        scope.launch {
-                            vm.wish(item, name.trim())
-                                .onSuccess {
-                                    onUpdated(it)
-                                    message = "Önskad! Den syns under Önskemål i JPTV Web på Unraid."
-                                    delay(1800)
-                                    onClose()
-                                }
-                                .onFailure {
-                                    message = it.message ?: "Det gick inte att önska"
-                                    sending = false
-                                }
+            if (canAny) {
+                // Med Radarr 4K på JPTV Web kan filmen också önskas i 4K (hamnar i 4K-biblioteket).
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (canUhd) {
+                        OutlinedButton(enabled = !sending && name.isNotBlank(), onClick = { send(true) }) {
+                            Text(if (sending) "Skickar…" else "Önska i 4K")
                         }
-                    },
-                ) { Text(if (sending) "Skickar…" else if (item.isShow) "Önska serien" else "Önska filmen") }
+                    }
+                    if (canHd) {
+                        Button(enabled = !sending && name.isNotBlank(), onClick = { send(false) }) {
+                            Text(if (sending) "Skickar…" else if (item.isShow) "Önska serien" else "Önska filmen")
+                        }
+                    }
+                }
             } else {
                 TextButton(onClick = onClose) { Text("Stäng") }
             }
         },
-        dismissButton = { if (item.canWish && message == null) TextButton(onClick = onClose) { Text("Avbryt") } },
+        dismissButton = { if (canAny) TextButton(onClick = onClose) { Text("Avbryt") } },
     )
 }
 

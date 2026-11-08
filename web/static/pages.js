@@ -417,14 +417,20 @@
           state),
         h('h3', { class: 'box-sub' }, 'Radarr och Sonarr'));
     }
-    for (const [kind, label] of [['radarr', 'Radarr'], ['sonarr', 'Sonarr']]) {
-      const url = h('input', { type: 'text', value: s[kind + 'Url'] || '', placeholder: kind === 'radarr' ? 'http://192.168.x.x:7878' : 'http://192.168.x.x:8989', spellcheck: 'false' });
+    const placeholders = { radarr: 'http://192.168.x.x:7878', sonarr: 'http://192.168.x.x:8989', radarr4k: 'http://192.168.x.x:7879' };
+    for (const [kind, label] of [['radarr', 'Radarr'], ['sonarr', 'Sonarr'], ['radarr4k', 'Radarr 4K']]) {
+      if (kind === 'radarr4k') {
+        // En andra Radarr som bara sköter 4K-biblioteket: då går det att önska en film i 4K också.
+        arrBox.append(h('h3', { class: 'box-sub' }, 'Önska i 4K'),
+          h('p', { class: 'dim' }, 'Med en andra Radarr för 4K-mappen kan filmer önskas i 4K, bredvid den vanliga versionen. 4K-önskemålet skickas dit och räknas som klart när filmen finns i 4K-biblioteket i Plex. Lämnar du rotmappen tom används den enda mappen som finns i Radarr 4K.'));
+      }
+      const url = h('input', { type: 'text', value: s[kind + 'Url'] || '', placeholder: placeholders[kind], spellcheck: 'false' });
       const key = h('input', { type: 'password', value: '', placeholder: s[kind + 'Key'] ? 'Sparad – skriv en ny för att byta' : 'API-nyckel', autocomplete: 'off' });
       // Profil och rotmapp väljs med namn. Förslagen hämtas från Radarr/Sonarr.
       const profiles = h('datalist', { id: kind + '-profiles' });
       const roots = h('datalist', { id: kind + '-roots' });
       const profile = h('input', { type: 'text', value: s[kind + 'Profile'] || '', list: kind + '-profiles', spellcheck: 'false' });
-      const root = h('input', { type: 'text', value: s[kind + 'Root'] || '', list: kind + '-roots', spellcheck: 'false' });
+      const root = h('input', { type: 'text', value: s[kind + 'Root'] || '', list: kind + '-roots', spellcheck: 'false', placeholder: kind === 'radarr4k' ? 'Den enda mappen i Radarr 4K' : '' });
       const fill = (o) => {
         profiles.replaceChildren(...(o.profiles || []).map((n) => h('option', { value: n })));
         roots.replaceChildren(...(o.roots || []).map((n) => h('option', { value: n })));
@@ -443,14 +449,35 @@
           h('button', { class: 'btn small', onclick: async () => {
             await save({ [kind + 'Url']: url.value, [kind + 'Key']: key.value, [kind + 'Profile']: profile.value, [kind + 'Root']: root.value });
             JP.api('/api/arr/options/' + kind).then(fill).catch(() => {});
+            if (kind === 'radarr4k') JP.api('/api/status').then((st2) => { JP.status.uhd = st2.uhd; loadUhd(); }).catch(() => {});
             key.value = '';
             key.placeholder = 'Sparad – skriv en ny för att byta';
             state.textContent = 'Testar …';
             try { state.textContent = '✓ ' + (await JP.post('/api/arr/test/' + kind)).ok; } catch (e) { state.textContent = e.message; }
           } }, 'Spara och testa'),
-          s[kind + 'Key'] ? h('button', { class: 'btn ghost small', onclick: async () => { await save({ [kind + 'Url']: '', [kind + 'Key']: '-' }, label + ' borttagen'); url.value = ''; state.textContent = ''; } }, 'Ta bort') : null,
+          s[kind + 'Key'] ? h('button', { class: 'btn ghost small', onclick: async () => {
+            await save({ [kind + 'Url']: '', [kind + 'Key']: '-' }, label + ' borttagen');
+            url.value = '';
+            state.textContent = '';
+            if (kind === 'radarr4k') JP.status.uhd = false;
+          } }, 'Ta bort') : null,
           state));
     }
+    // Vilket Plex-bibliotek är 4K? Normalt det med 4K i namnet.
+    const uhdSel = h('select', null, h('option', { value: '' }, 'Automatiskt – biblioteket med 4K i namnet'));
+    const uhdNote = h('div', { class: 'dim small' });
+    async function loadUhd() {
+      try {
+        const r = await JP.api('/api/plex/sections');
+        uhdSel.replaceChildren(h('option', { value: '' }, 'Automatiskt – biblioteket med 4K i namnet'), ...r.sections.map((x) => h('option', { value: x.key }, x.title)));
+        uhdSel.value = (JP.status.settings && JP.status.settings.uhdSection) || '';
+        const used = r.sections.find((x) => x.key === r.uhd);
+        uhdNote.textContent = used ? `4K-önskemål räknas som klara när filmen finns i ${used.title}.` : 'Hittar inget 4K-bibliotek – välj vilket filmbibliotek som är 4K.';
+      } catch (e) { uhdNote.textContent = e.message; }
+    }
+    uhdSel.addEventListener('change', async () => { await save({ uhdSection: uhdSel.value }, '4K-biblioteket sparat'); loadUhd(); });
+    arrBox.append(field('4K-bibliotek i Plex', uhdSel), uhdNote);
+    loadUhd();
 
     const about = h('section', { class: 'card-box' }, h('h2', null, 'Om'),
       h('p', { class: 'dim' }, imdbLine),

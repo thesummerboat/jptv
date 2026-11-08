@@ -161,18 +161,25 @@ class Library:
         self.index_at = time.monotonic()
         self._section_cache.clear()
 
-    async def guid_map(self) -> dict[str, str]:
-        """Plex-guid -> nyckel för allt i biblioteket, även det som nyss lagts till (för önskemål)."""
+    async def guid_map(self, only: set[str] | None = None, skip: set[str] | None = None) -> dict[str, str]:
+        """Plex-guid -> nyckel för allt i biblioteket, även det som nyss lagts till (för önskemål).
+        only/skip: bara de här biblioteken, eller alla utom dem (4K-biblioteket för sig)."""
         await self.ensure_index(wait=5)
+
+        def wanted(key: str) -> bool:
+            return (only is None or key in only) and (skip is None or key not in skip)
+
         out: dict[str, str] = {}
-        for lst in self.items.values():
+        for sec_key, lst in self.items.items():
+            if not wanted(sec_key):
+                continue
             for i in lst:
                 if i.get("guid"):
                     out[i["guid"]] = i["key"]
                 # Samma titel med TMDB-nyckeln (önskemål från Upptäck).
                 if i.get("_tmdb") and i.get("type") in ("movie", "show"):
                     out.setdefault(f"tmdb://{'tv' if i['type'] == 'show' else 'movie'}/{i['_tmdb']}", i["key"])
-        sections = await self._safe(self.plex.sections())
+        sections = [s for s in await self._safe(self.plex.sections()) if wanted(s["key"])]
         recent = await asyncio.gather(*(self._safe(self.plex.recently_added(s["key"], 50)) for s in sections))
         for lst in recent:
             for i in lst:

@@ -85,6 +85,8 @@ async def status(request: web.Request):
             "hardware": c["live"].hw.status() if c["live"].hw else None,
             "imdb": imdb.RATINGS.status(),
             "requests": c["wishes"].pending(),
+            # Önska i 4K: en andra Radarr för 4K-biblioteket är inställd.
+            "uhd": arr_for(c, "movie", uhd=True).configured,
             "settings": settings_public(c),
         }
     )
@@ -108,6 +110,12 @@ def settings_public(c: dict) -> dict:
         "sonarrKey": bool(st.get("sonarr_key")),
         "sonarrRoot": st.get("sonarr_root", "") or ARR_DEFAULTS["sonarr"]["root"],
         "sonarrProfile": st.get("sonarr_profile", "") or ARR_DEFAULTS["sonarr"]["profile"],
+        "radarr4kUrl": st.get("radarr4k_url", ""),
+        "radarr4kKey": bool(st.get("radarr4k_key")),
+        "radarr4kRoot": st.get("radarr4k_root", ""),
+        "radarr4kProfile": st.get("radarr4k_profile", "") or ARR_DEFAULTS["radarr4k"]["profile"],
+        # Plex-biblioteket där 4K-filmerna ligger ("" = det som har 4K i namnet).
+        "uhdSection": st.get("uhd_section", ""),
         "tmdbKey": bool(st.get("tmdb_key")),
         "youtubeMaxHeight": int(st.get("youtube_max_height", 1080) or 1080),
         "youtubeShorts": bool(st.get("youtube_shorts", False)),
@@ -126,7 +134,7 @@ async def save_settings(request: web.Request):
         changes["live_transcode"] = b["liveTranscode"]
     if b.get("liveDeinterlace") in ("auto", "off"):
         changes["live_deinterlace"] = b["liveDeinterlace"]
-    for kind in ("radarr", "sonarr"):
+    for kind in ("radarr", "sonarr", "radarr4k"):
         if f"{kind}Url" in b:
             changes[f"{kind}_url"] = str(b[f"{kind}Url"] or "").strip()
         for field in ("Root", "Profile"):
@@ -144,6 +152,8 @@ async def save_settings(request: web.Request):
         changes["tmdb_key"] = ""
     elif tkey:
         changes["tmdb_key"] = tkey
+    if "uhdSection" in b:
+        changes["uhd_section"] = str(b["uhdSection"] or "").strip()
     if "themeLevel" in b:
         changes["theme_level"] = max(0, min(int(b["themeLevel"]), 2))
     if "youtubeMaxHeight" in b and int(b["youtubeMaxHeight"]) in (480, 720, 1080):
@@ -431,13 +441,44 @@ async def deck_remove(request: web.Request):
 # ------------------------------------------------------------------ önskemål
 
 
-def arr_for(c: dict, typ: str) -> Arr:
+def arr_for(c: dict, typ: str, uhd: bool = False) -> Arr:
+    """Radarr (filmer), Sonarr (serier) eller Radarr 4K (filmer önskade i 4K)."""
     kind = "sonarr" if typ == "show" else "radarr"
+    prefix = "radarr4k" if uhd and kind == "radarr" else kind
     st = c["store"]
     return Arr(
-        c["http"], kind, st.get(f"{kind}_url", ""), st.get(f"{kind}_key", ""),
-        root=st.get(f"{kind}_root", ""), profile=st.get(f"{kind}_profile", ""),
+        c["http"], kind, st.get(f"{prefix}_url", ""), st.get(f"{prefix}_key", ""),
+        root=st.get(f"{prefix}_root", ""), profile=st.get(f"{prefix}_profile", ""), uhd=prefix == "radarr4k",
     )
+
+
+UHD_NAME = re.compile(r"4k|uhd|2160", re.I)
+
+
+async def uhd_section(c: dict) -> str | None:
+    """Plex-biblioteket för 4K-filmer: det som är valt, annars ett filmbibliotek med 4K i namnet."""
+    try:
+        sections = [s for s in await c["plex"].sections() if s.get("type") == "movie"]
+    except PlexError:
+        return None
+    chosen = c["store"].get("uhd_section", "")
+    if chosen:
+        return chosen if any(s["key"] == chosen for s in sections) else None
+    return next((s["key"] for s in sections if UHD_NAME.search(s.get("title", ""))), None)
+
+
+async def wish_maps(c: dict) -> tuple[dict, dict | None]:
+    """(guid -> nyckel utanför 4K-biblioteket, guid -> nyckel i 4K-biblioteket). Utan Radarr 4K
+    eller 4K-bibliotek är den andra None och den första gäller hela Plex, som förut."""
+    sec = await uhd_section(c) if arr_for(c, "movie", uhd=True).configured else None
+    if not sec:
+        return await c["library"].guid_map(), None
+    hd, uhd = await asyncio.gather(c["library"].guid_map(skip={sec}), c["library"].guid_map(only={sec}))
+    return hd, uhd
+
+
+def _request_info(w: dict | None) -> dict | None:
+    return {"id": w["id"], "status": w["status"]} if w else None
 
 
 @routes.get("/api/discover")
@@ -447,11 +488,14 @@ async def discover(request: web.Request):
     q = request.query.get("q", "").strip()
     if not q:
         return web.json_response({"results": []})
-    found, library = await asyncio.gather(c["plex"].discover(q), c["library"].guid_map())
+    found, (hd, uhd) = await asyncio.gather(c["plex"].discover(q), wish_maps(c))
     out = []
     for i in found:
-        w = c["wishes"].find(i["guid"])
-        out.append(i | {"libraryKey": library.get(i["guid"]), "request": {"id": w["id"], "status": w["status"]} if w else None})
+        g = i["guid"]
+        extra = {"libraryKey": hd.get(g) or (uhd or {}).get(g), "hdKey": hd.get(g), "request": _request_info(c["wishes"].find(g))}
+        if uhd is not None and i.get("type") == "movie":
+            extra |= {"uhdKey": uhd.get(g), "requestUhd": _request_info(c["wishes"].find(g, uhd=True))}
+        out.append(i | extra)
     return web.json_response({"results": out})
 
 
@@ -462,15 +506,18 @@ def _tmdb_error(e: TmdbError) -> web.Response:
     return web.json_response({"error": str(e)}, status=e.status if e.status in (400, 401, 404, 429) else 502)
 
 
-async def _annotate(c: dict, items: list[dict], library: dict | None = None) -> list[dict]:
-    """Finns i Plex? Önskad? (samma nyckel tmdb://movie/603 i biblioteket och önskemålen)."""
-    if library is None:
-        library = await c["library"].guid_map()
+async def _annotate(c: dict, items: list[dict], maps: tuple[dict, dict | None] | None = None) -> list[dict]:
+    """Finns i Plex? Önskad? (samma nyckel tmdb://movie/603 i biblioteket och önskemålen).
+    Med Radarr 4K också: finns i 4K-biblioteket? önskad i 4K?"""
+    hd, uhd = maps if maps is not None else await wish_maps(c)
     for it in items:
         g = tmdb_guid(it["type"], it["tmdb"])
-        it["libraryKey"] = library.get(g)
-        w = c["wishes"].find(g)
-        it["request"] = {"id": w["id"], "status": w["status"]} if w else None
+        it["hdKey"] = hd.get(g)
+        it["libraryKey"] = hd.get(g) or (uhd or {}).get(g)
+        it["request"] = _request_info(c["wishes"].find(g))
+        if uhd is not None and it["type"] == "movie":
+            it["uhdKey"] = uhd.get(g)
+            it["requestUhd"] = _request_info(c["wishes"].find(g, uhd=True))
     return items
 
 
@@ -478,12 +525,12 @@ async def _annotate(c: dict, items: list[dict], library: dict | None = None) -> 
 async def tmdb_home(request: web.Request):
     c = ctx(request)
     try:
-        rows, library = await asyncio.gather(c["tmdb"].home(), c["library"].guid_map())
+        rows, maps = await asyncio.gather(c["tmdb"].home(), wish_maps(c))
     except TmdbError as e:
         return _tmdb_error(e)
     for r in rows:
         if r["kind"] == "titles":
-            await _annotate(c, r["items"], library)
+            await _annotate(c, r["items"], maps)
     try:
         recent = await c["library"].recent_all(20)
     except Exception:
@@ -517,8 +564,7 @@ async def tmdb_title(request: web.Request):
         t = await c["tmdb"].title(kind, int(request.match_info["id"]))
     except TmdbError as e:
         return _tmdb_error(e)
-    library = await c["library"].guid_map()
-    await _annotate(c, [t] + t["recommendations"] + t["similar"], library)
+    await _annotate(c, [t] + t["recommendations"] + t["similar"], await wish_maps(c))
     return web.json_response(t)
 
 
@@ -575,7 +621,7 @@ async def requests_list(request: web.Request):
     c = ctx(request)
     if any(w["status"] in ("pending", "approved") for w in c["wishes"].items):
         try:
-            c["wishes"].mark_available(await c["library"].guid_map())
+            c["wishes"].mark_available(*await wish_maps(c))
         except Exception:
             pass
     return web.json_response(
@@ -584,6 +630,7 @@ async def requests_list(request: web.Request):
             "pending": c["wishes"].pending(),
             "radarr": arr_for(c, "movie").configured,
             "sonarr": arr_for(c, "show").configured,
+            "radarr4k": arr_for(c, "movie", uhd=True).configured,
         }
     )
 
@@ -602,9 +649,15 @@ async def requests_add(request: web.Request):
                 b["ids"] = {"tmdb": int(b["tmdb"])}
     if not b.get("guid") or not b.get("title"):
         raise web.HTTPBadRequest(text="Titel saknas")
-    library = await c["library"].guid_map()
-    if b["guid"] in library:
-        return web.json_response({"error": "Finns redan i Plex", "libraryKey": library[b["guid"]]}, status=409)
+    hd, uhd = await wish_maps(c)
+    b["uhd"] = bool(b.get("uhd")) and b.get("type") != "show"
+    if b["uhd"]:
+        if uhd is None:
+            return web.json_response({"error": "4K-önskemål kräver Radarr 4K och ett 4K-bibliotek i Plex"}, status=400)
+        if b["guid"] in uhd:
+            return web.json_response({"error": "Finns redan i 4K", "libraryKey": uhd[b["guid"]]}, status=409)
+    elif b["guid"] in hd:
+        return web.json_response({"error": "Finns redan i Plex", "libraryKey": hd[b["guid"]]}, status=409)
     w, new = c["wishes"].add(b, str(b.get("by") or ""))
     return web.json_response({"request": w, "new": new})
 
@@ -615,7 +668,7 @@ async def requests_approve(request: web.Request):
     w = c["wishes"].get(request.match_info["id"])
     if not w:
         raise web.HTTPNotFound()
-    arr = arr_for(c, w["type"])
+    arr = arr_for(c, w["type"], uhd=bool(w.get("uhd")))
     note, extra = None, {}
     if arr.configured:
         try:
@@ -663,16 +716,17 @@ async def requests_arr(request: web.Request):
     """Radarrs och Sonarrs status för godkända önskemål: söker, laddar ner, fastnat, väntar på release …"""
     c = ctx(request)
 
-    async def kind(typ: str) -> dict:
-        arr = arr_for(c, typ)
-        wishes = [w for w in c["wishes"].items if w["status"] == "approved" and w["type"] == typ]
+    async def kind(typ: str, uhd: bool = False) -> dict:
+        arr = arr_for(c, typ, uhd=uhd)
+        wishes = [w for w in c["wishes"].items
+                  if w["status"] == "approved" and w["type"] == typ and bool(w.get("uhd")) == uhd]
         if not wishes or not arr.configured:
             return {}
         ids = await asyncio.gather(*(_wish_ids(c, w) for w in wishes))
         return await arr.statuses([(w["id"], w, i) for w, i in zip(wishes, ids)])
 
-    movies, shows = await asyncio.gather(kind("movie"), kind("show"))
-    return web.json_response({"items": movies | shows})
+    movies, movies_4k, shows = await asyncio.gather(kind("movie"), kind("movie", uhd=True), kind("show"))
+    return web.json_response({"items": movies | movies_4k | shows})
 
 
 async def _arr_action(request: web.Request, action: str):
@@ -680,7 +734,7 @@ async def _arr_action(request: web.Request, action: str):
     w = c["wishes"].get(request.match_info["id"])
     if not w:
         raise web.HTTPNotFound()
-    arr = arr_for(c, w["type"])
+    arr = arr_for(c, w["type"], uhd=bool(w.get("uhd")))
     if not arr.configured:
         return web.json_response({"error": f"{arr.name} är inte inställd"}, status=400)
     try:
@@ -746,11 +800,27 @@ async def library_scan_status(request: web.Request):
     return web.json_response({"scanning": busy})
 
 
+def _arr_by_kind(c: dict, kind: str) -> Arr:
+    """radarr, sonarr eller radarr4k (Inställningar)."""
+    return arr_for(c, "show" if kind == "sonarr" else "movie", uhd=kind == "radarr4k")
+
+
+@routes.get("/api/plex/sections")
+async def plex_sections(request: web.Request):
+    """Filmbiblioteken i Plex och vilket som räknas som 4K (val under Inställningar → Önskemål)."""
+    c = ctx(request)
+    try:
+        sections = [{"key": s["key"], "title": s["title"]} for s in await c["plex"].sections() if s.get("type") == "movie"]
+    except PlexError as e:
+        return web.json_response({"error": str(e), "sections": [], "uhd": None})
+    return web.json_response({"sections": sections, "uhd": await uhd_section(c)})
+
+
 @routes.get("/api/arr/options/{kind}")
 async def arr_options(request: web.Request):
     """Kvalitetsprofiler och rotmappar som finns i Radarr/Sonarr (förslag under Inställningar)."""
     c = ctx(request)
-    arr = arr_for(c, "show" if request.match_info["kind"] == "sonarr" else "movie")
+    arr = _arr_by_kind(c, request.match_info["kind"])
     if not arr.configured:
         return web.json_response({"profiles": [], "roots": [], "profile": arr.profile, "root": arr.root})
     try:
@@ -762,7 +832,7 @@ async def arr_options(request: web.Request):
 @routes.post("/api/arr/test/{kind}")
 async def arr_test(request: web.Request):
     c = ctx(request)
-    arr = arr_for(c, "show" if request.match_info["kind"] == "sonarr" else "movie")
+    arr = _arr_by_kind(c, request.match_info["kind"])
     if not arr.configured:
         return web.json_response({"error": f"Fyll i adress och API-nyckel för {arr.name}"}, status=400)
     try:
@@ -777,7 +847,7 @@ async def watch_wishes(c: dict) -> None:
         await asyncio.sleep(300)
         try:
             if any(w["status"] in ("pending", "approved") for w in c["wishes"].items) and c["store"].get("server"):
-                done = c["wishes"].mark_available(await c["library"].guid_map())
+                done = c["wishes"].mark_available(*await wish_maps(c))
                 if done:
                     c["library"].invalidate()
         except Exception:

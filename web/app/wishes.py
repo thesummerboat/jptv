@@ -29,12 +29,13 @@ class Wishes:
             json.dump(self.items, f, ensure_ascii=False, indent=1)
         os.replace(tmp, self.path)
 
-    def find(self, guid: str | None) -> dict | None:
-        """Senaste önskemålet för titeln (nekade räknas inte, då får man önska igen)."""
+    def find(self, guid: str | None, uhd: bool = False) -> dict | None:
+        """Senaste önskemålet för titeln (nekade räknas inte, då får man önska igen).
+        uhd: önskemålet om 4K-versionen, som är ett eget önskemål bredvid det vanliga."""
         if not guid:
             return None
         for w in reversed(self.items):
-            if w.get("guid") == guid and w.get("status") != "declined":
+            if w.get("guid") == guid and bool(w.get("uhd")) == uhd and w.get("status") != "declined":
                 return w
         return None
 
@@ -43,8 +44,10 @@ class Wishes:
 
     def add(self, item: dict, by: str) -> tuple[dict, bool]:
         """Nytt önskemål, eller det som redan finns för titeln. Returnerar (önskemål, nytt?)."""
+        kind = item.get("type") if item.get("type") in ("movie", "show") else "movie"
+        uhd = bool(item.get("uhd")) and kind == "movie"
         with self._lock:
-            existing = self.find(item.get("guid"))
+            existing = self.find(item.get("guid"), uhd)
             if existing:
                 if by and by not in existing.get("also", []) and by != existing.get("by"):
                     existing.setdefault("also", []).append(by)
@@ -54,7 +57,9 @@ class Wishes:
                 "id": uuid.uuid4().hex[:10],
                 "guid": item.get("guid"),
                 "key": item.get("key"),
-                "type": item.get("type") if item.get("type") in ("movie", "show") else "movie",
+                "type": kind,
+                # 4K: skickas till Radarr 4K och räknas som klar när den finns i 4K-biblioteket.
+                "uhd": uhd,
                 "title": str(item.get("title") or "")[:200],
                 "year": item.get("year"),
                 "summary": (item.get("summary") or "")[:600] or None,
@@ -98,14 +103,18 @@ class Wishes:
     def pending(self) -> int:
         return sum(1 for w in self.items if w["status"] == "pending")
 
-    def mark_available(self, library: dict[str, str]) -> list[dict]:
-        """library: Plex-guid -> titelns nyckel i Plex. Önskemål som dykt upp markeras som Finns nu."""
+    def mark_available(self, library: dict[str, str], uhd_library: dict[str, str] | None = None) -> list[dict]:
+        """library: Plex-guid -> titelns nyckel i Plex (utom 4K-biblioteket). uhd_library: samma för
+        4K-biblioteket, där 4K-önskemålen ska dyka upp. Önskemål som dykt upp markeras som Finns nu."""
         done = []
         with self._lock:
             for w in self.items:
-                if w["status"] in ("pending", "approved") and w.get("guid") in library:
+                lib = uhd_library if w.get("uhd") else library
+                if lib is None:
+                    continue
+                if w["status"] in ("pending", "approved") and w.get("guid") in lib:
                     w["status"] = "available"
-                    w["libraryKey"] = library[w["guid"]]
+                    w["libraryKey"] = lib[w["guid"]]
                     w["handledAt"] = int(time.time() * 1000)
                     done.append(w)
             if done:

@@ -30,25 +30,45 @@
     return m;
   }
 
-  /** Dialog för en titel ur Plex katalog: önska, eller visa hur det gått. */
+  /** Kan titeln önskas (inget önskemål, eller ett nekat)? */
+  const open = (r) => !r || r.status === 'declined';
+
+  /**
+   * Dialog för en titel (Plex katalog eller Upptäck): önska, eller visa hur det gått. Med Radarr 4K
+   * går filmer också att önska i 4K; det är ett eget önskemål bredvid det vanliga.
+   */
   JP.wishDialog = function (item, onDone) {
     const nameInput = h('input', { type: 'text', value: JP.wisher(), placeholder: 'Ditt namn', maxlength: '40', autocomplete: 'given-name' });
-    const status = item.request ? h('div', { class: 'wish-status ' + item.request.status }, STATUS[item.request.status] || item.request.status) : null;
+    const uhdOn = !!(JP.status && JP.status.uhd) && item.type === 'movie';
+    // hdKey: finns utanför 4K-biblioteket (äldre svar har bara libraryKey).
+    const hdKey = 'hdKey' in item ? item.hdKey : item.libraryKey;
+    const canHd = !hdKey && open(item.request);
+    const canUhd = uhdOn && !item.uhdKey && open(item.requestUhd);
+    const statuses = [
+      item.request && item.request.status !== 'declined' ? h('div', { class: 'wish-status ' + item.request.status }, STATUS[item.request.status] || item.request.status) : null,
+      uhdOn && item.requestUhd && item.requestUhd.status !== 'declined' ? h('div', { class: 'wish-status ' + item.requestUhd.status }, '4K: ' + (STATUS[item.requestUhd.status] || item.requestUhd.status)) : null,
+      uhdOn && item.uhdKey ? h('div', { class: 'wish-status available' }, 'Finns i 4K') : null,
+    ];
     const actions = h('div', { class: 'actions' });
     let m;
-    if (item.libraryKey) {
-      actions.append(h('a', { class: 'btn primary', href: item.type === 'show' ? '#/show/' + item.libraryKey : '#/item/' + item.libraryKey, onclick: () => closeModal(m) }, JP.icon('play'), 'Finns i Plex – öppna'));
-    } else if (!item.request || item.request.status === 'declined') {
-      const go = h('button', { class: 'btn primary' }, JP.icon('star'), item.type === 'show' ? 'Önska serien' : 'Önska filmen');
+    const openKey = hdKey || item.uhdKey || item.libraryKey;
+    if (openKey) {
+      actions.append(h('a', { class: 'btn' + (canHd || canUhd ? '' : ' primary'), href: (item.type === 'show' ? '#/show/' : '#/item/') + openKey, onclick: () => closeModal(m) },
+        JP.icon('play'), hdKey ? 'Finns i Plex – öppna' : 'Finns i 4K – öppna'));
+    }
+    const wishButton = (uhd, primary) => {
+      const label = uhd ? 'Önska i 4K' : item.type === 'show' ? 'Önska serien' : 'Önska filmen';
+      const go = h('button', { class: 'btn' + (primary ? ' primary' : ''), title: uhd ? 'Skickas till Radarr 4K och hamnar i 4K-biblioteket' : null }, JP.icon('star'), label);
       go.addEventListener('click', async () => {
         const by = nameInput.value.trim();
         if (!by) { nameInput.focus(); JP.toast('Skriv ditt namn först'); return; }
         JP.store.set('name', by);
         go.disabled = true;
         try {
-          const r = await JP.post('/api/requests', Object.assign({}, item, { by }));
-          item.request = { id: r.request.id, status: r.request.status };
-          JP.toast(r.new ? `${item.title} är önskad` : `${item.title} var redan önskad – du står med`);
+          const r = await JP.post('/api/requests', Object.assign({}, item, { by, uhd }));
+          item[uhd ? 'requestUhd' : 'request'] = { id: r.request.id, status: r.request.status };
+          const what = item.title + (uhd ? ' i 4K' : '');
+          JP.toast(r.new ? `${what} är önskad` : `${what} var redan önskad – du står med`);
           closeModal(m);
           JP.refreshBadge();
           if (onDone) onDone(item);
@@ -57,8 +77,10 @@
           JP.toast(e.message);
         }
       });
-      actions.append(go);
-    }
+      return go;
+    };
+    if (canHd) actions.append(wishButton(false, true));
+    if (canUhd) actions.append(wishButton(true, !canHd));
     actions.append(h('button', { class: 'btn ghost', onclick: () => closeModal(m) }, 'Stäng'));
     m = modal(
       h('div', { class: 'wish-dialog' },
@@ -66,10 +88,9 @@
         h('div', { class: 'wish-text' },
           h('div', { class: 'dim small' }, item.type === 'show' ? 'Serie' : 'Film'),
           h('h2', null, item.title, item.year ? h('span', { class: 'dim' }, ` (${item.year})`) : null),
-          status,
+          ...statuses.filter(Boolean),
           item.summary ? h('p', { class: 'summary' }, item.summary) : null,
-          !item.libraryKey && (!item.request || item.request.status === 'declined')
-            ? h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Vem önskar?'), nameInput) : null,
+          canHd || canUhd ? h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Vem önskar?'), nameInput) : null,
           actions)));
   };
 
@@ -77,7 +98,8 @@
     const art = h('div', { class: 'card-art' },
       item.thumb ? h('img', { src: poster(item.thumb), alt: '', loading: 'lazy', onerror: (e) => e.target.remove() }) : h('div', { class: 'card-fallback' }, item.title));
     if (item.request) art.append(h('span', { class: 'card-label wish-' + item.request.status }, STATUS[item.request.status]));
-    else if (item.libraryKey) art.append(h('span', { class: 'card-label' }, 'Finns i Plex'));
+    else if (item.libraryKey) art.append(h('span', { class: 'card-label' }, item.hdKey === null && item.uhdKey ? 'Finns i 4K' : 'Finns i Plex'));
+    else if (item.requestUhd) art.append(h('span', { class: 'card-label wish-' + item.requestUhd.status }, '4K: ' + STATUS[item.requestUhd.status]));
     else art.append(h('span', { class: 'card-wish' }, JP.icon('star'), 'Önska'));
     return h('button', { class: 'card in-grid wish-card', onclick: () => JP.wishDialog(item, refresh) },
       art,
@@ -348,7 +370,8 @@
       return h('div', { class: 'wish-row ' + w.status },
         h('div', { class: 'wish-thumb' }, w.thumb ? h('img', { src: poster(w.thumb, 120, 180), alt: '', loading: 'lazy' }) : null),
         h('div', { class: 'wish-info' },
-          h('div', { class: 'wish-title' }, w.title, w.year ? h('span', { class: 'dim' }, ` (${w.year})`) : null, h('span', { class: 'wish-type' }, w.type === 'show' ? 'Serie' : 'Film')),
+          h('div', { class: 'wish-title' }, w.title, w.year ? h('span', { class: 'dim' }, ` (${w.year})`) : null, h('span', { class: 'wish-type' }, w.type === 'show' ? 'Serie' : 'Film'),
+            w.uhd ? h('span', { class: 'wish-type uhd', title: 'Önskad i 4K – skickas till Radarr 4K' }, '4K') : null),
           h('div', { class: 'dim small' }, `Önskad av ${who} · ${ago(w.at)}`),
           info,
           w.error ? h('div', { class: 'small err' }, w.error) : null),
