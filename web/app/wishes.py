@@ -78,6 +78,28 @@ class Wishes:
             self._save()
             return w, True
 
+    def open_report(self, key: str) -> dict | None:
+        """En anmälan för samma Plex-titel som fortfarande pågår."""
+        return next((w for w in reversed(self.items)
+                     if w.get("kind") == "report" and w.get("key") == key and w["status"] == "approved"), None)
+
+    def add_report(self, report: dict, by: str) -> dict:
+        """Anmält problem (fel språk m.m.) som laddas ner igen: syns bland de godkända önskemålen."""
+        with self._lock:
+            w = {
+                "id": uuid.uuid4().hex[:10],
+                "kind": "report",
+                "guid": None,
+                "at": int(time.time() * 1000),
+                "by": (by or "Någon")[:40],
+                "status": "approved",
+                "handledAt": int(time.time() * 1000),
+                "error": None,
+            } | report
+            self.items.append(w)
+            self._save()
+            return w
+
     def update(self, wid: str, **changes) -> dict | None:
         with self._lock:
             w = self.get(wid)

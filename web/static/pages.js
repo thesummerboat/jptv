@@ -130,6 +130,10 @@
     actions.append(h('button', { class: 'btn', onclick: (e) => toggleWatched(item, e.currentTarget) }, JP.icon('check'), item.watched ? 'Markera som osedd' : 'Markera som sedd'));
     if (resume) actions.append(h('button', { class: 'btn ghost', onclick: async () => { await JP.post('/api/deck/remove/' + item.key); JP.toast('Borttagen från Fortsätt titta'); JP.invalidate(); } }, 'Ta bort från Fortsätt titta'));
     if (isEp && item.showKey) actions.append(h('a', { class: 'btn ghost', href: '#/show/' + item.showKey + (item.seasonKey ? '?season=' + item.seasonKey : '') }, 'Till serien'));
+    // Fel språk, dålig fil …: Radarr/Sonarr tar bort den och laddar ner en annan.
+    if (JP.canReport && JP.canReport(item)) {
+      actions.append(h('button', { class: 'btn ghost', title: 'Fel språk, dålig bild … – ladda ner en annan version', onclick: () => JP.reportDialog(item) }, JP.icon('flag'), 'Anmäl'));
+    }
 
     const body = h('div', { class: 'details-body' },
       titleBlock(item, title),

@@ -726,7 +726,88 @@ async def requests_arr(request: web.Request):
         return await arr.statuses([(w["id"], w, i) for w, i in zip(wishes, ids)])
 
     movies, movies_4k, shows = await asyncio.gather(kind("movie"), kind("movie", uhd=True), kind("show"))
-    return web.json_response({"items": movies | movies_4k | shows})
+    items = movies | movies_4k | shows
+    # Anmälningar är klara när filen finns igen.
+    for w in list(c["wishes"].items):
+        if w.get("kind") == "report" and w["status"] == "approved" and (items.get(w["id"]) or {}).get("state") == "done":
+            c["wishes"].update(w["id"], status="available", note=f"{w.get('reason') or 'Anmäld'} – nedladdad igen",
+                               libraryKey=w.get("showKey") or w.get("key"))
+    return web.json_response({"items": items})
+
+
+REPORT_REASONS = {
+    "language": "Fel språk",
+    "quality": "Dålig bild eller ljud",
+    "wrong": "Fel film eller avsnitt",
+    "broken": "Går inte att spela",
+    "other": "Annat",
+}
+
+
+@routes.post("/api/report")
+async def report_problem(request: web.Request):
+    """
+    Anmäl en film eller ett avsnitt (fel språk, trasig fil …): släppet svartlistas, filen tas bort
+    och Radarr/Sonarr letar efter ett annat. Anmälan syns bland önskemålen med status.
+    """
+    c = ctx(request)
+    b = await body(request)
+    key = str(b.get("key") or "").strip()
+    reason = REPORT_REASONS.get(str(b.get("reason") or ""), REPORT_REASONS["other"])
+    if not key.isdigit():
+        raise web.HTTPBadRequest(text="Titel saknas")
+    try:
+        item = await c["plex"].metadata(key)
+    except PlexError as e:
+        return web.json_response({"error": str(e)}, status=502)
+    if not item:
+        raise web.HTTPNotFound()
+    if item["type"] not in ("movie", "episode"):
+        return web.json_response({"error": "Bara filmer och avsnitt kan anmälas"}, status=400)
+    existing = c["wishes"].open_report(key)
+    if existing:
+        return web.json_response({"ok": "Redan anmäld – laddas ner igen", "request": existing})
+    episode = item["type"] == "episode"
+    # En film i 4K-biblioteket hör till Radarr 4K.
+    uhd = False
+    if not episode and item.get("section") and arr_for(c, "movie", uhd=True).configured:
+        uhd = item["section"] == await uhd_section(c)
+    arr = arr_for(c, "show" if episode else "movie", uhd=uhd)
+    if not arr.configured:
+        return web.json_response({"error": f"Lägg in {arr.name} under Inställningar för att kunna ladda ner igen"}, status=400)
+    season = number = None
+    if episode:
+        season, number = item.get("season"), item.get("episode")
+        if season is None or number is None:
+            return web.json_response({"error": "Avsnittet saknar säsong eller nummer i Plex"}, status=400)
+        target = {"title": item.get("show") or "", "year": None, "episode": {"season": season, "number": number, "title": item["title"]}}
+    else:
+        target = {"title": item["title"], "year": item.get("year")}
+    try:
+        ids = await c["plex"].local_ids(item["showKey"] if episode else key)
+        note = await arr.redownload(target, ids, season, number)
+    except PlexError as e:
+        return web.json_response({"error": str(e)}, status=502)
+    except ArrError as e:
+        return web.json_response({"error": str(e)}, status=502)
+    title = f"{item.get('show')} · S{season:02d}E{number:02d}" if episode else item["title"]
+    w = c["wishes"].add_report({
+        "key": key,
+        "type": "show" if episode else "movie",
+        "title": title,
+        "year": None if episode else item.get("year"),
+        "summary": None,
+        "thumb": item.get("thumb"),
+        "art": item.get("art"),
+        "tmdb": None,
+        "ids": _clean_ids(ids) or None,
+        "uhd": uhd,
+        "episode": target.get("episode"),
+        "reason": reason,
+        "showKey": item.get("showKey"),
+        "note": f"{reason} – {note}",
+    }, str(b.get("by") or ""))
+    return web.json_response({"ok": note, "request": w})
 
 
 async def _arr_action(request: web.Request, action: str):

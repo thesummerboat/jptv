@@ -443,6 +443,18 @@ class Plex:
                 ids[scheme] = value
         return ids
 
+    async def local_ids(self, key: str) -> dict:
+        """TMDB-, IMDb- och TVDB-id för en titel i det egna biblioteket (det Radarr och Sonarr känner igen)."""
+        raw = metadata_list(await self.get(f"/library/metadata/{key}", {"includeGuids": 1}))
+        ids = {}
+        for g in (raw[0] if raw else {}).get("Guid") or []:
+            gid = str(g.get("id") or "")
+            if "://" in gid:
+                scheme, value = gid.split("://", 1)
+                if scheme in ("tmdb", "imdb", "tvdb") and value:
+                    ids[scheme] = value
+        return ids
+
     async def sections(self) -> list[dict]:
         mc = await self.get("/library/sections", cache=60)
         return [

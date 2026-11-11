@@ -215,6 +215,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Anmäl filen som spelas (fel språk m.m.): JPTV Web låter Radarr/Sonarr ta bort den och ladda ner
+     * en annan version. reason: ett id ur REPORT_REASONS. Svarar med texten från JPTV Web, eller felet.
+     */
+    suspend fun reportProblem(ratingKey: String, reason: String): Result<String> =
+        try {
+            if (webBase() == null) throw java.io.IOException("JPTV Web på Unraid hittades inte")
+            Result.success(web.report(ratingKey, reason, wisherName))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+
     /** Skickar ett önskemål (uhd: i 4K). Returnerar titeln med ny status, eller felet. */
     suspend fun wish(item: se.jptv.web.WishItem, by: String = wisherName, uhd: Boolean = false): Result<se.jptv.web.WishItem> =
         try {

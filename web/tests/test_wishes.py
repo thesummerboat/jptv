@@ -25,6 +25,8 @@ def fake_arr(kind: str, log: list, state: dict | None = None) -> web.Application
     state.setdefault("title", {})
     state.setdefault("queue", [])
     state.setdefault("commands", [])
+    state.setdefault("history", [])
+    state.setdefault("episodes", [])
     state["added"] = added
 
     def record(key):
@@ -120,6 +122,40 @@ def fake_arr(kind: str, log: list, state: dict | None = None) -> web.Application
         auth(req)
         return web.json_response(state["commands"])
 
+    async def history(req):
+        auth(req)
+        out = state["history"]
+        if "seasonNumber" in req.query:
+            out = [h for h in out if h.get("seasonNumber", int(req.query["seasonNumber"])) == int(req.query["seasonNumber"])]
+        return web.json_response(out)
+
+    async def mark_failed(req):
+        auth(req)
+        log.append({"failed": int(req.match_info["id"])})
+        return web.json_response({})
+
+    async def delete_file(req):
+        auth(req)
+        log.append({"deleteFile": int(req.match_info["id"])})
+        return web.Response(status=200)
+
+    async def episodes(req):
+        auth(req)
+        season = int(req.query.get("seasonNumber", "0"))
+        return web.json_response([e for e in state["episodes"] if e.get("seasonNumber") == season])
+
+    async def episode_monitor(req):
+        auth(req)
+        log.append({"monitorEpisodes": await req.json()})
+        return web.json_response([])
+
+    app.router.add_get("/api/v3/history/movie", history)
+    app.router.add_get("/api/v3/history/series", history)
+    app.router.add_post("/api/v3/history/failed/{id}", mark_failed)
+    app.router.add_delete("/api/v3/moviefile/{id}", delete_file)
+    app.router.add_delete("/api/v3/episodefile/{id}", delete_file)
+    app.router.add_get("/api/v3/episode", episodes)
+    app.router.add_put("/api/v3/episode/monitor", episode_monitor)
     app.router.add_get("/api/v3/movie", library)
     app.router.add_get("/api/v3/series", library)
     app.router.add_get("/api/v3/queue/details", queue)
@@ -474,6 +510,91 @@ class WishesTest(unittest.IsolatedAsyncioTestCase):
                 del fake_plex.items["uhd1"]
                 fake_plex.order.remove("uhd1")
             await radarr4k.close()
+
+    async def test_report_redownload(self):
+        """Anmäl: fel språk → släppet svartlistas, filen tas bort, Radarr/Sonarr letar efter ett annat."""
+        movie_key = next(k for k in fake_plex.order if fake_plex.items[k]["type"] == "movie")
+        show_key = next(k for k in fake_plex.order if fake_plex.items[k]["type"] == "show")
+        ep_key = next(k for k, v in fake_plex.items.items()
+                      if v["type"] == "episode" and v.get("grandparentRatingKey") == show_key and v["parentIndex"] == 1 and v["index"] == 2)
+        show_title = fake_plex.items[show_key]["title"]
+
+        # Utan Radarr går det inte.
+        err = await self.post("/api/report", {"key": movie_key, "reason": "language"}, status=400)
+        self.assertIn("Radarr", err["error"])
+        await self.post("/api/settings", {
+            "radarrUrl": f"127.0.0.1:{self.radarr.port}", "radarrKey": "nyckel",
+            "sonarrUrl": f"127.0.0.1:{self.sonarr.port}", "sonarrKey": "nyckel",
+        })
+        # Serier och säsonger anmäls inte som helhet.
+        await self.post("/api/report", {"key": show_key, "reason": "language"}, status=400)
+
+        # Filmen (TMDB 500) finns i Radarr med en tysk fil.
+        self.radarr_state["added"].add(500)
+        self.radarr_state["title"] = {"hasFile": True, "movieFile": {"id": 77}}
+        self.radarr_state["history"] = [
+            {"id": 4, "eventType": "grabbed", "date": "2026-10-01T10:00:00Z", "sourceTitle": "Gammal.1080p"},
+            {"id": 5, "eventType": "grabbed", "date": "2026-11-01T10:00:00Z", "sourceTitle": "Film.GERMAN.1080p"},
+            {"id": 6, "eventType": "downloadFolderImported", "date": "2026-11-01T11:00:00Z"},
+        ]
+        ok = await self.post("/api/report", {"key": movie_key, "reason": "language", "by": "Jonas"})
+        self.assertIn("svartlistat", ok["ok"])
+        self.assertIn({"failed": 5}, self.radarr_log)
+        self.assertNotIn({"failed": 4}, self.radarr_log)
+        self.assertIn({"deleteFile": 77}, self.radarr_log)
+        self.assertEqual(self.radarr_log[-1], {"command": {"name": "MoviesSearch", "movieIds": [9]}})
+        rep = ok["request"]
+        self.assertEqual((rep["kind"], rep["status"], rep["reason"], rep["type"]), ("report", "approved", "Fel språk", "movie"))
+        self.assertTrue(rep["note"].startswith("Fel språk – "))
+        # Samma titel igen medan den laddas ner: ingen ny anmälan.
+        again = await self.post("/api/report", {"key": movie_key, "reason": "quality"})
+        self.assertEqual((again["request"]["id"], again["ok"]), (rep["id"], "Redan anmäld – laddas ner igen"))
+
+        # Status: inget nytt än, sedan nedladdad igen → klar.
+        self.radarr_state["title"] = {"hasFile": False}
+        st = await (await self.client.get("/api/requests/arr")).json()
+        self.assertEqual(st["items"][rep["id"]]["state"], "missing")
+        self.radarr_state["title"] = {"hasFile": True, "movieFile": {"id": 78}}
+        st = await (await self.client.get("/api/requests/arr")).json()
+        self.assertEqual(st["items"][rep["id"]]["state"], "done")
+        done = self.app[jptv.JPTV]["wishes"].get(rep["id"])
+        self.assertEqual((done["status"], done["libraryKey"], done["note"]), ("available", movie_key, "Fel språk – nedladdad igen"))
+        # Pending-räknaren i menyn påverkas inte.
+        self.assertEqual((await (await self.client.get("/api/requests")).json())["pending"], 0)
+
+        # Avsnitt S01E02: Sonarr hittar serien på TVDB-id:t från Plex.
+        self.sonarr_state["added"].add(373737)
+        self.sonarr_state["episodes"] = [
+            {"id": 201, "seasonNumber": 1, "episodeNumber": 2, "episodeFileId": 88, "hasFile": True, "monitored": False},
+            {"id": 202, "seasonNumber": 1, "episodeNumber": 3, "episodeFileId": 89, "hasFile": True, "monitored": True},
+        ]
+        self.sonarr_state["history"] = [
+            {"id": 9, "episodeId": 201, "seasonNumber": 1, "eventType": "grabbed", "date": "2026-11-02T10:00:00Z"},
+            {"id": 10, "episodeId": 202, "seasonNumber": 1, "eventType": "grabbed", "date": "2026-11-03T10:00:00Z"},
+        ]
+        ok = await self.post("/api/report", {"key": ep_key, "reason": "language", "by": "Jonas"})
+        self.assertIn({"failed": 9}, self.sonarr_log)
+        self.assertNotIn({"failed": 10}, self.sonarr_log)
+        self.assertIn({"deleteFile": 88}, self.sonarr_log)
+        self.assertIn({"monitorEpisodes": {"episodeIds": [201], "monitored": True}}, self.sonarr_log)
+        self.assertEqual(self.sonarr_log[-1], {"command": {"name": "EpisodeSearch", "episodeIds": [201]}})
+        rep = ok["request"]
+        self.assertEqual((rep["title"], rep["type"], rep["episode"]["number"]), (f"{show_title} · S01E02", "show", 2))
+
+        # Statusen gäller just det avsnittet.
+        self.sonarr_state["queue"] = [{"id": 70, "seriesId": 7, "episodeId": 201, "downloadId": "x", "status": "downloading",
+                                       "trackedDownloadState": "downloading", "trackedDownloadStatus": "ok", "size": 1000, "sizeleft": 550,
+                                       "timeleft": "00:05:00", "episode": {"seasonNumber": 1, "episodeNumber": 2}},
+                                      {"id": 71, "seriesId": 7, "episodeId": 999, "downloadId": "y", "status": "downloading",
+                                       "trackedDownloadState": "downloading", "trackedDownloadStatus": "ok", "size": 1000, "sizeleft": 0}]
+        got = (await (await self.client.get("/api/requests/arr")).json())["items"][rep["id"]]
+        self.assertEqual((got["state"], got["text"], got["eta"]), ("downloading", "Laddar ner 45 % · S01E02", 300))
+        self.sonarr_state["queue"] = []
+        self.sonarr_state["episodes"][0]["hasFile"] = False
+        got = (await (await self.client.get("/api/requests/arr")).json())["items"][rep["id"]]
+        self.assertEqual((got["state"], got["actions"]), ("missing", ["search"]))
+        await self.post(f"/api/requests/{rep['id']}/search")
+        self.assertEqual(self.sonarr_log[-1], {"command": {"name": "EpisodeSearch", "episodeIds": [201]}})
 
     async def test_scan_library(self):
         fake_plex.scans.clear()

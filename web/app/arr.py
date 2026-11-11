@@ -262,11 +262,17 @@ class Arr:
 
         return dict(await asyncio.gather(*(one(*w) for w in wanted)))
 
+    async def _episode(self, series_id: int, season: int, number: int) -> dict | None:
+        eps = await self._call("GET", "/api/v3/episode", params={"seriesId": str(series_id), "seasonNumber": str(season)}) or []
+        return next((e for e in eps if e.get("seasonNumber", season) == season and e.get("episodeNumber") == number), None)
+
     async def _status(self, item: dict, ids: dict, queue: list, searching: set) -> dict:
         found = await self._find(item, ids)
         if not found:
             return _state("gone", f"Finns inte i {self.name} längre", actions=["resend"])
         fid = found.get("id")
+        if self.kind == "sonarr" and item.get("episode"):
+            return await self._episode_status(found, item["episode"], queue, fid in searching)
         key = "movieId" if self.kind == "radarr" else "seriesId"
         mine = [q for q in queue if q.get(key) == fid]
         if mine:
@@ -274,7 +280,34 @@ class Arr:
             st["link"] = self._link(found, "activity/queue") if st["state"] in PROBLEMS else self._link(found)
             return st
         st = _movie_status(found, fid in searching, self.name) if self.kind == "radarr" else _series_status(found, fid in searching)
+        if item.get("kind") == "report":
+            # Anmäld film: filen togs bort och släppet svartlistades.
+            if st["state"] == "missing":
+                st.update(text="Inget nytt släpp hittat än",
+                          hint="Det svartlistade släppet tas inte igen. Nya släpp tas automatiskt när de dyker upp.")
+            elif st["state"] == "done":
+                st["text"] = st["text"].replace("Nedladdad", "Nedladdad igen", 1)
         st["link"] = self._link(found)
+        return st
+
+    async def _episode_status(self, series: dict, wanted: dict, queue: list, searching: bool) -> dict:
+        """Ett anmält avsnitt: laddas det ner igen, finns det, eller letar Sonarr fortfarande?"""
+        ep = await self._episode(int(series["id"]), int(wanted["season"]), int(wanted["number"]))
+        if not ep:
+            return _state("gone", f"Hittar inte avsnittet i {self.name}")
+        mine = [q for q in queue if q.get("episodeId") == ep["id"]]
+        if mine:
+            st = _queue_status(mine, True, self.name)
+            st["link"] = self._link(series, "activity/queue") if st["state"] in PROBLEMS else self._link(series)
+            return st
+        if ep.get("hasFile"):
+            st = _state("done", "Nedladdad igen – syns i Plex efter nästa skanning", actions=["scan"])
+        elif searching:
+            st = _state("searching", "Söker…")
+        else:
+            st = _state("missing", "Inget nytt släpp hittat än", actions=["search"],
+                        hint="Det svartlistade släppet tas inte igen. Nya släpp tas automatiskt när de dyker upp.")
+        st["link"] = self._link(series)
         return st
 
     async def search(self, item: dict, ids: dict) -> str:
@@ -283,6 +316,12 @@ class Arr:
         if not found:
             raise ArrError(f"Finns inte i {self.name} – skicka den igen")
         fid = int(found["id"])
+        if self.kind == "sonarr" and item.get("episode"):
+            ep = await self._episode(fid, int(item["episode"]["season"]), int(item["episode"]["number"]))
+            if not ep:
+                raise ArrError(f"Hittar inte avsnittet i {self.name}")
+            await self._call("POST", "/api/v3/command", json={"name": "EpisodeSearch", "episodeIds": [ep["id"]]})
+            return f"{self.name} letar nu"
         if self.kind == "radarr":
             if not found.get("monitored"):
                 await self._call("PUT", "/api/v3/movie/editor", json={"movieIds": [fid], "monitored": True})
@@ -302,6 +341,9 @@ class Arr:
         key = "movieId" if self.kind == "radarr" else "seriesId"
         queue = await self._call("GET", "/api/v3/queue/details", params={key: str(fid)}) or []
         queue = [q for q in queue if q.get(key) == fid]
+        if self.kind == "sonarr" and item.get("episode"):
+            ep = await self._episode(fid, int(item["episode"]["season"]), int(item["episode"]["number"]))
+            queue = [q for q in queue if ep and q.get("episodeId") == ep["id"]]
         bad = [q for q in queue if _queue_state(q) in PROBLEMS] or queue
         removed, episodes = set(), []
         for q in bad:
@@ -329,6 +371,61 @@ class Arr:
         if removed:
             return f"Släppet är svartlistat – {self.name} letar efter ett annat"
         return f"{self.name} letar nu"
+
+
+    async def redownload(self, item: dict, ids: dict, season: int | None = None, number: int | None = None) -> str:
+        """
+        Anmält (fel språk, trasig fil …): släppet som gav filen markeras som misslyckat, så att det
+        svartlistas, filen tas bort och Radarr/Sonarr letar efter ett annat. Avsnitt: season/number.
+        """
+        found = await self._find(item, ids)
+        if not found:
+            raise ArrError(f"Finns inte i {self.name}")
+        fid = int(found["id"])
+        if self.kind == "radarr":
+            history = await self._call("GET", "/api/v3/history/movie", params={"movieId": str(fid)}) or []
+            file_id = (found.get("movieFile") or {}).get("id")
+            if not file_id and found.get("hasFile"):
+                files = await self._call("GET", "/api/v3/moviefile", params={"movieId": str(fid)}) or []
+                file_id = files[0].get("id") if files else None
+            file_path = "/api/v3/moviefile/"
+        else:
+            if season is None or number is None:
+                raise ArrError("Avsnittet saknar säsong eller nummer")
+            ep = await self._episode(fid, season, number)
+            if not ep:
+                raise ArrError(f"Hittar inte S{season:02d}E{number:02d} i {self.name}")
+            history = await self._call("GET", "/api/v3/history/series", params={"seriesId": str(fid), "seasonNumber": str(season)}) or []
+            history = [h for h in history if h.get("episodeId") == ep["id"]]
+            file_id = ep.get("episodeFileId") or None
+            file_path = "/api/v3/episodefile/"
+        grabs = sorted((h for h in history if _low(h.get("eventType")) == "grabbed"), key=lambda h: str(h.get("date") or ""), reverse=True)
+        blocked = False
+        if grabs:
+            try:
+                # Som "Mark as failed" i historiken: släppet svartlistas och tas inte igen.
+                await self._call("POST", f"/api/v3/history/failed/{grabs[0]['id']}")
+                blocked = True
+            except ArrError as e:
+                if e.status != 404:
+                    raise
+        if file_id:
+            try:
+                await self._call("DELETE", f"{file_path}{file_id}")
+            except ArrError as e:
+                if e.status != 404:
+                    raise
+        # Sök direkt (Radarr/Sonarr gör det ofta själva efter "misslyckad", men inte om det är avstängt).
+        if self.kind == "radarr":
+            if not found.get("monitored"):
+                await self._call("PUT", "/api/v3/movie/editor", json={"movieIds": [fid], "monitored": True})
+            await self._call("POST", "/api/v3/command", json={"name": "MoviesSearch", "movieIds": [fid]})
+        else:
+            if not ep.get("monitored"):
+                await self._call("PUT", "/api/v3/episode/monitor", json={"episodeIds": [ep["id"]], "monitored": True})
+            await self._call("POST", "/api/v3/command", json={"name": "EpisodeSearch", "episodeIds": [ep["id"]]})
+        what = "Släppet är svartlistat och filen borttagen" if blocked else "Filen är borttagen"
+        return f"{what} – {self.name} letar efter ett annat"
 
 
 # Nedladdningar som behöver en hand: knappen Släng och sök annan visas.

@@ -89,6 +89,15 @@ data class WishItem(
     }
 }
 
+/** Orsaker att anmäla en fil (samma id:n som JPTV Web). */
+val REPORT_REASONS = listOf(
+    "language" to "Fel språk",
+    "quality" to "Dålig bild eller ljud",
+    "wrong" to "Fel film eller avsnitt",
+    "broken" to "Går inte att spela",
+    "other" to "Annat",
+)
+
 /**
  * JPTV Web på Unraid: önskemål (filmer och serier som saknas i Plex) går dit,
  * och godkänns i webbappen. TV:n och mobilen hittar den på samma adress som Plex, port 8099.
@@ -138,6 +147,14 @@ class JptvWeb(http: OkHttpClient) {
             if (uhd) item.copy(uhdStatus = status) else item.copy(status = status)
         }
     }
+
+    /**
+     * Anmäl en film eller ett avsnitt i Plex (fel språk, trasig fil …): JPTV Web låter Radarr/Sonarr
+     * svartlista släppet, ta bort filen och ladda ner en annan version. Svarar med vad som hände.
+     */
+    suspend fun report(key: String, reason: String, by: String): String =
+        send("POST", "/api/report", JSONObject().put("key", key).put("reason", reason).put("by", by))
+            .optString("ok").ifBlank { "Anmäld" }
 
     // ---------- YouTube
 

@@ -279,7 +279,7 @@ private fun iso3(code: String?): String? {
 /** Så länge en pausad film räknas som pågående i Plex. Därefter avslutas visningen. */
 private const val PAUSE_SESSION_MS = 2 * 60_000L
 
-private enum class VodPanel { NONE, TRACKS, SEARCH, SYNC, STYLE, OPTIONS }
+private enum class VodPanel { NONE, TRACKS, SEARCH, SYNC, STYLE, OPTIONS, REPORT }
 
 // ======================================================================
 // Film och avsnitt från Plex
@@ -329,6 +329,8 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     /** Efter (om)laddning: välj exakt de spår som Plex har markerat, inte bara rätt språk. */
     var needsExactSelection by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
+    /** Vald orsak när filen anmäls (Alternativ → Anmäl problem), id ur REPORT_REASONS. */
+    var reportReason by remember { mutableStateOf<String?>(null) }
     /** När användaren pausade (0 = spelar). Pausskärmen visas efter några sekunders paus. */
     var pausedSince by remember { mutableLongStateOf(0L) }
 
@@ -975,6 +977,7 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     BackHandler(enabled = panelOpen || cardVisible) {
         when {
             panel == VodPanel.SEARCH || panel == VodPanel.SYNC || panel == VodPanel.STYLE -> panel = VodPanel.TRACKS
+            panel == VodPanel.REPORT -> panel = VodPanel.OPTIONS
             panelOpen -> panel = VodPanel.NONE
             stillWatching -> vm.back()
             movedOn != null -> vm.back()
@@ -1268,13 +1271,52 @@ private fun VodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
             )
             VodPanel.OPTIONS -> OptionsPanel(
                 title = "Alternativ",
-                sections = listOf(
+                sections = listOfNotNull(
                     sleepSection(vm, now, includeEnd = true) { panel = VodPanel.NONE },
                     scaleSection(vm) { panel = VodPanel.NONE },
                     infoSection(vm) { panel = VodPanel.NONE },
+                    // Fel språk, dålig fil …: JPTV Web låter Radarr/Sonarr ladda ner en annan version.
+                    if (item.type == "movie" || item.type == "episode") {
+                        PanelSection(
+                            "Anmäl problem",
+                            se.jptv.web.REPORT_REASONS.map { (id, label) ->
+                                PanelOption(label) { reportReason = id; panel = VodPanel.REPORT }
+                            },
+                            subtitle = "Filen tas bort och en annan version laddas ner",
+                        )
+                    } else {
+                        null
+                    },
                 ),
                 modifier = Modifier.align(Alignment.CenterEnd),
             )
+            VodPanel.REPORT -> {
+                val reason = reportReason
+                val label = se.jptv.web.REPORT_REASONS.firstOrNull { it.first == reason }?.second ?: "Anmäl"
+                OptionsPanel(
+                    title = "Anmäl: $label",
+                    sections = listOf(
+                        PanelSection(
+                            "Ta bort filen och ladda ner en annan?",
+                            listOf(
+                                PanelOption("Ja, anmäl och ladda ner igen") {
+                                    panel = VodPanel.NONE
+                                    val key = item.ratingKey
+                                    scope.launch {
+                                        vm.reportProblem(key, reason ?: "other")
+                                            .onSuccess { toast = "Anmäld: $it. Hur det går syns under Önskemål i JPTV Web." }
+                                            .onFailure { toast = it.message ?: "Det gick inte att anmäla" }
+                                    }
+                                },
+                                PanelOption("Avbryt") { panel = VodPanel.OPTIONS },
+                            ),
+                            subtitle = "Släppet svartlistas så att det inte tas igen, och " +
+                                (if (item.type == "episode") "Sonarr" else "Radarr") + " letar efter ett annat.",
+                        ),
+                    ),
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                )
+            }
         }
 
         val next = nextEpisode

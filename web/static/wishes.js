@@ -94,6 +94,58 @@
           actions)));
   };
 
+  /* ---------- anmäl: fel språk m.m. – ladda ner igen ---------- */
+
+  JP.icons.flag = '<path d="M5 21V4"/><path d="M5 4h11l-2 4 2 4H5"/>';
+
+  const REASONS = [
+    ['language', 'Fel språk', 'T.ex. tyskt tal utan svensk eller engelsk version'],
+    ['quality', 'Dålig bild eller ljud', 'Suddigt, hackigt, osynkat ljud …'],
+    ['wrong', 'Fel film eller avsnitt', 'Något annat än det som står'],
+    ['broken', 'Går inte att spela', 'Startar inte eller stannar'],
+    ['other', 'Annat', null],
+  ];
+
+  /** Kan titeln anmälas? Filmer kräver Radarr, avsnitt Sonarr (inställda i JPTV Web). */
+  JP.canReport = function (item) {
+    const st = (JP.status && JP.status.settings) || {};
+    if (item.type === 'movie') return !!(st.radarrUrl && st.radarrKey) || !!(JP.status && JP.status.uhd);
+    if (item.type === 'episode') return !!(st.sonarrUrl && st.sonarrKey);
+    return false;
+  };
+
+  /**
+   * Anmäl en film eller ett avsnitt: Radarr/Sonarr svartlistar släppet, tar bort filen och letar
+   * efter ett annat. Anmälan syns under Önskemål med hur det går.
+   */
+  JP.reportDialog = function (item) {
+    let chosen = 'language';
+    const what = item.type === 'episode' ? `${item.show || ''} ${JP.epCode ? JP.epCode(item) : ''}`.trim() || item.title : item.title;
+    const list = h('div', { class: 'report-reasons', role: 'radiogroup' }, REASONS.map(([id, label, help]) => {
+      const input = h('input', { type: 'radio', name: 'report-reason', value: id, onchange: () => { chosen = id; } });
+      if (id === chosen) input.checked = true;
+      return h('label', { class: 'report-reason' }, input, h('span', null, h('b', null, label), help ? h('small', { class: 'dim' }, help) : null));
+    }));
+    const go = h('button', { class: 'btn danger' }, JP.icon('flag'), 'Anmäl och ladda ner igen');
+    let m;
+    go.addEventListener('click', async () => {
+      go.disabled = true;
+      try {
+        const r = await JP.post('/api/report', { key: item.key, reason: chosen, by: JP.wisher() });
+        closeModal(m);
+        JP.toast(`${what}: ${r.ok}`);
+      } catch (e) {
+        go.disabled = false;
+        JP.toast(e.message);
+      }
+    });
+    m = modal(h('div', { class: 'report-dialog' },
+      h('h2', null, 'Anmäl ', h('span', { class: 'dim' }, what)),
+      h('p', { class: 'dim' }, 'Filen tas bort och släppet svartlistas, så letar ' + (item.type === 'episode' ? 'Sonarr' : 'Radarr') + ' efter ett annat. Hur det går syns under Önskemål.'),
+      list,
+      h('div', { class: 'actions' }, go, h('button', { class: 'btn ghost', onclick: () => closeModal(m) }, 'Avbryt'))));
+  };
+
   function wishCard(item, refresh) {
     const art = h('div', { class: 'card-art' },
       item.thumb ? h('img', { src: poster(item.thumb), alt: '', loading: 'lazy', onerror: (e) => e.target.remove() }) : h('div', { class: 'card-fallback' }, item.title));
@@ -314,16 +366,18 @@
 
     async function load() {
       const data = await JP.api('/api/requests');
-      cfg = { movie: data.radarr, show: data.sonarr };
+      cfg = { movie: data.radarr, show: data.sonarr, uhd: data.radarr4k };
       slots.clear();
       const arr = [data.radarr ? 'Radarr' : null, data.sonarr ? 'Sonarr' : null].filter(Boolean);
       head.replaceChildren(arr.length
         ? `OK skickar filmer${data.radarr ? ' till Radarr' : ''}${data.radarr && data.sonarr ? ' och' : ''}${data.sonarr ? ' serier till Sonarr' : ''}.`
         : h('span', null, 'OK markerar bara önskemålet. Lägg in Radarr/Sonarr under ', h('a', { href: '#/settings' }, 'Inställningar'), ' så skickas det dit direkt.'));
-      const groups = [['pending', 'Väntar på OK'], ['approved', 'Godkända'], ['available', 'Finns nu'], ['declined', 'Nej']];
+      const groups = [['pending', 'Väntar på OK'], ['report', 'Anmälda – laddas ner igen'], ['approved', 'Godkända'], ['available', 'Finns nu'], ['declined', 'Nej']];
       const parts = [];
       for (const [st, title] of groups) {
-        const rows = data.items.filter((w) => w.status === st);
+        const rows = data.items.filter((w) => st === 'report'
+          ? w.kind === 'report' && w.status === 'approved'
+          : w.status === st && !(st === 'approved' && w.kind === 'report'));
         if (!rows.length) continue;
         parts.push(h('h2', { class: 'wish-heading' }, title, h('span', { class: 'dim' }, ' ' + rows.length)));
         for (const w of rows) parts.push(row(w));
@@ -356,7 +410,7 @@
       }
       // Godkänd och Radarr/Sonarr inställd: plats för deras status och knappar.
       let info = w.note && w.status !== 'pending' ? h('div', { class: 'small' }, w.note) : null;
-      if (w.status === 'approved' && cfg[w.type]) {
+      if (w.status === 'approved' && (w.uhd ? cfg.uhd : cfg[w.type])) {
         info = h('div', { class: 'arr-st' }, info);
         const arrAct = h('span', { class: 'arr-acts' });
         act.append(arrAct);
@@ -367,12 +421,15 @@
       del.addEventListener('click', busy(del, () => JP.api(`/api/requests/${w.id}`, { method: 'DELETE' })));
       act.append(del);
       const who = [w.by, ...(w.also || [])].join(', ');
+      const report = w.kind === 'report';
       return h('div', { class: 'wish-row ' + w.status },
         h('div', { class: 'wish-thumb' }, w.thumb ? h('img', { src: poster(w.thumb, 120, 180), alt: '', loading: 'lazy' }) : null),
         h('div', { class: 'wish-info' },
           h('div', { class: 'wish-title' }, w.title, w.year ? h('span', { class: 'dim' }, ` (${w.year})`) : null, h('span', { class: 'wish-type' }, w.type === 'show' ? 'Serie' : 'Film'),
-            w.uhd ? h('span', { class: 'wish-type uhd', title: 'Önskad i 4K – skickas till Radarr 4K' }, '4K') : null),
-          h('div', { class: 'dim small' }, `Önskad av ${who} · ${ago(w.at)}`),
+            w.uhd ? h('span', { class: 'wish-type uhd', title: 'Önskad i 4K – skickas till Radarr 4K' }, '4K') : null,
+            report ? h('span', { class: 'wish-type report' }, 'Anmäld') : null),
+          report && w.episode && w.episode.title ? h('div', { class: 'small' }, w.episode.title) : null,
+          h('div', { class: 'dim small' }, report ? `${w.reason || 'Anmäld'} · anmäld av ${who} · ${ago(w.at)}` : `Önskad av ${who} · ${ago(w.at)}`),
           info,
           w.error ? h('div', { class: 'small err' }, w.error) : null),
         act);

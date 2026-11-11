@@ -23,6 +23,12 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -96,6 +102,8 @@ fun MobileVodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var item by remember { mutableStateOf(request.item) }
+    /** Anmäl problem (fel språk …) är öppen. */
+    var reporting by remember { mutableStateOf(false) }
     /** Pågående visning i Plex; stängs vid lång paus och när appen läggs i bakgrunden. */
     var sessionOpen by remember { mutableStateOf(false) }
     val exo = remember {
@@ -284,7 +292,11 @@ fun MobileVodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
                 title = item.displayTitle,
                 subtitle = item.subtitle?.takeIf { item.type == "episode" },
                 onBack = { vm.back() },
+                onReport = if (item.type == "movie" || item.type == "episode") ({ reporting = true }) else null,
             )
+        }
+        if (reporting) {
+            ReportDialog(vm, item.ratingKey, item.type == "episode", onClose = { reporting = false })
         }
         val intro = item.intro
         val credits = item.credits
@@ -308,10 +320,11 @@ fun MobileVodPlayer(vm: AppViewModel, request: PlayRequest.Vod) {
     }
 }
 
-/** Tillbaka, titel och castknapp ovanpå bilden. */
+/** Tillbaka, titel, castknapp och (för filmer och avsnitt) menyn med Anmäl problem ovanpå bilden. */
 @Composable
-private fun PlayerTopBar(title: String, subtitle: String?, onBack: () -> Unit) {
+private fun PlayerTopBar(title: String, subtitle: String?, onBack: () -> Unit, onReport: (() -> Unit)? = null) {
     var castDialog by remember { mutableStateOf(false) }
+    var menu by remember { mutableStateOf(false) }
     Row(
         Modifier
             .fillMaxWidth()
@@ -327,8 +340,76 @@ private fun PlayerTopBar(title: String, subtitle: String?, onBack: () -> Unit) {
         if (CastManager.available) {
             IconButton(onClick = { castDialog = true }) { Icon(CastIcon, contentDescription = "Casta", tint = Color.White) }
         }
+        if (onReport != null) {
+            Box {
+                IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "Mer", tint = Color.White) }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(text = { Text("Anmäl problem…") }, onClick = { menu = false; onReport() })
+                }
+            }
+        }
     }
     if (castDialog) CastDialog(onClose = { castDialog = false })
+}
+
+/**
+ * Anmäl filen som spelas (fel språk, dålig bild …): JPTV Web låter Radarr/Sonarr svartlista släppet,
+ * ta bort filen och ladda ner en annan version.
+ */
+@Composable
+private fun ReportDialog(vm: AppViewModel, ratingKey: String, episode: Boolean, onClose: () -> Unit) {
+    var reason by remember { mutableStateOf("language") }
+    var sending by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Anmäl problem") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    "Filen tas bort och släppet svartlistas, så letar ${if (episode) "Sonarr" else "Radarr"} efter ett annat. " +
+                        "Hur det går syns under Önskemål i JPTV Web.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(6.dp))
+                if (message == null) {
+                    se.jptv.web.REPORT_REASONS.forEach { (id, label) ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable { reason = id }.padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = reason == id, onClick = { reason = id })
+                            Text(label)
+                        }
+                    }
+                }
+                message?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
+            }
+        },
+        confirmButton = {
+            if (message == null) {
+                Button(enabled = !sending, onClick = {
+                    sending = true
+                    scope.launch {
+                        vm.reportProblem(ratingKey, reason)
+                            .onSuccess {
+                                message = "Anmäld: $it"
+                                delay(2500)
+                                onClose()
+                            }
+                            .onFailure {
+                                message = it.message ?: "Det gick inte att anmäla"
+                                sending = false
+                            }
+                    }
+                }) { Text(if (sending) "Skickar…" else "Anmäl och ladda ner igen") }
+            } else {
+                TextButton(onClick = onClose) { Text("Stäng") }
+            }
+        },
+        dismissButton = { if (message == null) TextButton(onClick = onClose) { Text("Avbryt") } },
+    )
 }
 
 // ======================================================================

@@ -87,7 +87,7 @@ def build() -> None:
         sk = nk()
         show = {
             "ratingKey": sk, "key": f"/library/metadata/{sk}/children", "type": "show", "title": title, "titleSort": title, "year": year, "guid": f"plex://show/s{sk}",
-            "Guid": [{"id": f"tmdb://{900 + i}"}],
+            "Guid": [{"id": f"tmdb://{900 + i}"}, {"id": f"tvdb://{373737 + i}"}],
             "summary": SUMMARY, "thumb": f"/library/metadata/{sk}/thumb/1", "art": f"/library/metadata/{sk}/art/1", "librarySectionID": 2,
             "contentRating": "15", "addedAt": NOW - i * 86400 * 2, "childCount": nseasons, "leafCount": nseasons * 6,
             "viewedLeafCount": 8 if i in (0, 1, 3) else 0, "theme": f"/library/metadata/{sk}/theme/1",
