@@ -283,6 +283,94 @@
     return box;
   }
 
+  /* ---------- betyg och recensioner ---------- */
+
+  const compact = new Intl.NumberFormat('sv-SE', { notation: 'compact', maximumFractionDigits: 1 });
+  const one = (n) => n.toLocaleString('sv-SE', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const votes = (n) => (n ? compact.format(n) + ' röster' : null);
+  const external = (href) => (href ? { href, target: '_blank', rel: 'noopener' } : {});
+
+  function scoreChip(cls, tag, value, sub, href, title, short) {
+    return h(href ? 'a' : 'span', { class: 'd-score ' + cls, title: [title, sub].filter(Boolean).join(' · '), ...external(href) },
+      h('span', { class: 'd-score-tag' }, short ? [h('span', { class: 'full' }, tag), h('span', { class: 'short' }, short)] : tag),
+      h('b', null, value), sub ? h('span', { class: 'd-score-sub' }, sub) : null);
+  }
+
+  /** Betygen i toppen: TMDB direkt, IMDb (och med OMDb-nyckel Rotten Tomatoes och Metacritic) när de kommer. */
+  function scoreChips(s, tmdbUrl) {
+    const out = [];
+    if (s.imdb) out.push(scoreChip('imdb', 'IMDb', one(s.imdb), votes(s.imdbVotes), s.imdbUrl, 'Betyget på IMDb, av 10'));
+    if (s.rt != null) out.push(scoreChip('rt' + (s.rt < 60 ? ' rotten' : ''), 'Rotten Tomatoes', s.rt + ' %', 'kritiker', null,
+      'Rotten Tomatoes: andel kritiker som gav titeln ett positivt omdöme', 'RT'));
+    if (s.metacritic != null) out.push(scoreChip('mc ' + (s.metacritic >= 61 ? 'good' : s.metacritic >= 40 ? 'mixed' : 'bad'), 'Metacritic',
+      String(s.metacritic), 'av 100', null, 'Kritikernas snittbetyg på Metacritic'));
+    if (s.tmdb) out.push(scoreChip('tmdb', 'TMDB', one(s.tmdb), votes(s.tmdbVotes), tmdbUrl, 'Betyget på TMDB, av 10'));
+    return out;
+  }
+
+  const tone = (r) => (r >= 7 ? 'good' : r >= 5 ? 'mixed' : 'bad');
+  function hue(name) {
+    let x = 0;
+    for (const ch of name) x = (x * 31 + ch.codePointAt(0)) % 360;
+    return x;
+  }
+
+  function reviewCard(r) {
+    const text = h('div', { class: 'd-rev-text', lang: 'en' }, r.text);
+    const more = h('button', { class: 'd-rev-more', hidden: true }, 'Läs mer');
+    const avatar = h('span', { class: 'd-rev-avatar' }, [...r.author.trim()][0]?.toUpperCase() || '?');
+    avatar.style.setProperty('--h', hue(r.author));
+    const card = h('article', { class: 'd-rev' },
+      h('div', { class: 'd-rev-top' },
+        avatar,
+        h('div', { class: 'd-rev-who' }, h('div', { class: 'd-rev-name' }, r.author), r.date ? h('div', { class: 'dim small' }, fmtDate(r.date)) : null),
+        r.rating != null ? h('span', { class: 'd-rev-score ' + tone(r.rating), title: 'Betyg av 10' }, JP.icon('star'), r.rating.toLocaleString('sv-SE'), h('span', null, '/10')) : null),
+      text,
+      h('div', { class: 'd-rev-foot' }, more, r.url ? h('a', { class: 'dim small', ...external(r.url) }, 'Läs på TMDB ↗') : null));
+    more.addEventListener('click', () => {
+      const open = card.classList.toggle('open');
+      more.textContent = open ? 'Visa mindre' : 'Läs mer';
+    });
+    // "Läs mer" bara när texten faktiskt är avkortad (mäts när kortet syns).
+    new ResizeObserver(() => {
+      if (!card.classList.contains('open') && text.clientHeight) more.hidden = text.scrollHeight <= text.clientHeight + 2;
+    }).observe(text);
+    return card;
+  }
+
+  function reviewsSection(o, tmdbUrl) {
+    const n = o.reviewCount || 0;
+    const head = h('div', { class: 'd-rev-head' },
+      h('h2', null, 'Vad tycker folk?'),
+      n ? h('a', { class: 'd-more', ...external(tmdbUrl + '/reviews') }, `${n === 1 ? 'Den' : 'Alla ' + n} på TMDB ↗`) : null);
+    const sec = h('section', { class: 'd-reviews' }, head);
+    if (o.reviewsError) {
+      sec.append(h('div', { class: 'dim' }, 'Recensionerna kunde inte hämtas: ' + o.reviewsError));
+      return sec;
+    }
+    if (!o.reviews.length) {
+      sec.append(h('div', { class: 'd-rev-empty dim' }, 'Ingen har skrivit någon recension på TMDB än.'));
+      return sec;
+    }
+    sec.append(h('div', { class: 'dim small d-rev-sub' }, 'Recensioner från TMDB:s användare, nyaste först. De flesta skrivs på engelska.'));
+    const SHOW = 4;
+    const grid = h('div', { class: 'd-rev-grid' }, o.reviews.map((r, i) => {
+      const c = reviewCard(r);
+      if (i >= SHOW) c.hidden = true;
+      return c;
+    }));
+    sec.append(grid);
+    const rest = o.reviews.length - SHOW;
+    if (rest > 0) {
+      const btn = h('button', { class: 'btn ghost small d-rev-all', onclick: () => {
+        grid.querySelectorAll('.d-rev[hidden]').forEach((c) => { c.hidden = false; });
+        btn.remove();
+      } }, `Visa ${rest} till`);
+      sec.append(btn);
+    }
+    return sec;
+  }
+
   JP.route(/^\/discover\/(movie|show)\/(\d+)$/, async (v, [type, id]) => {
     const page = h('div', { class: 'd-title-page' }, JP.spinner());
     v.el.append(page);
@@ -311,15 +399,19 @@
       ['Originaltitel', t.originalTitle !== t.title ? t.originalTitle : null],
       ['Originalspråk', LANG[t.language] || (t.language || '').toUpperCase()],
     ].filter((f) => f && f[1]);
+    const tmdbUrl = `https://www.themoviedb.org/${t.type === 'show' ? 'tv' : 'movie'}/${id}`;
+    const scoreBox = h('div', { class: 'd-scores' }, scoreChips({ tmdb: t.rating, tmdbVotes: t.votes }, tmdbUrl));
+    const revBox = h('div', null, h('section', { class: 'd-reviews' }, h('div', { class: 'd-rev-head' }, h('h2', null, 'Vad tycker folk?')),
+      h('div', { class: 'dim small d-rev-loading' }, h('span', { class: 'spin tiny' }), 'Hämtar betyg och recensioner …')));
     const hero = h('div', { class: 'd-hero' },
       t.backdrop ? h('img', { class: 'd-hero-bg', src: t.backdrop, alt: '' }) : null,
       h('div', { class: 'd-hero-inner' },
         h('div', { class: 'd-hero-poster' }, t.poster ? h('img', { src: t.poster, alt: '' }) : h('div', { class: 'card-fallback' }, t.title)),
         h('div', { class: 'd-hero-info' },
-          h('div', { class: 'd-hero-badges' }, h('span', { class: 'd-badge inline ' + t.type }, t.type === 'show' ? 'SERIE' : 'FILM'),
-            t.rating ? h('span', { class: 'd-rating' }, '★ ' + t.rating.toLocaleString('sv-SE'), h('span', { class: 'dim' }, ` · ${t.votes.toLocaleString('sv-SE')} röster på TMDB`)) : null),
+          h('div', { class: 'd-hero-badges' }, h('span', { class: 'd-badge inline ' + t.type }, t.type === 'show' ? 'SERIE' : 'FILM')),
           h('h1', null, t.title, t.year ? h('span', { class: 'dim' }, ` (${t.year})`) : null),
           meta.length ? h('div', { class: 'd-meta' }, meta.join(' · ')) : null,
+          scoreBox,
           t.tagline ? h('div', { class: 'd-tagline' }, t.tagline) : null,
           actBox,
           t.overview ? h('p', { class: 'd-overview' }, t.overview) : null,
@@ -331,11 +423,22 @@
       hero,
       h('div', { class: 'page wide d-title-body' }, ...[
         factBox,
+        revBox,
         t.cast.length ? row('Rollista', null, t.cast.map(personTile), 'd-people') : null,
         row('Rekommendationer', null, t.recommendations.map((i) => card(i))),
         row(t.type === 'show' ? 'Liknande serier' : 'Liknande filmer', null, t.similar.map((i) => card(i))),
       ].filter(Boolean)),
     ]);
+    // Betyg och recensioner hämtas efteråt, så att sidan inte väntar på dem.
+    try {
+      const o = await JP.api(`/api/tmdb/opinions/${type}/${id}`);
+      scoreBox.replaceChildren(...scoreChips(o.scores, tmdbUrl));
+      if (o.scoresError) scoreBox.append(h('div', { class: 'd-score-error dim small' }, o.scoresError));
+      revBox.replaceChildren(reviewsSection(o, tmdbUrl));
+    } catch (e) {
+      revBox.replaceChildren(h('section', { class: 'd-reviews' }, h('div', { class: 'd-rev-head' }, h('h2', null, 'Vad tycker folk?')),
+        h('div', { class: 'dim' }, 'Kunde inte hämtas: ' + e.message)));
+    }
   });
 
   /* ---------- personsidan ---------- */

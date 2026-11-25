@@ -144,6 +144,31 @@ def providers(d: dict) -> list[dict]:
     return out
 
 
+_TAG = re.compile(r"<[^>]+>")
+_STARS = re.compile(r"(\*\*|__)(.+?)\1")
+
+
+def review(o: dict) -> dict | None:
+    """En recension från TMDB:s användare: vem, betyg (av 10), när och texten (utan HTML)."""
+    text = _TAG.sub("", str(o.get("content") or "")).replace("\r\n", "\n").replace("\r", "\n")
+    text = _STARS.sub(r"\2", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if not text:
+        return None
+    a = o.get("author_details") or {}
+    try:
+        rating = round(float(a["rating"]), 1) if a.get("rating") is not None else None
+    except (TypeError, ValueError):
+        rating = None
+    return {
+        "author": a.get("name") or a.get("username") or o.get("author") or "Någon",
+        "rating": rating,
+        "date": (o.get("updated_at") or o.get("created_at") or "")[:10] or None,
+        "text": text[:6000],
+        "url": o.get("url") or None,
+    }
+
+
 class TmdbError(Exception):
     def __init__(self, message: str, status: int | None = None):
         super().__init__(message)
@@ -388,6 +413,14 @@ class Tmdb:
                 "tvdb": ext.get("tvdb_id"),
             }.items() if v},
         }
+
+    async def reviews(self, kind: str, ident: int, limit: int = 12) -> dict:
+        """Recensioner från TMDB:s användare (nästan alltid på engelska), nyaste först."""
+        tk = "tv" if kind in ("tv", "show") else "movie"
+        d = await self.get(f"/{tk}/{ident}/reviews", ttl=12 * 3600, language="en-US")
+        items = [r for r in (review(o) for o in d.get("results") or []) if r]
+        items.sort(key=lambda r: r["date"] or "", reverse=True)
+        return {"reviews": items[:limit], "total": int(d.get("total_results") or len(items))}
 
     async def external_ids(self, kind: str, ident: int) -> dict:
         tk = "tv" if kind in ("tv", "show") else "movie"

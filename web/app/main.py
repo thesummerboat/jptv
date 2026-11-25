@@ -22,6 +22,7 @@ from .plex import QUALITIES, Plex, PlexError, metadata_list, public, slim
 from .store import Store
 from .tv import Iptv
 from .wishes import Wishes
+from .omdb import Omdb, OmdbError
 from .tmdb import IMG_RE, Tmdb, TmdbError, img_base
 from .tmdb import guid as tmdb_guid
 from .youtube import CHANNEL_RE, IMAGE_HOSTS, VIDEO_RE, YouTube, YtError, parse_import, subtitle_playlist
@@ -117,6 +118,8 @@ def settings_public(c: dict) -> dict:
         # Plex-biblioteket där 4K-filmerna ligger ("" = det som har 4K i namnet).
         "uhdSection": st.get("uhd_section", ""),
         "tmdbKey": bool(st.get("tmdb_key")),
+        # OMDb (valfritt): IMDb-, Rotten Tomatoes- och Metacritic-betyg i Upptäck.
+        "omdbKey": bool(st.get("omdb_key")),
         "youtubeMaxHeight": int(st.get("youtube_max_height", 1080) or 1080),
         "youtubeShorts": bool(st.get("youtube_shorts", False)),
     }
@@ -152,6 +155,11 @@ async def save_settings(request: web.Request):
         changes["tmdb_key"] = ""
     elif tkey:
         changes["tmdb_key"] = tkey
+    okey = str(b.get("omdbKey") or "").strip()
+    if okey == "-":
+        changes["omdb_key"] = ""
+    elif okey:
+        changes["omdb_key"] = okey
     if "uhdSection" in b:
         changes["uhd_section"] = str(b["uhdSection"] or "").strip()
     if "themeLevel" in b:
@@ -566,6 +574,62 @@ async def tmdb_title(request: web.Request):
         return _tmdb_error(e)
     await _annotate(c, [t] + t["recommendations"] + t["similar"], await wish_maps(c))
     return web.json_response(t)
+
+
+@routes.get("/api/tmdb/opinions/{type}/{id:[0-9]+}")
+async def tmdb_opinions(request: web.Request):
+    """Vad tycker folk? Recensioner från TMDB och (med OMDb-nyckel) betyg från IMDb, Rotten Tomatoes
+    och Metacritic. Hämtas efter titelsidan, så att den inte väntar på dem."""
+    c = ctx(request)
+    kind = request.match_info["type"]
+    if kind not in ("movie", "show", "tv"):
+        raise web.HTTPNotFound()
+    ident = int(request.match_info["id"])
+    try:
+        t = await c["tmdb"].title(kind, ident)
+    except TmdbError as e:
+        return _tmdb_error(e)
+    omdb = c["omdb"]
+    imdb_id = t["ids"].get("imdb")
+    reviews, extra = await asyncio.gather(
+        c["tmdb"].reviews(kind, ident),
+        omdb.scores(imdb_id) if omdb.configured else asyncio.sleep(0, None),
+        return_exceptions=True,
+    )
+    scores = {"tmdb": t["rating"], "tmdbVotes": t["votes"]}
+    # IMDb-betyget finns redan här (IMDb:s egen datafil, uppdateras varje vecka); OMDb ger Rotten
+    # Tomatoes och Metacritic, och IMDb bara för titlar som datafilen saknar.
+    own = imdb.RATINGS.lookup(imdb_id)
+    if own and own[0] > 0:
+        scores.update(imdb=own[0], imdbVotes=own[1])
+    if imdb_id:
+        scores["imdbUrl"] = f"https://www.imdb.com/title/{imdb_id}/"
+    out = {
+        "reviews": [], "reviewCount": 0, "reviewsError": None,
+        "scores": scores, "scoresError": None, "omdb": omdb.configured,
+    }
+    if isinstance(reviews, TmdbError):
+        out["reviewsError"] = str(reviews)
+    elif isinstance(reviews, BaseException):
+        raise reviews
+    else:
+        out["reviews"], out["reviewCount"] = reviews["reviews"], reviews["total"]
+    if isinstance(extra, OmdbError):
+        out["scoresError"] = str(extra)
+    elif isinstance(extra, BaseException):
+        raise extra
+    elif extra:
+        skip = ("imdb", "imdbVotes") if "imdb" in scores else ()
+        scores.update({k: v for k, v in extra.items() if v is not None and k not in skip})
+    return web.json_response(out)
+
+
+@routes.post("/api/omdb/test")
+async def omdb_test(request: web.Request):
+    try:
+        return web.json_response({"ok": await ctx(request)["omdb"].test()})
+    except OmdbError as e:
+        return web.json_response({"error": str(e)}, status=502)
 
 
 @routes.get("/api/tmdb/person/{id:[0-9]+}")
@@ -1531,6 +1595,7 @@ def create_app(config_dir: str | None = None) -> web.Application:
         state["imdb"] = asyncio.create_task(imdb.RATINGS.keep_fresh(http, state["library"].invalidate))
         # YouTube: yt-dlp uppdateras varje dygn, flödet hämtas i bakgrunden.
         state["tmdb"] = Tmdb(http, store, config_dir)
+        state["omdb"] = Omdb(http, store)
         state["youtube"] = YouTube(http, store, config_dir)
         state["yt_tasks"] = [
             asyncio.create_task(state["youtube"].ytdlp.keep_fresh()),

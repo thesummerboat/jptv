@@ -7,6 +7,7 @@ import unittest
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from app import imdb
 from app import main as jptv
 from app.plex import Plex
 from app.tmdb import pick_trailer
@@ -28,7 +29,11 @@ class TmdbTest(unittest.IsolatedAsyncioTestCase):
         self.tmdb = TestServer(fake_tmdb.make_app(self.log))
         await self.tmdb.start_server()
         tbase = f"http://127.0.0.1:{self.tmdb.port}"
-        self.env = {"JPTV_TMDB_API": tbase + "/3", "JPTV_TMDB_IMG": tbase + "/t/p"}
+        self.omdb_log = []
+        self.omdb = TestServer(fake_tmdb.make_omdb(self.omdb_log))
+        await self.omdb.start_server()
+        self.env = {"JPTV_TMDB_API": tbase + "/3", "JPTV_TMDB_IMG": tbase + "/t/p",
+                    "JPTV_OMDB_API": f"http://127.0.0.1:{self.omdb.port}/"}
         self.saved_env = {k: os.environ.get(k) for k in self.env}
         os.environ.update(self.env)
         self.radarr_log, self.sonarr_log = [], []
@@ -50,7 +55,7 @@ class TmdbTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         Plex.DISCOVER, Plex.METADATA = self.saved
         await self.client.close()
-        for s in (self.plex, self.tmdb, self.radarr, self.sonarr):
+        for s in (self.plex, self.tmdb, self.omdb, self.radarr, self.sonarr):
             await s.close()
         for k, v in self.saved_env.items():
             if v is None:
@@ -161,6 +166,70 @@ class TmdbTest(unittest.IsolatedAsyncioTestCase):
         res = await self.get("/api/tmdb/search?q=fj%C3%A4ll")
         self.assertEqual([i["tmdb"] for i in res["items"]], [601, 950])
         self.assertEqual(res["people"][0]["name"], "Lisa Ek")
+
+    async def test_opinions(self):
+        await self.key()
+        # IMDb-betyget från IMDb:s datafil (finns redan); tt601 finns där, tt9500 och tt602 inte.
+        saved = (imdb.RATINGS.ids, imdb.RATINGS.vals)
+        self.addCleanup(imdb.RATINGS.set, *saved)
+        imdb.RATINGS.set(*imdb.parse_tsv(["tconst\taverageRating\tnumVotes\n", "tt0000601\t8.2\t5000\n"]))
+        # Utan OMDb-nyckel: TMDB och IMDb, och recensionerna nyaste först, utan HTML och markdown.
+        o = await self.get("/api/tmdb/opinions/movie/601")
+        self.assertFalse(o["omdb"])
+        self.assertEqual(o["scores"], {"tmdb": 7.8, "tmdbVotes": 1200, "imdb": 8.2, "imdbVotes": 5000,
+                                       "imdbUrl": "https://www.imdb.com/title/tt601/"})
+        self.assertEqual(o["reviewCount"], 23)
+        self.assertEqual([r["author"] for r in o["reviews"]], ["Kritikern", "tyst", "oldfan"])
+        first = o["reviews"][0]
+        self.assertEqual((first["rating"], first["date"], first["text"]), (9.0, "2026-03-05", "Mästerverk. Se den på bio."))
+        self.assertEqual(first["url"], "https://www.themoviedb.org/review/a2")
+        self.assertIsNone(o["reviews"][1]["rating"])
+        self.assertEqual(o["reviews"][1]["text"], "Inget betyg här.")
+        self.assertEqual(o["reviews"][2]["text"], "Helt okej.\n\nMen för lång.")
+        self.assertEqual(self.omdb_log, [])
+        self.assertTrue(any(p == "/3/movie/601/reviews" and q.get("language") == "en-US" for p, q in self.log))
+        # Inga recensioner alls.
+        o = await self.get("/api/tmdb/opinions/movie/602")
+        self.assertEqual((o["reviews"], o["reviewCount"]), ([], 0))
+        self.assertEqual((await self.client.get("/api/tmdb/opinions/person/77")).status, 404)
+
+        self.assertIn("Ingen OMDb-nyckel", (await self.post("/api/omdb/test", status=502))["error"])
+        # Fel OMDb-nyckel: testet säger till, och sidan visar ändå TMDB.
+        await self.post("/api/settings", {"omdbKey": "fel"})
+        self.assertTrue((await self.get("/api/status"))["settings"]["omdbKey"])
+        err = await self.post("/api/omdb/test", status=502)
+        self.assertIn("godkände inte", err["error"])
+        o = await self.get("/api/tmdb/opinions/movie/601")
+        self.assertIn("godkände inte", o["scoresError"])
+        self.assertEqual((o["scores"]["tmdb"], o["scores"]["imdb"]), (7.8, 8.2))
+        self.assertEqual(len(o["reviews"]), 3)
+
+        # Rätt nyckel: Rotten Tomatoes och Metacritic till; IMDb från datafilen står kvar. Samma titel slås bara upp en gång.
+        await self.post("/api/settings", {"omdbKey": "omdbnyckel"})
+        self.assertIn("Rotten Tomatoes 88 %, Metacritic 71", (await self.post("/api/omdb/test"))["ok"])
+        self.omdb_log.clear()
+        for _ in range(2):
+            o = await self.get("/api/tmdb/opinions/movie/601")
+        self.assertTrue(o["omdb"])
+        self.assertIsNone(o["scoresError"])
+        self.assertEqual(o["scores"], {"tmdb": 7.8, "tmdbVotes": 1200, "imdb": 8.2, "imdbVotes": 5000, "rt": 88,
+                                       "metacritic": 71, "imdbUrl": "https://www.imdb.com/title/tt601/"})
+        self.assertEqual([q["i"] for q in self.omdb_log], ["tt601"])
+        # Serie som datafilen saknar: IMDb från OMDb, inga kritiker. Okänd titel hos OMDb: bara TMDB, inget fel.
+        s = (await self.get("/api/tmdb/opinions/show/950"))["scores"]
+        self.assertEqual((s["imdb"], s["imdbVotes"], s.get("rt"), s.get("metacritic")), (8.4, 12345, None, None))
+        o = await self.get("/api/tmdb/opinions/movie/602")
+        self.assertIsNone(o["scoresError"])
+        self.assertEqual(o["scores"], {"tmdb": 7.8, "tmdbVotes": 1200, "imdbUrl": "https://www.imdb.com/title/tt602/"})
+
+        # Dagens gräns nådd.
+        await self.post("/api/settings", {"omdbKey": "slut"})
+        o = await self.get("/api/tmdb/opinions/movie/603")
+        self.assertIn("1000 uppslag", o["scoresError"])
+        # Ta bort nyckeln.
+        await self.post("/api/settings", {"omdbKey": "-"})
+        self.assertFalse((await self.get("/api/status"))["settings"]["omdbKey"])
+        self.assertFalse((await self.get("/api/tmdb/opinions/movie/601"))["omdb"])
 
     async def test_wish_from_tmdb_to_radarr_and_sonarr(self):
         await self.key()

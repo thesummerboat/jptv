@@ -418,7 +418,35 @@
             } catch (e) { state.textContent = e.message; }
           } }, 'Spara och testa'),
           s.tmdbKey ? h('button', { class: 'btn ghost small', onclick: async () => { await save({ tmdbKey: '-' }, 'TMDB-nyckeln borttagen'); JP.status.tmdb = false; JP.buildNav(); state.textContent = ''; } }, 'Ta bort') : null,
-          state),
+          state));
+    }
+    // OMDb: Rotten Tomatoes och Metacritic på titelsidorna i Upptäck (IMDb och TMDB-recensioner finns utan).
+    {
+      const key = h('input', { type: 'password', value: '', placeholder: s.omdbKey ? 'Sparad – skriv en ny för att byta' : 'API-nyckel (8 tecken)', autocomplete: 'off' });
+      const state = h('span', { class: 'dim small' });
+      const remove = h('button', { class: 'btn ghost small', hidden: !s.omdbKey, onclick: async () => {
+        await save({ omdbKey: '-' }, 'OMDb-nyckeln borttagen');
+        key.placeholder = 'API-nyckel (8 tecken)';
+        remove.hidden = true;
+        state.textContent = '';
+      } }, 'Ta bort');
+      arrBox.append(
+        h('h3', { class: 'box-sub' }, 'Betyg från kritiker (OMDb, valfritt)'),
+        h('p', { class: 'dim small' }, 'Titelsidorna i Upptäck visar redan IMDb- och TMDB-betyg och recensioner från TMDB:s användare. Med en gratis OMDb-nyckel visas även Rotten Tomatoes och Metacritic. Skaffa den på omdbapi.com → API Key → FREE (1000 uppslag per dygn räcker gott; varje titel slås upp högst en gång per dygn). Nyckeln kommer med e-post och måste aktiveras via länken i mejlet.'),
+        h('div', { class: 'arr-row' }, field('OMDb – nyckel', key)),
+        h('div', { class: 'actions' },
+          h('button', { class: 'btn small', onclick: async () => {
+            if (key.value.trim()) await save({ omdbKey: key.value });
+            else if (remove.hidden) { state.textContent = 'Klistra in nyckeln först'; return; }
+            key.value = '';
+            key.placeholder = 'Sparad – skriv en ny för att byta';
+            remove.hidden = false;
+            state.textContent = 'Testar …';
+            try {
+              state.textContent = '✓ ' + (await JP.post('/api/omdb/test')).ok;
+            } catch (e) { state.textContent = e.message; }
+          } }, 'Spara och testa'),
+          remove, state),
         h('h3', { class: 'box-sub' }, 'Radarr och Sonarr'));
     }
     const placeholders = { radarr: 'http://192.168.x.x:7878', sonarr: 'http://192.168.x.x:8989', radarr4k: 'http://192.168.x.x:7879' };

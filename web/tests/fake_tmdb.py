@@ -138,6 +138,23 @@ def make_app(log: list, image_dir: str | None = None) -> web.Application:
             return web.json_response({"id": i, "tvdb_id": 373737 if i == 950 else 1000 + i, "imdb_id": f"tt9{i}"})
         return web.json_response({"id": i, "imdb_id": f"tt{i}"})
 
+    async def reviews(req):
+        auth(req)
+        i = int(req.match_info["id"])
+        if i == 602:
+            return web.json_response({"id": i, "page": 1, "results": [], "total_pages": 0, "total_results": 0})
+        return web.json_response({"id": i, "page": 1, "total_pages": 2, "total_results": 23, "results": [
+            {"author": "oldfan", "author_details": {"name": "", "username": "oldfan", "rating": 6.0},
+             "content": "Helt okej.\r\n\r\n\r\n\r\nMen <em>för</em> lång.", "created_at": "2024-01-02T10:00:00.000Z",
+             "updated_at": "2024-01-03T10:00:00.000Z", "url": "https://www.themoviedb.org/review/a1"},
+            {"author": "Kritikern", "author_details": {"name": "Kritikern", "username": "krit", "rating": 9},
+             "content": "**Mästerverk.** Se den på bio.", "created_at": "2026-03-05T10:00:00.000Z",
+             "updated_at": "2026-03-05T10:00:00.000Z", "url": "https://www.themoviedb.org/review/a2"},
+            {"author": "tyst", "author_details": {"rating": None}, "content": "<p>Inget betyg här.</p>",
+             "created_at": "2025-06-01T10:00:00.000Z", "updated_at": None, "url": "https://www.themoviedb.org/review/a3"},
+            {"author": "tom", "author_details": {}, "content": "<br/>", "created_at": "2025-01-01T10:00:00.000Z"},
+        ]})
+
     async def person(req):
         auth(req)
         return web.json_response({
@@ -171,7 +188,38 @@ def make_app(log: list, image_dir: str | None = None) -> web.Application:
     app.router.add_get("/3/movie/{id:[0-9]+}", movie_details)
     app.router.add_get("/3/tv/{id:[0-9]+}", tv_details)
     app.router.add_get("/3/{kind:movie|tv}/{id:[0-9]+}/external_ids", external)
+    app.router.add_get("/3/{kind:movie|tv}/{id:[0-9]+}/reviews", reviews)
     app.router.add_get("/3/person/{id}", person)
     app.router.add_get("/3/search/multi", search)
     app.router.add_get("/t/p/{size}/{file}", image)
+    return app
+
+
+def make_omdb(log: list) -> web.Application:
+    """Låtsas-OMDb: samma form som www.omdbapi.com (?i=tt..&apikey=..)."""
+    app = web.Application()
+
+    async def lookup(req):
+        q = req.query
+        log.append(dict(q))
+        key = q.get("apikey")
+        if key == "fel":
+            return web.json_response({"Response": "False", "Error": "Invalid API key!"}, status=401)
+        if key == "slut":
+            return web.json_response({"Response": "False", "Error": "Request limit reached!"})
+        if key != "omdbnyckel":
+            return web.json_response({"Response": "False", "Error": "No API key provided."}, status=401)
+        imdb = q.get("i") or ""
+        if imdb == "tt602":
+            return web.json_response({"Response": "False", "Error": "Incorrect IMDb ID."})
+        if imdb == "tt9500":  # serie: bara IMDb, inga kritiker
+            return web.json_response({"Response": "True", "imdbID": imdb, "imdbRating": "8.4", "imdbVotes": "12,345",
+                                      "Metascore": "N/A", "Ratings": [{"Source": "Internet Movie Database", "Value": "8.4/10"}]})
+        return web.json_response({
+            "Response": "True", "imdbID": imdb, "Title": "Film", "imdbRating": "7.9", "imdbVotes": "1,234,567",
+            "Metascore": "71", "Ratings": [{"Source": "Internet Movie Database", "Value": "7.9/10"},
+                                           {"Source": "Rotten Tomatoes", "Value": "88%"},
+                                           {"Source": "Metacritic", "Value": "71/100"}]})
+
+    app.router.add_get("/", lookup)
     return app

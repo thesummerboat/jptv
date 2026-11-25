@@ -798,8 +798,67 @@ body.scanning .scan-btn .ico, body.scanning .btn.busy .ico { animation: spin 1s 
 .d-hero-info { min-width: 0; flex: 1; max-width: 900px; }
 .d-hero-info h1 { font-size: 38px; line-height: 1.1; margin: 8px 0; }
 .d-hero-badges { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.d-rating { font-weight: 800; color: #f5c518; }
-.d-rating .dim { font-weight: 500; }
+/* Betyg i toppen av titelsidan: IMDb, Rotten Tomatoes, Metacritic och TMDB. */
+.d-scores { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 2px; min-height: 34px; }
+.d-score { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 11px 0 4px; border-radius: 8px;
+  background: rgba(14, 17, 22, 0.62); border: 1px solid rgba(255, 255, 255, 0.12); color: var(--text); text-decoration: none;
+  backdrop-filter: blur(6px); white-space: nowrap; }
+a.d-score:hover { border-color: rgba(255, 255, 255, 0.35); }
+.d-score b { font-size: 16px; font-variant-numeric: tabular-nums; }
+.d-score-tag { padding: 0 7px; line-height: 24px; border-radius: 5px; font-size: 12px; font-weight: 800; letter-spacing: 0.01em; }
+.d-score-sub { color: var(--dim); font-size: 12.5px; }
+.d-score.imdb .d-score-tag { background: #f5c518; color: #000; }
+.d-score.rt .d-score-tag { background: #fa320a; color: #fff; }
+.d-score.rt.rotten .d-score-tag { background: #0ac855; color: #08210f; }
+.d-score.mc .d-score-tag { background: #2b2b2b; color: #fff; }
+.d-score.mc b { min-width: 28px; padding: 0 5px; line-height: 24px; border-radius: 5px; text-align: center; font-size: 14px; color: #fff; }
+.d-score.mc.good b { background: #00a243; }
+.d-score.mc.mixed b { background: #ffbd3f; color: #222; }
+.d-score.mc.bad b { background: #ff0f1f; }
+.d-score.tmdb .d-score-tag { background: linear-gradient(90deg, #90cea1, #01b4e4); color: #0d253f; }
+.d-score-error { flex-basis: 100%; }
+.d-score-tag .short { display: none; }
+@media (max-width: 560px) {
+  .d-scores { gap: 6px; }
+  .d-score { padding-right: 9px; gap: 6px; }
+  .d-score-sub { display: none; }
+  .d-score-tag .full { display: none; }
+  .d-score-tag .short { display: inline; }
+}
+
+/* Vad tycker folk? Recensioner från TMDB. */
+.d-reviews { margin: 18px 0 8px; }
+.d-rev-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.d-rev-head h2 { margin: 0; font-size: 17px; }
+.d-rev-head .d-more { margin-left: 0; color: var(--dim); text-decoration: none; font-size: 13.5px; }
+.d-rev-head .d-more:hover { color: var(--accent); }
+.d-rev-sub { margin: 4px 0 12px; }
+.d-rev-loading { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.d-rev-loading .spin { width: 16px; height: 16px; border-width: 2px; }
+.d-rev-empty { margin-top: 8px; }
+.d-rev-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); gap: 12px; align-items: start; }
+.d-rev { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px 12px; min-width: 0; }
+.d-rev[hidden] { display: none; }
+.d-rev-top { display: flex; align-items: center; gap: 11px; }
+.d-rev-avatar { flex: none; width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; font-weight: 800;
+  background: hsl(var(--h, 210) 38% 32%); color: hsl(var(--h, 210) 70% 88%); }
+.d-rev-who { min-width: 0; flex: 1; }
+.d-rev-name { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.d-rev-score { flex: none; display: inline-flex; align-items: center; gap: 3px; padding: 0 8px; line-height: 26px; border-radius: 999px; font-weight: 800; font-size: 13.5px; }
+.d-rev-score svg { width: 14px; height: 14px; fill: currentColor; stroke: none; }
+.d-rev-score span { font-weight: 500; opacity: 0.75; font-size: 12px; }
+.d-rev-score.good { background: rgba(0, 162, 67, 0.18); color: #5fd38d; }
+.d-rev-score.mixed { background: rgba(242, 165, 65, 0.16); color: var(--accent); }
+.d-rev-score.bad { background: rgba(255, 70, 70, 0.15); color: #ff8a8a; }
+.d-rev-text { margin-top: 10px; line-height: 1.55; color: #d7dce3; white-space: pre-line; overflow-wrap: anywhere; hyphens: auto;
+  display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
+.d-rev.open .d-rev-text { display: block; -webkit-line-clamp: unset; }
+.d-rev-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; min-height: 22px; }
+.d-rev-foot a { text-decoration: none; margin-left: auto; }
+.d-rev-foot a:hover { color: var(--accent); }
+.d-rev-more { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; font-weight: 700; font-size: 13.5px; cursor: pointer; }
+.d-rev-more[hidden] { display: none; }
+.d-rev-all { margin-top: 12px; }
 .d-meta { color: #d7dce3; font-weight: 600; }
 .d-tagline { margin-top: 8px; font-style: italic; color: var(--dim); }
 .d-actions { margin: 18px 0 6px; flex-wrap: wrap; }
